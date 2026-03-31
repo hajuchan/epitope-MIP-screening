@@ -1,0 +1,51 @@
+name: GROMACS
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  # ── Core ──
+  - python>=3.10
+  - pip
+
+  # ── Cheminformatics ──
+  - rdkit>=2025.03         # 분자 구조 생성, fingerprint
+  - ambertools             # GAFF2 파라미터, antechamber
+
+  # ── Molecular Dynamics ──
+  # GROMACS는 시스템 패키지 또는 별도 설치 (gmx)
+  # - gromacs               # conda-forge에서 설치 가능
+
+  # ── Docking ──
+  - autogrid>=4.2.6        # AutoGrid4 grid map generation
+
+  # ── Bioinformatics ──
+  - biopython              # PDB 다운로드, 서열 분석
+
+  # ── Numerical / Visualization ──
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+
+  # ── pip 전용 패키지 ──
+  - pip:
+    - meeko                # PDBQT 변환 (AutoDock4/Vina)
+    - acpype               # GAFF2 파라미터화 (GROMACS용)
+    - gmx_MMPBSA           # MM-PBSA 결합 자유 에너지
+    - mdanalysis           # 궤적 분석
+
+# ── 추가 설치 필요 (conda 외) ──
+# AutoDock4: https://autodock.scripps.edu/download-autodock4/
+#   wget https://autodock.scripps.edu/wp-content/uploads/sites/56/2022/04/autodocksuite-4.2.6-x86_64Linux2.tar
+#   tar xf autodocksuite-4.2.6-x86_64Linux2.tar
+#   export PATH=$PATH:/path/to/autodocksuite/bin
+#
+# ADFR Suite (prepare_receptor4, prepare_ligand4):
+#   conda install -c hcc adfr-suite
+#   또는 https://ccsb.scripps.edu/adfr/downloads/
+#
+# GROMACS (시스템):
+#   sudo apt install gromacs  # Ubuntu
+#   또는 conda install -c conda-forge gromacs

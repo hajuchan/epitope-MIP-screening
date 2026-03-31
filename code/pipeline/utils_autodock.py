@@ -1,0 +1,481 @@
+"""
+AutoDock4 Utilities
+===================
+Wrappers for AutoGrid4 and AutoDock4 execution, parameter file
+generation, DLG parsing, and sequential MMSD merge operations.
+
+Reference: Rajpal et al., Sci. Rep. 2024 — MMSD protocol
+"""
+
+import logging
+import os
+import re
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+# ── AutoGrid4 ──────────────────────────────────────────────────
+
+def generate_gpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
+                 center: tuple, npts: tuple,
+                 spacing: float = 0.375,
+                 output_dir: Path = None) -> Path:
+    """
+    Generate AutoGrid4 parameter file (.gpf).
+
+    Parameters
+    ----------
+    receptor_pdbqt : receptor PDBQT file
+    ligand_pdbqt : ligand PDBQT file (to detect atom types)
+    center : (x, y, z) grid center coordinates
+    npts : (nx, ny, nz) grid points per axis
+    spacing : grid spacing in Angstroms
+    output_dir : where to write the GPF file
+    """
+    receptor_pdbqt = Path(receptor_pdbqt)
+    ligand_pdbqt = Path(ligand_pdbqt)
+    if output_dir is None:
+        output_dir = receptor_pdbqt.parent
+    output_dir = Path(output_dir)
+
+    # Extract ligand atom types from PDBQT
+    ligand_types = _extract_atom_types(ligand_pdbqt)
+    receptor_types = _extract_atom_types(receptor_pdbqt)
+
+    map_types = sorted(set(ligand_types))
+    if not map_types:
+        map_types = ["A", "C", "HD", "N", "NA", "OA", "SA"]
+
+    gpf_name = f"{receptor_pdbqt.stem}_{ligand_pdbqt.stem}"
+    gpf_path = output_dir / f"{gpf_name}.gpf"
+
+    lines = [
+        f"npts {npts[0]} {npts[1]} {npts[2]}",
+        f"gridfld {gpf_name}.maps.fld",
+        f"spacing {spacing:.3f}",
+        f"receptor_types {' '.join(sorted(set(receptor_types)))}",
+        f"ligand_types {' '.join(map_types)}",
+        f"receptor {receptor_pdbqt.name}",
+        f"gridcenter {center[0]:.3f} {center[1]:.3f} {center[2]:.3f}",
+        f"smooth 0.5",
+        f"map {gpf_name}.A.map",
+    ]
+    # Add map line for each ligand atom type
+    for atype in map_types:
+        lines.append(f"map {gpf_name}.{atype}.map")
+    lines.append(f"elecmap {gpf_name}.e.map")
+    lines.append(f"dsolvmap {gpf_name}.d.map")
+    lines.append("dielectric -0.1465")
+
+    gpf_path.write_text("\n".join(lines) + "\n")
+    logger.info(f"GPF written → {gpf_path}")
+    return gpf_path
+
+
+def run_autogrid(gpf_path: Path, timeout: int = 300) -> dict:
+    """
+    Execute AutoGrid4 with the given parameter file.
+
+    Returns dict with 'success', 'glg_path', 'stderr'.
+    """
+    from .config import AUTOGRID4_BIN
+    gpf_path = Path(gpf_path)
+    glg_path = gpf_path.with_suffix(".glg")
+
+    cmd = [AUTOGRID4_BIN, "-p", gpf_path.name, "-l", glg_path.name]
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(gpf_path.parent),
+            capture_output=True, text=True, timeout=timeout,
+        )
+        success = result.returncode == 0
+        if not success:
+            logger.warning(f"AutoGrid4 failed: {result.stderr[:500]}")
+        return {"success": success, "glg_path": glg_path,
+                "stderr": result.stderr}
+    except FileNotFoundError:
+        logger.error(f"AutoGrid4 not found: {AUTOGRID4_BIN}")
+        return {"success": False, "glg_path": None,
+                "stderr": "autogrid4 not found"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "glg_path": None,
+                "stderr": "timeout"}
+
+
+# ── AutoDock4 ──────────────────────────────────────────────────
+
+def generate_dpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
+                 map_prefix: str,
+                 ga_runs: int = 50,
+                 ga_pop_size: int = 150,
+                 ga_num_evals: int = 2500000,
+                 output_dir: Path = None) -> Path:
+    """
+    Generate AutoDock4 docking parameter file (.dpf).
+    Uses Lamarckian Genetic Algorithm (LGA).
+    """
+    receptor_pdbqt = Path(receptor_pdbqt)
+    ligand_pdbqt = Path(ligand_pdbqt)
+    if output_dir is None:
+        output_dir = receptor_pdbqt.parent
+    output_dir = Path(output_dir)
+
+    ligand_types = _extract_atom_types(ligand_pdbqt)
+    map_types = sorted(set(ligand_types))
+
+    dpf_name = f"{receptor_pdbqt.stem}_{ligand_pdbqt.stem}"
+    dpf_path = output_dir / f"{dpf_name}.dpf"
+
+    lines = [
+        f"autodock_parameter_version 4.2",
+        f"outlev 1",
+        f"intelec",
+        f"seed pid time",
+        f"ligand_types {' '.join(map_types)}",
+        f"fld {map_prefix}.maps.fld",
+    ]
+
+    for atype in map_types:
+        lines.append(f"map {map_prefix}.{atype}.map")
+    lines.append(f"elecmap {map_prefix}.e.map")
+    lines.append(f"desolvmap {map_prefix}.d.map")
+
+    lines.extend([
+        f"move {ligand_pdbqt.name}",
+        f"about 0.0 0.0 0.0",
+        f"tran0 random",
+        f"quaternion0 random",
+        f"dihe0 random",
+        f"torsdof {_count_torsions(ligand_pdbqt)}",
+        f"rmstol 2.0",
+        f"extnrg 1000.0",
+        f"e0max 0.0 10000",
+        f"ga_pop_size {ga_pop_size}",
+        f"ga_num_evals {ga_num_evals}",
+        f"ga_num_generations 27000",
+        f"ga_elitism 1",
+        f"ga_mutation_rate 0.02",
+        f"ga_crossover_rate 0.8",
+        f"ga_window_size 10",
+        f"ga_cauchy_alpha 0.0",
+        f"ga_cauchy_beta 1.0",
+        f"set_ga",
+        f"sw_max_its 300",
+        f"sw_max_succ 4",
+        f"sw_max_fail 4",
+        f"sw_rho 1.0",
+        f"sw_lb_rho 0.01",
+        f"ls_search_freq 0.06",
+        f"set_psw1",
+        f"unbound_model bound",
+        f"ga_run {ga_runs}",
+        f"analysis",
+    ])
+
+    dpf_path.write_text("\n".join(lines) + "\n")
+    logger.info(f"DPF written → {dpf_path}")
+    return dpf_path
+
+
+def run_autodock(dpf_path: Path, timeout: int = 3600) -> dict:
+    """
+    Execute AutoDock4 with the given parameter file.
+
+    Returns dict with 'success', 'dlg_path', 'stderr'.
+    """
+    from .config import AUTODOCK4_BIN
+    dpf_path = Path(dpf_path)
+    dlg_path = dpf_path.with_suffix(".dlg")
+
+    cmd = [AUTODOCK4_BIN, "-s", "-p", dpf_path.name, "-l", dlg_path.name]
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(dpf_path.parent),
+            capture_output=True, text=True, timeout=timeout,
+        )
+        success = result.returncode == 0
+        if not success:
+            logger.warning(f"AutoDock4 failed: {result.stderr[:500]}")
+        return {"success": success, "dlg_path": dlg_path,
+                "stderr": result.stderr}
+    except FileNotFoundError:
+        logger.error(f"AutoDock4 not found: {AUTODOCK4_BIN}")
+        return {"success": False, "dlg_path": None,
+                "stderr": "autodock4 not found"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "dlg_path": None,
+                "stderr": "timeout"}
+
+
+# ── DLG Parsing ────────────────────────────────────────────────
+
+def parse_dlg(dlg_path: Path) -> list:
+    """
+    Parse AutoDock4 DLG (docking log) file.
+
+    Returns list of clusters, each dict with:
+      - rank, binding_energy, cluster_size, rmsd_from_ref
+      - mean_binding_energy, best_binding_energy
+      - coords (PDBQT lines of best pose)
+    """
+    dlg_path = Path(dlg_path)
+    if not dlg_path.exists():
+        logger.error(f"DLG not found: {dlg_path}")
+        return []
+
+    text = dlg_path.read_text()
+    clusters = []
+
+    # Parse CLUSTERING HISTOGRAM
+    cluster_pattern = re.compile(
+        r"RANKING\s+(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(\d+)"
+    )
+
+    # Parse ranked results table
+    # Format: Rank | Sub-Rank | Run | Binding Energy | Cluster RMSD | ...
+    result_block = False
+    current_results = []
+
+    for line in text.split("\n"):
+        # Look for DOCKED keyword to extract poses
+        if "CLUSTERING HISTOGRAM" in line:
+            result_block = True
+            continue
+
+        m = cluster_pattern.search(line)
+        if m:
+            clusters.append({
+                "rank": int(m.group(1)),
+                "binding_energy": float(m.group(2)),
+                "rmsd_from_ref": float(m.group(3)),
+                "cluster_size": int(m.group(4)),
+            })
+
+    # If no clustering info found, parse individual runs
+    if not clusters:
+        clusters = _parse_dlg_individual_runs(text)
+
+    # Extract best pose coordinates
+    best_pose_lines = _extract_best_pose(text)
+    if clusters and best_pose_lines:
+        clusters[0]["pose_pdbqt_lines"] = best_pose_lines
+
+    logger.info(f"Parsed {len(clusters)} clusters from {dlg_path.name}")
+    return clusters
+
+
+def get_best_energy(dlg_path: Path) -> float:
+    """Return the best (most negative) binding energy from DLG."""
+    clusters = parse_dlg(dlg_path)
+    if not clusters:
+        return 0.0
+    return min(c["binding_energy"] for c in clusters)
+
+
+def get_mean_best_cluster_energy(dlg_path: Path) -> float:
+    """
+    Return mean binding energy of the best cluster (rank 1).
+    This is the metric used by Rajpal et al. 2024 for comparison.
+    """
+    clusters = parse_dlg(dlg_path)
+    if not clusters:
+        return 0.0
+    # Rank 1 cluster
+    best = [c for c in clusters if c.get("rank") == 1]
+    if best:
+        return best[0]["binding_energy"]
+    return clusters[0]["binding_energy"]
+
+
+def extract_best_pose_pdbqt(dlg_path: Path, output_path: Path) -> Path:
+    """Extract best-energy docked pose from DLG as a PDBQT file."""
+    text = Path(dlg_path).read_text()
+    pose_lines = _extract_best_pose(text)
+    if not pose_lines:
+        logger.warning(f"No docked pose found in {dlg_path}")
+        return None
+    Path(output_path).write_text("\n".join(pose_lines) + "\n")
+    return Path(output_path)
+
+
+# ── MMSD Merge Operations ──────────────────────────────────────
+
+def merge_ligand_into_receptor(receptor_pdb: Path,
+                                ligand_pdbqt: Path,
+                                output_pdb: Path) -> Path:
+    """
+    Merge a docked ligand into the receptor PDB for sequential MMSD.
+
+    The merged file becomes the new "receptor" for the next docking round.
+    Ligand coordinates are extracted from PDBQT and appended as HETATM.
+    """
+    receptor_pdb = Path(receptor_pdb)
+    ligand_pdbqt = Path(ligand_pdbqt)
+    output_pdb = Path(output_pdb)
+
+    receptor_lines = []
+    for line in receptor_pdb.read_text().split("\n"):
+        if line.startswith(("ATOM", "HETATM", "TER")):
+            receptor_lines.append(line)
+
+    # Extract ligand coordinates from PDBQT
+    ligand_lines = []
+    for line in ligand_pdbqt.read_text().split("\n"):
+        if line.startswith(("ATOM", "HETATM")):
+            # Convert PDBQT to PDB format (strip last 2 columns)
+            pdb_line = line[:66].ljust(66)
+            # Mark as HETATM
+            if pdb_line.startswith("ATOM"):
+                pdb_line = "HETATM" + pdb_line[6:]
+            ligand_lines.append(pdb_line)
+
+    all_lines = receptor_lines + ["TER"] + ligand_lines + ["END"]
+    output_pdb.write_text("\n".join(all_lines) + "\n")
+    logger.info(f"Merged receptor+ligand → {output_pdb}")
+    return output_pdb
+
+
+# ── Full Docking Workflow ──────────────────────────────────────
+
+def dock_single(receptor_pdbqt: Path, ligand_pdbqt: Path,
+                center: tuple, npts: tuple,
+                work_dir: Path,
+                ga_runs: int = 50) -> dict:
+    """
+    Complete single docking: AutoGrid → AutoDock → parse results.
+
+    Returns dict with:
+      - binding_energy (best cluster)
+      - mean_cluster_energy (rank-1 cluster mean)
+      - n_clusters
+      - dlg_path
+      - best_pose_path (PDBQT)
+    """
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy input files to work_dir
+    import shutil
+    rec_local = work_dir / receptor_pdbqt.name
+    lig_local = work_dir / ligand_pdbqt.name
+    if not rec_local.exists():
+        shutil.copy2(str(receptor_pdbqt), str(rec_local))
+    if not lig_local.exists():
+        shutil.copy2(str(ligand_pdbqt), str(lig_local))
+
+    # 1. AutoGrid
+    gpf = generate_gpf(rec_local, lig_local, center, npts,
+                        output_dir=work_dir)
+    grid_result = run_autogrid(gpf)
+    if not grid_result["success"]:
+        return {"binding_energy": 0.0, "error": grid_result["stderr"]}
+
+    # 2. AutoDock
+    map_prefix = f"{rec_local.stem}_{lig_local.stem}"
+    from .config import AUTODOCK4_GA_POP_SIZE, AUTODOCK4_GA_NUM_EVALS
+    dpf = generate_dpf(
+        rec_local, lig_local, map_prefix,
+        ga_runs=ga_runs,
+        ga_pop_size=AUTODOCK4_GA_POP_SIZE,
+        ga_num_evals=AUTODOCK4_GA_NUM_EVALS,
+        output_dir=work_dir,
+    )
+    dock_result = run_autodock(dpf)
+    if not dock_result["success"]:
+        return {"binding_energy": 0.0, "error": dock_result["stderr"]}
+
+    # 3. Parse results
+    dlg = dock_result["dlg_path"]
+    clusters = parse_dlg(dlg)
+    best_e = get_best_energy(dlg)
+    mean_e = get_mean_best_cluster_energy(dlg)
+
+    # 4. Extract best pose
+    best_pose = work_dir / f"{lig_local.stem}_best.pdbqt"
+    extract_best_pose_pdbqt(dlg, best_pose)
+
+    return {
+        "binding_energy": best_e,
+        "mean_cluster_energy": mean_e,
+        "n_clusters": len(clusters),
+        "dlg_path": str(dlg),
+        "best_pose_path": str(best_pose) if best_pose.exists() else None,
+        "clusters": clusters[:5],  # top-5 clusters for reporting
+    }
+
+
+# ── Internal Helpers ───────────────────────────────────────────
+
+def _extract_atom_types(pdbqt_path: Path) -> list:
+    """Extract unique atom types from a PDBQT file."""
+    types = []
+    for line in Path(pdbqt_path).read_text().split("\n"):
+        if line.startswith(("ATOM", "HETATM")) and len(line) >= 78:
+            atype = line[77:79].strip()
+            if atype:
+                types.append(atype)
+    return types if types else ["A", "C", "HD", "N", "OA"]
+
+
+def _count_torsions(pdbqt_path: Path) -> int:
+    """Count active torsions from PDBQT TORSDOF line."""
+    for line in Path(pdbqt_path).read_text().split("\n"):
+        if line.startswith("TORSDOF"):
+            parts = line.split()
+            if len(parts) >= 2:
+                return int(parts[1])
+    return 0
+
+
+def _parse_dlg_individual_runs(text: str) -> list:
+    """Fallback parser: extract binding energies from individual runs."""
+    results = []
+    pattern = re.compile(
+        r"DOCKED.*?Estimated Free Energy of Binding\s*=\s*(-?\d+\.\d+)",
+        re.DOTALL,
+    )
+    for i, m in enumerate(pattern.finditer(text)):
+        results.append({
+            "rank": i + 1,
+            "binding_energy": float(m.group(1)),
+            "cluster_size": 1,
+        })
+    # Sort by energy
+    results.sort(key=lambda x: x["binding_energy"])
+    # Re-rank
+    for i, r in enumerate(results):
+        r["rank"] = i + 1
+    return results
+
+
+def _extract_best_pose(text: str) -> list:
+    """Extract the coordinates of the lowest-energy docked pose."""
+    best_energy = float("inf")
+    best_lines = []
+    current_energy = None
+    current_lines = []
+    in_model = False
+
+    for line in text.split("\n"):
+        if "DOCKED: MODEL" in line:
+            in_model = True
+            current_lines = []
+            current_energy = None
+        elif "DOCKED: ENDMDL" in line:
+            in_model = False
+            if current_energy is not None and current_energy < best_energy:
+                best_energy = current_energy
+                best_lines = current_lines[:]
+        elif in_model:
+            stripped = line.replace("DOCKED: ", "", 1)
+            if "Estimated Free Energy of Binding" in line:
+                m = re.search(r"=\s*(-?\d+\.\d+)", line)
+                if m:
+                    current_energy = float(m.group(1))
+            if stripped.startswith(("ATOM", "HETATM")):
+                current_lines.append(stripped)
+
+    return best_lines
