@@ -43,6 +43,8 @@ def parse_args():
                         help="Only check existing results, don't recompute")
     parser.add_argument("--quick", action="store_true",
                         help="Quick validation (fewer GA runs)")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Force re-run all steps, ignoring existing results")
     return parser.parse_args()
 
 
@@ -382,22 +384,58 @@ def main():
         step_check_results(VALIDATION_DIR)
         return
 
+    resume = not args.fresh  # resume is default
+
+    # ── Step result files for resume detection ──
+    _STEP_FILES = {
+        "benchmark": VALIDATION_DIR / "step1_benchmark.json",
+        "smd":       VALIDATION_DIR / "phase2_smd_results.json",
+        "mmsd":      VALIDATION_DIR / "phase3_mmsd_results.json",
+        "sullivan":  VALIDATION_DIR / "sullivan" / "sullivan_validation.json",
+    }
+
+    def _step_done(name):
+        return resume and _STEP_FILES[name].exists()
+
+    def _load_step(path):
+        with open(path) as f:
+            return json.load(f)
+
     # ── Rajpal 2024 Validation ──
     if not args.mmsd_only:
         # Step 1: Prepare benchmark
-        benchmark = step_prepare_benchmark(VALIDATION_DIR)
+        if _step_done("benchmark"):
+            benchmark = _load_step(_STEP_FILES["benchmark"])
+            logger.info("Step 1: LOADED from existing results")
+        else:
+            benchmark = step_prepare_benchmark(VALIDATION_DIR)
 
         # Step 2: SMD
-        smd_results = step_run_smd(benchmark, VALIDATION_DIR, quick=args.quick)
+        if _step_done("smd"):
+            smd_data = _load_step(_STEP_FILES["smd"])
+            # Extract per-monomer BEs for MMSD input
+            smd_results = smd_data.get("be_matrix", {}).get(
+                list(smd_data.get("be_matrix", {}).keys())[0], {}
+            ) if smd_data.get("be_matrix") else {}
+            logger.info("Step 2 (SMD): LOADED from existing results")
+        else:
+            smd_results = step_run_smd(benchmark, VALIDATION_DIR,
+                                        quick=args.quick)
 
         # Step 3: MMSD (unless smd-only)
         if not args.smd_only:
-            step_run_mmsd(benchmark, smd_results, VALIDATION_DIR,
-                          quick=args.quick)
+            if _step_done("mmsd"):
+                logger.info("Step 3 (MMSD): LOADED from existing results")
+            else:
+                step_run_mmsd(benchmark, smd_results, VALIDATION_DIR,
+                              quick=args.quick)
 
     # ── Sullivan 2019 Validation ──
     if not args.smd_only and not args.mmsd_only:
-        step_run_sullivan(VALIDATION_DIR, quick=args.quick)
+        if _step_done("sullivan"):
+            logger.info("Step 5 (Sullivan): LOADED from existing results")
+        else:
+            step_run_sullivan(VALIDATION_DIR, quick=args.quick)
 
     # ── Check all results ──
     step_check_results(VALIDATION_DIR)

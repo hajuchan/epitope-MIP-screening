@@ -52,16 +52,26 @@ def parse_args():
         help="Generate HTML report from existing results"
     )
     parser.add_argument(
-        "--skip-stability-md", action="store_true",
-        help="Skip Phase 1 epitope MD stability check"
+        "--skip-md", action="store_true",
+        help="Skip all intermediate MD (Phase 1 stability + Phase 2 contact). "
+             "NOT recommended — use only for debugging docking logic."
     )
     parser.add_argument(
         "--quick-md", action="store_true",
-        help="Run 50ns instead of 200ns MD in Phase 4"
+        help="Run 20ns instead of 50ns MD in Phase 4 (debugging only)"
     )
     parser.add_argument(
         "--no-cross-reactivity", action="store_true",
         help="Skip cross-reactivity test in Phase 4"
+    )
+    parser.add_argument(
+        "--resume", action="store_true", default=True,
+        help="Resume from last completed phase (DEFAULT: on). "
+             "Skips phases whose result files already exist."
+    )
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="Force re-run all phases from scratch, ignoring existing results."
     )
     return parser.parse_args()
 
@@ -71,6 +81,36 @@ def _phase_dir(root_dir: str, phase_key: str) -> str:
     p = Path(root_dir) / phase_key
     p.mkdir(parents=True, exist_ok=True)
     return str(p)
+
+
+# Result file that marks each phase as completed
+_PHASE_RESULT_FILES = {
+    1: "phase1/phase1_results.json",
+    2: "phase2/phase2_smd_results.json",
+    3: "phase3/phase3_mmsd_results.json",
+    4: "phase4/phase4_md_results.json",
+    5: "phase5/phase5_recipes.json",
+}
+
+
+def _check_phase_completed(phase_num: int, output_dir: str) -> bool:
+    """Check if a phase's result file exists (= already completed)."""
+    result_file = _PHASE_RESULT_FILES.get(phase_num)
+    if result_file is None:
+        return False
+    return (Path(output_dir) / result_file).exists()
+
+
+def _load_phase_result(phase_num: int, output_dir: str) -> dict:
+    """Load existing phase result from disk."""
+    result_file = _PHASE_RESULT_FILES.get(phase_num)
+    if result_file is None:
+        return None
+    path = Path(output_dir) / result_file
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
 
 
 def run_phase(phase_num: int, target_names: list, output_dir: str,
@@ -83,7 +123,7 @@ def run_phase(phase_num: int, target_names: list, output_dir: str,
         result = run_phase1(
             target_names=target_names,
             output_dir=_phase_dir(output_dir, "phase1"),
-            skip_stability_md=args.skip_stability_md,
+            skip_stability_md=args.skip_md,
         )
 
     elif phase_num == 2:
@@ -218,7 +258,27 @@ def main():
     timings = {}
     prev_results = {}
 
+    # --resume (default) / --fresh
+    if args.fresh:
+        args.resume = False
+        logger.info("Fresh run: ignoring existing results")
+
+    if args.resume:
+        for phase_num in phases:
+            if _check_phase_completed(phase_num, out_dir):
+                loaded = _load_phase_result(phase_num, out_dir)
+                prev_results[f"phase{phase_num}"] = loaded
+                logger.info(f"Phase {phase_num}: LOADED from existing results "
+                            f"({_PHASE_RESULT_FILES[phase_num]})")
+            else:
+                break  # run this phase and all subsequent
+
     for phase_num in phases:
+        # Skip if already loaded via --resume
+        if f"phase{phase_num}" in prev_results:
+            timings[f"phase{phase_num}"] = 0.0
+            continue
+
         logger.info(f"\n{'='*20} PHASE {phase_num} {'='*20}")
         phase_output = run_phase(
             phase_num, target_names, out_dir, prev_results, args

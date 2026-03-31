@@ -86,7 +86,16 @@ def run_phase2(phase1_results: dict = None,
         center = tuple(t_result["grid_center"])
         npts = tuple(t_result["grid_npts"])
 
-        logger.info(f"\n--- SMD for {target} ---")
+        # Ensemble docking: collect all receptor PDBQTs (original + MD conformers)
+        ensemble_pdbqts = [receptor_pdbqt]
+        if "ensemble_receptor_pdbqts" in t_result:
+            ensemble_pdbqts.extend(
+                Path(p) for p in t_result["ensemble_receptor_pdbqts"]
+                if Path(p).exists()
+            )
+
+        logger.info(f"\n--- SMD for {target} "
+                    f"({len(ensemble_pdbqts)} receptor conformer(s)) ---")
 
         # Sullivan 2019: predict binding sites for focused docking
         from .config import USE_BINDING_SITE_PREDICTION, BINDING_SITE_TOOL
@@ -100,13 +109,30 @@ def run_phase2(phase1_results: dict = None,
             )
             logger.info(f"  [{target}] {len(binding_sites)} binding sites identified")
 
-        target_results = _run_smd_for_target(
-            target, receptor_pdbqt, monomer_pdbqts,
-            center, npts, output_dir,
-            ga_runs=AUTODOCK4_GA_RUNS,
-            n_workers=N_WORKERS,
-            binding_sites=binding_sites,
-        )
+        # Dock to each conformer, take best BE per monomer
+        all_conf_results = {}
+        for ci, conf_pdbqt in enumerate(ensemble_pdbqts):
+            conf_label = "crystal" if ci == 0 else f"md_conf{ci}"
+            if len(ensemble_pdbqts) > 1:
+                logger.info(f"  [{target}] Ensemble conformer {ci+1}/"
+                            f"{len(ensemble_pdbqts)} ({conf_label})")
+
+            conf_results = _run_smd_for_target(
+                target, conf_pdbqt, monomer_pdbqts,
+                center, npts, output_dir / f"smd_{target}_{conf_label}",
+                ga_runs=AUTODOCK4_GA_RUNS,
+                n_workers=N_WORKERS,
+                binding_sites=binding_sites,
+            )
+
+            # Merge: keep best BE per monomer across conformers
+            for m, r in conf_results.items():
+                prev = all_conf_results.get(m)
+                if prev is None or r.get("mean_cluster_energy", 0) < \
+                        prev.get("mean_cluster_energy", 0):
+                    all_conf_results[m] = r
+
+        target_results = all_conf_results
 
         # Sullivan 2019: analyze backbone vs sidechain H-bonds
         from .config import BACKBONE_HBOND_PENALTY
@@ -224,23 +250,160 @@ def _run_contact_md(phase1_results: dict, target_names: list,
     """
     Sehit 2024: run short MD per (target, monomer) pair and compute
     contact frequency. Monomers with more epitope contacts rank higher.
+
+    Each simulation: epitope + 1 monomer in TIP3P + 0.15M NaCl, 10ns.
+    Contact frequency = fraction of frames where monomer is within
+    3.5A of any epitope residue.
     """
+    from .utils_gromacs import (
+        setup_protein_topology, setup_simulation_box,
+        run_energy_minimization, run_nvt_equilibration,
+        run_npt_equilibration, run_production_md,
+        parameterize_monomer, _gmx,
+    )
+    from .utils_structure import smiles_to_mol2
+    from .utils_analysis import compute_contact_frequency
+    from .config import ALL_MONOMERS, MD_TEMPERATURE_K, MD_GPU_ID
+
     contact_scores = {}
     for target in target_names:
         p1 = phase1_results.get(target, {})
         if "error" in p1:
             continue
         epitope_pdb = Path(p1["epitope_pdb"])
-        # Placeholder: full implementation requires GROMACS setup per pair
-        # For now, log that this would be run
+        target_scores = {}
+
         logger.info(f"  [{target}] Contact MD: {len(monomer_pdbqts)} monomers "
-                    f"× {time_ns}ns each (would take ~{len(monomer_pdbqts) * time_ns / 60:.0f}h)")
-        contact_scores[target] = {
-            "status": "pending",
-            "n_monomers": len(monomer_pdbqts),
-            "time_ns": time_ns,
-        }
+                    f"x {time_ns}ns each")
+
+        for monomer_name in monomer_pdbqts:
+            m_info = ALL_MONOMERS.get(monomer_name)
+            if m_info is None:
+                continue
+
+            md_dir = output_dir / f"contact_md_{target}" / monomer_name
+            md_dir.mkdir(parents=True, exist_ok=True)
+
+            # Check if already done (resume support)
+            result_file = md_dir / "contact_result.json"
+            if result_file.exists():
+                import json as _json
+                with open(result_file) as f:
+                    target_scores[monomer_name] = _json.load(f)
+                logger.info(f"    {monomer_name}: loaded existing result")
+                continue
+
+            try:
+                # 1. Parameterize monomer
+                param_dir = md_dir / "params"
+                mol2 = smiles_to_mol2(m_info["smiles"], monomer_name, param_dir)
+                param = parameterize_monomer(mol2, monomer_name, param_dir)
+
+                if not param.get("itp"):
+                    logger.warning(f"    {monomer_name}: parameterization failed")
+                    target_scores[monomer_name] = {"error": "param failed"}
+                    continue
+
+                # 2. Setup GROMACS system (epitope + monomer)
+                setup_protein_topology(epitope_pdb, md_dir)
+                _include_monomer_in_topology(
+                    md_dir, param["itp"], param["gro"], monomer_name)
+                setup_simulation_box(md_dir / "complex.gro", md_dir)
+
+                # 3. Quick MD (EM → NVT → short production)
+                run_energy_minimization(md_dir)
+                run_nvt_equilibration(md_dir, time_ps=50.0,
+                                       temperature=MD_TEMPERATURE_K)
+                run_npt_equilibration(md_dir, time_ps=50.0,
+                                       temperature=MD_TEMPERATURE_K)
+                run_production_md(md_dir, time_ns=time_ns,
+                                   temperature=MD_TEMPERATURE_K,
+                                   gpu_id=MD_GPU_ID)
+
+                # 4. Compute contact frequency
+                xtc = md_dir / "md.xtc"
+                gro = md_dir / "npt.gro"
+                if xtc.exists() and gro.exists():
+                    contacts = compute_contact_frequency(xtc, gro)
+                    target_scores[monomer_name] = contacts
+                    logger.info(f"    {monomer_name}: contact_score="
+                                f"{contacts.get('total_contact_score', 'N/A')}")
+                else:
+                    target_scores[monomer_name] = {"error": "MD output missing"}
+
+                # Save individual result for resume
+                import json as _json
+                with open(result_file, "w") as f:
+                    _json.dump(target_scores[monomer_name], f, indent=2)
+
+            except Exception as e:
+                logger.warning(f"    {monomer_name} contact MD failed: {e}")
+                target_scores[monomer_name] = {"error": str(e)}
+
+        contact_scores[target] = target_scores
+
     return contact_scores
+
+
+def _include_monomer_in_topology(work_dir: Path, itp_path: str,
+                                  gro_path: str, name: str):
+    """
+    Merge monomer into GROMACS system:
+    1. Add #include monomer.itp to topol.top
+    2. Merge monomer.gro coordinates into protein.gro
+    3. Add molecule entry to [ molecules ] section
+    """
+    import shutil
+    work_dir = Path(work_dir)
+
+    # Copy ITP to work directory
+    itp_src = Path(itp_path)
+    itp_dst = work_dir / f"{name}.itp"
+    shutil.copy2(str(itp_src), str(itp_dst))
+
+    # Edit topol.top: add #include before [ molecules ]
+    top_path = work_dir / "topol.top"
+    if top_path.exists():
+        content = top_path.read_text()
+        include_line = f'#include "{name}.itp"\n'
+        if include_line not in content:
+            # Insert before [ molecules ] section
+            if "[ molecules ]" in content:
+                content = content.replace(
+                    "[ molecules ]",
+                    f'{include_line}\n[ molecules ]'
+                )
+            else:
+                content += f"\n{include_line}\n"
+            # Add molecule to [ molecules ] section
+            content += f"{name}     1\n"
+            top_path.write_text(content)
+
+    # Merge coordinates: append monomer GRO to protein GRO
+    prot_gro = work_dir / "protein.gro"
+    mon_gro = Path(gro_path)
+    complex_gro = work_dir / "complex.gro"
+
+    if prot_gro.exists() and mon_gro.exists():
+        prot_lines = prot_gro.read_text().strip().split("\n")
+        mon_lines = mon_gro.read_text().strip().split("\n")
+
+        # GRO format: line 1=title, line 2=natoms, lines 3..N=coords, last=box
+        prot_natoms = int(prot_lines[1].strip())
+        mon_natoms = int(mon_lines[1].strip())
+        total = prot_natoms + mon_natoms
+
+        out_lines = [prot_lines[0]]  # title
+        out_lines.append(f" {total}")
+        out_lines.extend(prot_lines[2:2+prot_natoms])  # protein coords
+        out_lines.extend(mon_lines[2:2+mon_natoms])     # monomer coords
+        out_lines.append(prot_lines[-1])                 # box vector
+
+        complex_gro.write_text("\n".join(out_lines) + "\n")
+    else:
+        # If can't merge, just use protein
+        if prot_gro.exists():
+            shutil.copy2(str(prot_gro), str(complex_gro))
 
 
 def _run_smd_for_target(target: str, receptor_pdbqt: Path,

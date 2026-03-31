@@ -96,6 +96,13 @@ def run_sullivan_validation(output_dir: Path = None,
     checks = validate_sullivan_results(computed_be)
     results["checks"] = checks
 
+    # Compute overall status
+    results["status"] = (
+        "FAIL" if any(c["status"] == "FAIL" for c in checks) else
+        "WARN" if any(c["status"] == "WARN" for c in checks) else
+        "PASS"
+    )
+
     # Save
     with open(output_dir / "sullivan_validation.json", "w") as f:
         json.dump(results, f, indent=2, default=str)

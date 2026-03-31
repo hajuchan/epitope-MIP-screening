@@ -1,7 +1,7 @@
 """
 Phase 4: MD Validation with GROMACS + MM-PBSA
 ==============================================
-Run 200ns all-atom MD simulations for top polymer compositions,
+Run 50ns all-atom MD simulations for top polymer compositions,
 compute binding free energies via MM-PBSA, and evaluate
 cross-reactivity between CD63/CD81/CD9.
 
@@ -32,7 +32,7 @@ def run_phase4(phase1_results: dict = None,
     phase1_results : Phase 1 output (epitope structures)
     phase3_results : Phase 3 output (top PCs per target)
     target_names : filter to specific targets
-    quick : if True, run 50ns instead of 200ns
+    quick : if True, run 20ns instead of 50ns (debugging)
     cross_reactivity : if True, test CD63 PCs against CD81/CD9
 
     Returns
@@ -154,7 +154,7 @@ def _run_md_for_pc(target: str, pc_id: str,
             epitope_pdb, monomer_itps,
             work_dir / "md",
             time_ns=time_ns,
-            quick=(time_ns <= 50),
+            quick=(time_ns <= 20),
         )
         result.update(md_result)
 

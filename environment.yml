@@ -2,6 +2,7 @@ name: GROMACS
 channels:
   - conda-forge
   - bioconda
+  - hcc
   - defaults
 
 dependencies:
@@ -10,18 +11,21 @@ dependencies:
   - pip
 
   # ── Cheminformatics ──
-  - rdkit>=2025.03         # 분자 구조 생성, fingerprint
-  - ambertools             # GAFF2 파라미터, antechamber
+  - rdkit>=2025.03         # molecular structure generation, fingerprints
+  - ambertools             # GAFF2 parameters, antechamber
+  - openbabel              # PDBQT conversion, format conversion
 
   # ── Molecular Dynamics ──
-  # GROMACS는 시스템 패키지 또는 별도 설치 (gmx)
-  # - gromacs               # conda-forge에서 설치 가능
+  # GROMACS: system package or conda install
+  # - gromacs               # conda install -c conda-forge gromacs
 
-  # ── Docking ──
-  - autogrid>=4.2.6        # AutoGrid4 grid map generation
+  # ── Docking (CPU) ──
+  - autodock>=4.2.6        # AutoDock4 LGA docking (bioconda)
+  - autogrid>=4.2.6        # AutoGrid4 grid map generation (bioconda)
+  - adfr-suite             # prepare_receptor4, prepare_ligand4 (hcc)
 
   # ── Bioinformatics ──
-  - biopython              # PDB 다운로드, 서열 분석
+  - biopython              # PDB download, sequence analysis
 
   # ── Numerical / Visualization ──
   - numpy
@@ -29,23 +33,59 @@ dependencies:
   - pandas
   - matplotlib
 
-  # ── pip 전용 패키지 ──
+  # ── pip packages ──
   - pip:
-    - meeko                # PDBQT 변환 (AutoDock4/Vina)
-    - acpype               # GAFF2 파라미터화 (GROMACS용)
-    - gmx_MMPBSA           # MM-PBSA 결합 자유 에너지
-    - mdanalysis           # 궤적 분석
+    # Docking
+    - meeko                # PDBQT conversion (AutoDock4 compatible)
+    - gemmi                # meeko dependency (crystal structure handling)
 
-# ── 추가 설치 필요 (conda 외) ──
-# AutoDock4: https://autodock.scripps.edu/download-autodock4/
-#   wget https://autodock.scripps.edu/wp-content/uploads/sites/56/2022/04/autodocksuite-4.2.6-x86_64Linux2.tar
-#   tar xf autodocksuite-4.2.6-x86_64Linux2.tar
-#   export PATH=$PATH:/path/to/autodocksuite/bin
+    # MD parameterization & analysis
+    - acpype               # GAFF2 parameterization (GROMACS topology)
+    - gmx_MMPBSA           # MM-PBSA/GBSA binding free energy
+    - mdanalysis           # trajectory analysis, contact frequency
+
+    # Structure preparation
+    - propka               # pH 7.4 protonation state (PROPKA 3.5)
+
+# ══════════════════════════════════════════════════════════════
+# Installation
+# ══════════════════════════════════════════════════════════════
 #
-# ADFR Suite (prepare_receptor4, prepare_ligand4):
-#   conda install -c hcc adfr-suite
-#   또는 https://ccsb.scripps.edu/adfr/downloads/
+# 1. Create environment:
+#    conda env create -f environment.yml
+#    conda activate GROMACS
 #
-# GROMACS (시스템):
-#   sudo apt install gromacs  # Ubuntu
-#   또는 conda install -c conda-forge gromacs
+# 2. Install AutoDock-GPU (recommended, requires CUDA):
+#    conda install -c hcc autodock-gpu
+#    # or build from source: https://github.com/ccsb-scripps/AutoDock-GPU
+#    # Same AD4 force field, ~100-350x faster on GPU
+#    # Pipeline auto-detects and falls back to AD4 CPU if unavailable
+#
+# 3. GROMACS (if not system-installed):
+#    sudo apt install gromacs   # Ubuntu
+#    conda install -c conda-forge gromacs
+#
+# 4. Verify installation:
+#    autodock4 --version                       # AutoDock4 CPU
+#    autogrid4 --version                       # AutoGrid4
+#    autodock_gpu_128wi --version               # AutoDock-GPU (optional)
+#    gmx --version                             # GROMACS
+#    python -c "import meeko; print('OK')"     # meeko
+#    python -c "import propka; print('OK')"    # PROPKA
+#    python -c "import MDAnalysis; print('OK')"# MDAnalysis
+#
+# ══════════════════════════════════════════════════════════════
+# Notes
+# ══════════════════════════════════════════════════════════════
+#
+# CUDA: AutoDock-GPU and GROMACS GPU require CUDA drivers.
+#   nvidia-smi    # verify CUDA availability
+#
+# ADFR Suite: installs Python 2.7 internally for prepare_receptor4.py.
+#   This does NOT affect the main Python 3 environment.
+#   The pipeline calls prepare_receptor4.py via python2.7 explicitly.
+#
+# Si atoms: Silane monomers contain Si which is not in AutoDock4's
+#   default force field. The pipeline automatically generates
+#   AD4_parameters_Si.dat (UFF-based) and handles Si→S PDBQT proxy.
+#   AutoDock-GPU uses --derivtype Si=S with the same parameter file.

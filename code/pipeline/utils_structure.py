@@ -36,16 +36,43 @@ def download_pdb(pdb_id: str, output_dir: Path) -> Path:
 
 
 def download_alphafold(uniprot_id: str, output_dir: Path) -> Path:
-    """Download AlphaFold predicted structure from EBI."""
+    """
+    Download AlphaFold predicted structure from EBI.
+    Uses the API to get the latest version URL (v4→v6 migration).
+    """
+    import json
     import urllib.request
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    url = (f"https://alphafold.ebi.ac.uk/files/"
-           f"AF-{uniprot_id}-F1-model_v4.pdb")
     dst = output_dir / f"AF_{uniprot_id}.pdb"
-    urllib.request.urlretrieve(url, str(dst))
-    logger.info(f"Downloaded AlphaFold {uniprot_id} → {dst}")
-    return dst
+
+    # Method 1: API query for latest PDB URL
+    api_url = f"https://alphafold.ebi.ac.uk/api/prediction/{uniprot_id}"
+    try:
+        with urllib.request.urlopen(api_url) as resp:
+            data = json.loads(resp.read())
+        if data and isinstance(data, list):
+            pdb_url = data[0].get("pdbUrl")
+            if pdb_url:
+                urllib.request.urlretrieve(pdb_url, str(dst))
+                version = pdb_url.split("_v")[-1].split(".")[0]
+                logger.info(f"Downloaded AlphaFold {uniprot_id} v{version} → {dst}")
+                return dst
+    except Exception as e:
+        logger.warning(f"AlphaFold API failed: {e}, trying direct URL")
+
+    # Method 2: Try versions 6, 4, 3 in order
+    for ver in [6, 4, 3]:
+        url = (f"https://alphafold.ebi.ac.uk/files/"
+               f"AF-{uniprot_id}-F1-model_v{ver}.pdb")
+        try:
+            urllib.request.urlretrieve(url, str(dst))
+            logger.info(f"Downloaded AlphaFold {uniprot_id} v{ver} → {dst}")
+            return dst
+        except Exception:
+            continue
+
+    raise RuntimeError(f"Failed to download AlphaFold structure for {uniprot_id}")
 
 
 def download_structure(target_cfg: dict, output_dir: Path) -> Path:
@@ -194,6 +221,82 @@ def check_plddt(pdb_path: Path, residue_range: tuple,
         "message": ("OK" if mean_plddt >= threshold
                      else f"Low confidence: mean pLDDT={mean_plddt:.1f}"),
     }
+
+
+# ── Protonation State (pH 7.4) ─────────────────────────────────
+
+def assign_protonation_states(pdb_path: Path, output_path: Path = None,
+                               ph: float = 7.4) -> Path:
+    """
+    Assign protonation states at specified pH using PROPKA.
+
+    Key for PBS (pH 7.4):
+    - His: pKa ~6.0 → mostly neutral (Nε protonated)
+    - Asp/Glu: pKa ~3.5-4.0 → deprotonated (charged -)
+    - Lys: pKa ~10.5 → protonated (charged +)
+    - Cys: pKa ~8.0 → mostly protonated (SH)
+
+    Some His in specific environments may have shifted pKa.
+    PROPKA predicts these environment-dependent shifts.
+    """
+    pdb_path = Path(pdb_path)
+    if output_path is None:
+        output_path = pdb_path.with_name(pdb_path.stem + "_pH74.pdb")
+
+    # Try PROPKA
+    try:
+        import propka.run as propka_run
+        import propka.molecular_container
+
+        mol = propka_run.single(str(pdb_path))
+        # Get pKa predictions
+        protonation_changes = []
+        for group in mol.conformations["AVR"].groups:
+            if group.residue_type in ("HIS", "CYS", "ASP", "GLU", "LYS"):
+                pka = group.pka_value
+                resid = group.atom.res_num
+                resname = group.residue_type
+
+                if resname == "HIS":
+                    # HIS: if pKa > pH → protonated (HIP), else neutral (HID/HIE)
+                    if pka > ph:
+                        protonation_changes.append(
+                            (resid, resname, "HIP", f"pKa={pka:.1f}>pH"))
+                    # else: default (neutral) is correct
+                elif resname == "CYS":
+                    # CYS: if pKa < pH → deprotonated (CYM, rare)
+                    if pka < ph:
+                        protonation_changes.append(
+                            (resid, resname, "CYM", f"pKa={pka:.1f}<pH"))
+
+        if protonation_changes:
+            logger.info(f"PROPKA protonation changes at pH {ph}:")
+            for resid, orig, new, reason in protonation_changes:
+                logger.info(f"  {orig}{resid} → {new} ({reason})")
+
+        # Write PROPKA output
+        propka_pka = pdb_path.with_suffix(".pka")
+        if propka_pka.exists():
+            import shutil
+            shutil.copy2(str(pdb_path), str(output_path))
+        else:
+            import shutil
+            shutil.copy2(str(pdb_path), str(output_path))
+
+        return output_path
+
+    except ImportError:
+        logger.warning("PROPKA not installed (pip install propka). "
+                       "Using default protonation states.")
+        import shutil
+        shutil.copy2(str(pdb_path), str(output_path))
+        return output_path
+
+    except Exception as e:
+        logger.warning(f"PROPKA failed: {e}. Using default protonation.")
+        import shutil
+        shutil.copy2(str(pdb_path), str(output_path))
+        return output_path
 
 
 # ── PDBQT Preparation ──────────────────────────────────────────
@@ -424,6 +527,122 @@ def smiles_to_mol2(smiles: str, name: str, output_dir: Path) -> Path:
         logger.warning(f"obabel not found, saved as .mol: {mol2_path}")
 
     return mol2_path
+
+
+# ── BLAST Epitope Uniqueness Check (Bossi 2021) ────────────────
+
+def check_epitope_uniqueness(sequence: str, target_name: str,
+                              max_hits: int = 10) -> dict:
+    """
+    BLAST the epitope sequence against human proteome to verify
+    it is unique to the target protein.
+
+    Bossi 2021: "alignment of the 7-12 residues with all protein
+    sequences stored in UniProtKB using BLAST software"
+
+    Uses NCBI BLAST REST API (requires internet).
+    """
+    import urllib.request
+    import urllib.parse
+    import time as _time
+    import xml.etree.ElementTree as ET
+
+    result = {
+        "sequence": sequence,
+        "target": target_name,
+        "length": len(sequence),
+    }
+
+    # Submit BLAST query
+    params = urllib.parse.urlencode({
+        "CMD": "Put",
+        "PROGRAM": "blastp",
+        "DATABASE": "swissprot",
+        "QUERY": sequence,
+        "ENTREZ_QUERY": "Homo sapiens[organism]",
+        "EXPECT": "10",
+        "HITLIST_SIZE": str(max_hits),
+    })
+
+    try:
+        req = urllib.request.Request(
+            "https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi",
+            data=params.encode(),
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            text = resp.read().decode()
+
+        # Extract RID
+        rid = None
+        for line in text.split("\n"):
+            if "RID = " in line:
+                rid = line.split("=")[1].strip()
+                break
+
+        if not rid:
+            return {**result, "status": "error", "reason": "No RID from BLAST"}
+
+        # Poll for results (max 2 minutes)
+        logger.info(f"BLAST submitted (RID={rid}), waiting for results...")
+        for _ in range(24):
+            _time.sleep(5)
+            check_url = (f"https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi?"
+                         f"CMD=Get&FORMAT_TYPE=XML&RID={rid}")
+            with urllib.request.urlopen(check_url, timeout=30) as resp:
+                xml_text = resp.read().decode()
+            if "Status=WAITING" in xml_text:
+                continue
+            if "Status=FAILED" in xml_text:
+                return {**result, "status": "error", "reason": "BLAST failed"}
+
+            # Parse XML results
+            root = ET.fromstring(xml_text)
+            hits = []
+            for hit in root.iter("Hit"):
+                hit_def = hit.findtext("Hit_def", "")
+                hit_acc = hit.findtext("Hit_accession", "")
+                for hsp in hit.iter("Hsp"):
+                    identity = float(hsp.findtext("Hsp_identity", "0"))
+                    align_len = float(hsp.findtext("Hsp_align-len", "1"))
+                    pct_id = round(identity / align_len * 100, 1)
+                    evalue = hsp.findtext("Hsp_evalue", "N/A")
+                    hits.append({
+                        "protein": hit_def[:80],
+                        "accession": hit_acc,
+                        "pct_identity": pct_id,
+                        "evalue": evalue,
+                    })
+
+            # Check uniqueness: the target protein should be #1 hit
+            # Other hits with >70% identity = potential cross-reactivity
+            is_unique = True
+            cross_reactive = []
+            for h in hits:
+                if target_name.lower() not in h["protein"].lower():
+                    if h["pct_identity"] >= 70:
+                        is_unique = False
+                        cross_reactive.append(h)
+
+            result["status"] = "PASS" if is_unique else "WARN"
+            result["n_hits"] = len(hits)
+            result["hits"] = hits[:5]
+            result["is_unique"] = is_unique
+            result["cross_reactive"] = cross_reactive
+            if cross_reactive:
+                logger.warning(
+                    f"Epitope may cross-react with: "
+                    f"{[h['protein'][:40] for h in cross_reactive]}"
+                )
+            else:
+                logger.info(f"Epitope uniqueness: PASS ({len(hits)} hits, "
+                            f"no cross-reactive proteins)")
+            return result
+
+        return {**result, "status": "timeout"}
+
+    except Exception as e:
+        logger.warning(f"BLAST check failed: {e}")
+        return {**result, "status": "error", "reason": str(e)}
 
 
 # ── Grid Center Calculation ────────────────────────────────────

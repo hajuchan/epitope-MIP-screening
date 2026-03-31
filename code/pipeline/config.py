@@ -20,9 +20,13 @@ TARGETS = {
         "source": "alphafold",        # No experimental crystal structure
         "chain": "A",
         "full_length": 238,
-        "ecl2_range": (113, 201),     # ECL2 (LEL) approximate boundaries
-        "head_residues": (150, 195),  # Head subdomain (helix C-D + loops)
+        "ecl2_range": (103, 203),     # LEL (UniProt topology)
+        "head_residues": (155, 170),  # 16-mer: WEKIPSMSKNRVPDSC
+        # Between disulfides C145-C169/C146-C170, variable region
+        # Near N172 glycan sequon — key for CD63 selectivity
         "n_glycan_sites": 3,          # N130, N150, N172
+        "ccg_position": 145,          # LEL CCG motif
+        "disulfide_cys": [145, 146, 169, 170, 177, 191],
         "description": "CD63 LEL — heavy glycosylation, largest head",
     },
     "CD81": {
@@ -30,9 +34,13 @@ TARGETS = {
         "source": "pdb",
         "chain": "A",
         "full_length": 236,
-        "ecl2_range": (113, 201),
-        "head_residues": (157, 190),  # Helix C-D variable region
+        "ecl2_range": (113, 201),     # LEL (UniProt topology)
+        "head_residues": (168, 183),  # 16-mer: SVLKNNLCPSGSNIIS
+        # Helix C (165-172) + Helix D (180-186) variable region
+        # Kitadokoro 2001 (1IV5), Drummer 2006 (HCV E2 binding)
         "n_glycan_sites": 0,          # No glycosylation
+        "ccg_position": 156,          # LEL CCG motif
+        "disulfide_cys": [156, 157, 175, 190],
         "description": "CD81 LEL — non-glycosylated, hydrophobic head",
     },
     "CD9": {
@@ -40,9 +48,13 @@ TARGETS = {
         "source": "pdb",
         "chain": "A",
         "full_length": 228,
-        "ecl2_range": (112, 195),
-        "head_residues": (152, 183),  # Equivalent head region
+        "ecl2_range": (112, 195),     # LEL (UniProt topology)
+        "head_residues": (156, 171),  # 16-mer: AGGVEQFISDICPKKD
+        # Variable region between disulfides C152-C181/C153-C167
+        # Kitamura 2020: T175-K179 truncated for crystallization
         "n_glycan_sites": 1,          # 1 N-glycan in LEL
+        "ccg_position": 152,          # LEL CCG motif
+        "disulfide_cys": [152, 153, 167, 181],
         "description": "CD9 LEL — light glycosylation, smallest head",
     },
 }
@@ -150,10 +162,14 @@ FUNCTIONAL_MONOMERS = {k: v for k, v in ALL_MONOMERS.items()
 # ── Phase 1: Epitope Preparation ───────────────────────────────
 EPITOPE_MIN_LENGTH = 9            # minimum residues (Teixeira 2021: nonapeptide)
 EPITOPE_MAX_LENGTH = 16           # Teixeira 2021: >16 causes intramolecular folding
-EPITOPE_MD_TIME_NS = 100          # implicit-solvent MD for stability check
+EPITOPE_MD_TIME_NS = 20           # 16-mer peptide: 20ns sufficient for RMSD convergence
 EPITOPE_RMSD_THRESHOLD = 3.0      # Å — max RMSD for "stable" epitope
 EPITOPE_PLDDT_THRESHOLD = 70      # AlphaFold confidence cutoff
 EPITOPE_MONOMER_MOLAR_RATIO = 20  # Sehit 2024: epitope:monomer = 1:20
+EPITOPE_STABILITY_MD = True       # Sehit 2024: mandatory stability MD
+# Ensemble docking: extract N conformers from Phase 1 MD, dock to each
+ENSEMBLE_DOCKING = True           # dock to multiple receptor conformations
+ENSEMBLE_N_CONFORMERS = 5         # number of MD snapshots to extract
 
 # ── Phase 2: Single Monomer Docking (SMD) — AutoDock4 ──────────
 AUTODOCK4_GA_RUNS = 50            # Lamarckian GA runs per docking
@@ -169,8 +185,8 @@ BINDING_SITE_TOOL = "fpocket"       # "fpocket" (free) or "sitemap" (Schrödinge
 # Sullivan 2019: backbone H-bond penalty — flag monomers that disrupt 2° structure
 BACKBONE_HBOND_PENALTY = True       # analyze backbone vs sidechain H-bonds
 MAX_BACKBONE_HBOND_RATIO = 0.3     # >30% backbone = structural disruption risk
-# Sehit 2024: monomer-epitope contact MD (10-20ns) before MMSD
-MONOMER_CONTACT_MD = True           # run short MD per monomer-epitope pair
+# Sehit 2024: monomer-epitope contact MD (10-20ns) before MMSD — mandatory
+MONOMER_CONTACT_MD = True           # mandatory: run short MD per monomer-epitope pair
 MONOMER_CONTACT_MD_NS = 10          # simulation time for contact frequency
 
 # ── Phase 3: Multi-Monomer Simultaneous Docking (MMSD) ─────────
@@ -184,7 +200,7 @@ MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site threshold for competition c
 MMSD_PENALIZE_COMPETITION = True  # penalize PCs with competing monomers
 
 # ── Phase 4: MD Validation — GROMACS ───────────────────────────
-MD_PRODUCTION_NS = 200            # production MD time
+MD_PRODUCTION_NS = 50             # 16-mer + 4 monomers: 50ns sufficient for convergence
 MD_TIMESTEP_FS = 2.0              # integration timestep
 MD_TEMPERATURE_K = 300.0          # K
 MD_PRESSURE_BAR = 1.0             # bar
@@ -193,11 +209,13 @@ MD_FF_MONOMER = "gaff2"           # monomer force field (via acpype)
 MD_WATER_MODEL = "tip3p"
 MD_BOX_TYPE = "dodecahedron"
 MD_BOX_DISTANCE = 1.2             # nm — minimum distance to box edge
-MD_MMPBSA_START_NS = 150          # MM-PBSA window start
-MD_MMPBSA_END_NS = 200            # MM-PBSA window end
-MD_MMPBSA_INTERVAL = 100          # number of frames for MM-PBSA
+MD_IONIC_STRENGTH = 0.15          # mol/L — PBS condition (0.15 M NaCl)
+MD_SOLVENT_PH = 7.4               # PBS pH (for protonation state reference)
+MD_MMPBSA_START_NS = 30           # MM-GBSA window start (last 20ns of 50ns)
+MD_MMPBSA_END_NS = 50             # MM-GBSA window end
+MD_MMPBSA_INTERVAL = 100          # number of frames for MM-GBSA
 MD_GPU_ID = "0"                   # GROMACS GPU device ID
-MD_QUICK_NS = 50                  # quick mode for preliminary screening
+MD_QUICK_NS = 20                  # quick mode for debugging (20ns)
 # Sullivan 2019: MM-GBSA is faster and more suitable for protein-monomer
 MMPBSA_METHOD = "GBSA"            # "PBSA" or "GBSA" — Sullivan used GBSA
 # Sullivan 2019 / Sehit 2024: DSSP 2° structure analysis (computational CD)
@@ -255,6 +273,19 @@ if _GROMACS_BIN.exists():
 
 AUTODOCK4_BIN = _shutil.which("autodock4") or str(_GROMACS_BIN / "autodock4")
 AUTOGRID4_BIN = _shutil.which("autogrid4") or str(_GROMACS_BIN / "autogrid4")
+# AutoDock-GPU: same force field as AD4 but ~100-350x faster on GPU
+# Falls back to AutoDock4 CPU if not available
+# AutoDock-GPU: check PATH first, then known install locations
+_ADGPU_SEARCH = [
+    _shutil.which("autodock_gpu_128wi"),
+    _shutil.which("autodock_gpu_64wi"),
+    _shutil.which("autodock_gpu"),
+    str(_Path(_os.path.expanduser("~/Research/AutoDock-GPU/bin/autodock_gpu_128wi"))),
+    str(_GROMACS_BIN / "autodock_gpu_128wi") if _GROMACS_BIN.exists() else None,
+]
+AUTODOCK_GPU_BIN = next((p for p in _ADGPU_SEARCH
+                         if p and _Path(p).exists()), None)
+USE_AUTODOCK_GPU = USE_GPU and AUTODOCK_GPU_BIN is not None
 PREPARE_RECEPTOR = (_shutil.which("prepare_receptor4")
                     or _shutil.which("prepare_receptor4.py")
                     or _shutil.which("prepare_receptor")

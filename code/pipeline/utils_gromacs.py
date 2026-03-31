@@ -259,13 +259,15 @@ def setup_simulation_box(gro_path: Path, work_dir: Path,
            "-o", str(work_dir / "ions.tpr"),
            "-maxwarn", "2"], work_dir)
 
-    # Replace solvent with ions
+    # Replace solvent with ions — PBS condition (0.15 M NaCl)
+    from .config import MD_IONIC_STRENGTH
     _gmx(["genion",
            "-s", str(work_dir / "ions.tpr"),
            "-o", str(work_dir / "ionized.gro"),
            "-p", str(work_dir / "topol.top"),
            "-pname", "NA", "-nname", "CL",
-           "-neutral"],
+           "-neutral",
+           "-conc", str(MD_IONIC_STRENGTH)],  # 0.15 M NaCl (PBS)
           work_dir, input_text="SOL\n")
 
     return work_dir / "ionized.gro"
@@ -479,10 +481,11 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
 
     Requires gmx_MMPBSA to be installed (pip install gmx_MMPBSA).
     """
-    from .config import MMPBSA_METHOD
+    from .config import MMPBSA_METHOD, MD_IONIC_STRENGTH
     work_dir = Path(work_dir)
 
     # Create MMPBSA input file — GBSA (Sullivan 2019) or PBSA
+    # Ionic strength matches MD simulation (PBS 0.15 M)
     mmpbsa_in = work_dir / "mmpbsa.in"
     if MMPBSA_METHOD == "GBSA":
         mmpbsa_in.write_text(dedent(f"""\
@@ -491,7 +494,7 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
               verbose=2,
             /
             &gb
-              igb=5, saltcon=0.15,
+              igb=5, saltcon={MD_IONIC_STRENGTH},
             /
         """))
     else:
@@ -501,7 +504,7 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
               verbose=2,
             /
             &pb
-              istrng=0.15, fillratio=4.0,
+              istrng={MD_IONIC_STRENGTH}, fillratio=4.0,
             /
         """))
 
@@ -565,13 +568,17 @@ def run_full_md_pipeline(protein_pdb: Path, monomer_itps: list,
         logger.info("Setting up protein topology...")
         setup_protein_topology(protein_pdb, work_dir)
 
-        # TODO: Include monomer ITP files in topology
-        # This requires editing topol.top to #include monomer .itp files
-        # and adding monomer .gro coordinates to system
+        # 1b. Include monomer ITP/GRO in topology
+        if monomer_itps:
+            logger.info(f"Including {len(monomer_itps)} monomer(s) in topology...")
+            _include_monomers_in_topology(work_dir, monomer_itps)
+            system_gro = work_dir / "complex.gro"
+        else:
+            system_gro = work_dir / "protein.gro"
 
         # 2. Solvate & ionize
         logger.info("Setting up simulation box...")
-        setup_simulation_box(work_dir / "protein.gro", work_dir)
+        setup_simulation_box(system_gro, work_dir)
 
         # 3. Energy minimization
         logger.info("Running energy minimization...")
@@ -637,6 +644,110 @@ def _parse_xvg(xvg_path: Path):
         except ValueError:
             continue
     return np.array(data) if data else None
+
+
+def _include_monomers_in_topology(work_dir: Path, monomer_itps: list):
+    """
+    Include monomer ITP files and coordinates in GROMACS topology.
+
+    For each monomer:
+    1. Copy .itp to work_dir
+    2. Add #include to topol.top (before [ molecules ])
+    3. Add molecule name to [ molecules ] section
+    4. Merge .gro coordinates into system (protein.gro → complex.gro)
+    """
+    import shutil
+
+    work_dir = Path(work_dir)
+    top_path = work_dir / "topol.top"
+    prot_gro = work_dir / "protein.gro"
+
+    if not top_path.exists() or not prot_gro.exists():
+        logger.warning("topol.top or protein.gro not found, skipping monomer inclusion")
+        return
+
+    # Read protein GRO
+    prot_lines = prot_gro.read_text().strip().split("\n")
+    prot_natoms = int(prot_lines[1].strip())
+    coord_lines = prot_lines[2:2+prot_natoms]
+    box_line = prot_lines[-1]
+
+    # Collect monomer coordinates and topology edits
+    include_lines = []
+    molecule_lines = []
+    all_mon_coords = []
+
+    for i, param in enumerate(monomer_itps):
+        itp_path = param.get("itp")
+        gro_path = param.get("gro")
+        if not itp_path or not Path(itp_path).exists():
+            continue
+
+        # Derive molecule name from ITP
+        itp_src = Path(itp_path)
+        mol_name = itp_src.stem.replace("_GMX", "")
+
+        # Copy ITP
+        itp_dst = work_dir / itp_src.name
+        shutil.copy2(str(itp_src), str(itp_dst))
+        include_lines.append(f'#include "{itp_src.name}"')
+        molecule_lines.append(f"{mol_name}     1")
+
+        # Read monomer GRO coordinates
+        if gro_path and Path(gro_path).exists():
+            mon_lines = Path(gro_path).read_text().strip().split("\n")
+            mon_natoms = int(mon_lines[1].strip())
+            mon_coords = mon_lines[2:2+mon_natoms]
+
+            # Offset monomer position to avoid overlap with protein
+            # Place each monomer at +2nm offset in x direction
+            offset_coords = _offset_gro_coords(mon_coords, x_offset=2.0 + i * 1.5)
+            all_mon_coords.extend(offset_coords)
+
+    # Edit topol.top
+    content = top_path.read_text()
+    include_block = "\n".join(include_lines)
+    molecule_block = "\n".join(molecule_lines)
+
+    if "[ molecules ]" in content:
+        content = content.replace(
+            "[ molecules ]",
+            f"{include_block}\n\n[ molecules ]"
+        )
+        content = content.rstrip() + "\n" + molecule_block + "\n"
+    else:
+        content += f"\n{include_block}\n\n[ molecules ]\n{molecule_block}\n"
+    top_path.write_text(content)
+
+    # Write complex.gro (protein + all monomers)
+    total_atoms = prot_natoms + len(all_mon_coords)
+    complex_gro = work_dir / "complex.gro"
+    out_lines = [prot_lines[0]]  # title
+    out_lines.append(f" {total_atoms}")
+    out_lines.extend(coord_lines)
+    out_lines.extend(all_mon_coords)
+    out_lines.append(box_line)
+    complex_gro.write_text("\n".join(out_lines) + "\n")
+
+    logger.info(f"Topology updated: {len(monomer_itps)} monomers, "
+                f"{total_atoms} total atoms → {complex_gro}")
+
+
+def _offset_gro_coords(coord_lines: list, x_offset: float = 2.0) -> list:
+    """Offset GRO coordinate lines by x_offset nm to avoid steric clash."""
+    shifted = []
+    for line in coord_lines:
+        try:
+            # GRO format: resid(5) resname(5) atomname(5) atomnr(5) x(8.3) y(8.3) z(8.3)
+            prefix = line[:20]
+            x = float(line[20:28]) + x_offset
+            y = float(line[28:36])
+            z = float(line[36:44])
+            rest = line[44:] if len(line) > 44 else ""
+            shifted.append(f"{prefix}{x:8.3f}{y:8.3f}{z:8.3f}{rest}")
+        except (ValueError, IndexError):
+            shifted.append(line)
+    return shifted
 
 
 def _parse_mmpbsa_results(dat_path: Path) -> dict:

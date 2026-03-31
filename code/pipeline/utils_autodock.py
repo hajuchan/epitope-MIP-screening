@@ -219,14 +219,73 @@ def generate_dpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
 
 def run_autodock(dpf_path: Path, timeout: int = 3600) -> dict:
     """
-    Execute AutoDock4 with the given parameter file.
+    Execute AutoDock4 (or AutoDock-GPU if available).
 
-    Returns dict with 'success', 'dlg_path', 'stderr'.
+    AutoDock-GPU uses identical force field and scoring as AD4
+    but runs ~100-350x faster on GPU (Santos-Martins et al.,
+    J. Chem. Theory Comput. 2021).
+
+    Returns dict with 'success', 'dlg_path', 'stderr', 'engine'.
     """
-    from .config import AUTODOCK4_BIN
+    from .config import AUTODOCK4_BIN, USE_AUTODOCK_GPU, AUTODOCK_GPU_BIN
     dpf_path = Path(dpf_path)
     dlg_path = dpf_path.with_suffix(".dlg")
 
+    # Try AutoDock-GPU first (same results, ~100-350x faster)
+    # Si handling: same UFF-based AD4_parameters_Si.dat as AutoDock4 CPU,
+    # loaded via --import_dpf which reads 'parameter_file' from DPF.
+    if USE_AUTODOCK_GPU and AUTODOCK_GPU_BIN:
+        fld_files = list(dpf_path.parent.glob("*.maps.fld"))
+        ligand_name = _get_ligand_from_dpf(dpf_path)
+        if fld_files and ligand_name:
+            cmd = [
+                AUTODOCK_GPU_BIN,
+                "--ffile", fld_files[0].name,
+                "--lfile", ligand_name,
+                "--resnam", dlg_path.stem,
+                "--dlgoutput", "1",     # produce DLG (AD4-compatible)
+                "--xmloutput", "0",     # skip XML
+                "--clustering", "1",    # cluster analysis in DLG
+            ]
+
+            # Si atom handling: --derivtype tells AD-GPU that "Si" is
+            # a derivative of "S", so it creates the Si atom type.
+            # The actual vdW parameters come from the custom
+            # parameter_file (AD4_parameters_Si.dat) in the DPF,
+            # which --import_dpf reads — identical to AD4 CPU.
+            ligand_pdbqt = dpf_path.parent / ligand_name
+            if ligand_pdbqt.exists():
+                ligand_text = ligand_pdbqt.read_text()
+                if " Si" in ligand_text or "\tSi" in ligand_text:
+                    cmd.extend(["--derivtype", "Si=S"])
+
+            # Import DPF: reads parameter_file, GA params, etc.
+            # AD-GPU --import_dpf has "partial support" — some AD4
+            # tokens are unsupported. Write a filtered DPF for GPU.
+            gpu_dpf = _write_gpu_compatible_dpf(dpf_path)
+            cmd.extend(["--import_dpf", gpu_dpf.name])
+
+            try:
+                result = subprocess.run(
+                    cmd, cwd=str(dpf_path.parent),
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                gpu_dlg = dpf_path.parent / f"{dlg_path.stem}.dlg"
+                if gpu_dlg.exists() and gpu_dlg.stat().st_size > 100:
+                    logger.info(f"AutoDock-GPU completed: {gpu_dlg.name}")
+                    return {"success": True, "dlg_path": gpu_dlg,
+                            "stderr": "", "engine": "AutoDock-GPU"}
+                else:
+                    logger.warning(
+                        f"AutoDock-GPU produced no output, falling back to AD4. "
+                        f"stderr: {result.stderr[:300]}"
+                    )
+            except FileNotFoundError:
+                logger.warning("AutoDock-GPU binary not found, using AD4 CPU")
+            except subprocess.TimeoutExpired:
+                logger.warning("AutoDock-GPU timed out, using AD4 CPU")
+
+    # AutoDock4 CPU fallback
     cmd = [AUTODOCK4_BIN, "-p", dpf_path.name, "-l", dlg_path.name]
     try:
         result = subprocess.run(
@@ -237,14 +296,60 @@ def run_autodock(dpf_path: Path, timeout: int = 3600) -> dict:
         if not success:
             logger.warning(f"AutoDock4 failed: {result.stderr[:500]}")
         return {"success": success, "dlg_path": dlg_path,
-                "stderr": result.stderr}
+                "stderr": result.stderr, "engine": "AutoDock4"}
     except FileNotFoundError:
         logger.error(f"AutoDock4 not found: {AUTODOCK4_BIN}")
         return {"success": False, "dlg_path": None,
-                "stderr": "autodock4 not found"}
+                "stderr": "autodock4 not found", "engine": None}
     except subprocess.TimeoutExpired:
         return {"success": False, "dlg_path": None,
-                "stderr": "timeout"}
+                "stderr": "timeout", "engine": None}
+
+
+def _get_ligand_from_dpf(dpf_path: Path) -> str:
+    """Extract ligand filename from DPF 'move' command."""
+    for line in Path(dpf_path).read_text().split("\n"):
+        if line.startswith("move "):
+            return line.split()[1]
+    return ""
+
+
+def _write_gpu_compatible_dpf(dpf_path: Path) -> Path:
+    """
+    Write a filtered DPF that AutoDock-GPU --import_dpf can parse.
+
+    AD-GPU only supports a subset of AD4 DPF tokens. Unsupported
+    tokens cause fatal errors. We keep only what AD-GPU needs:
+    parameter_file, ga_* params, unbound_model, etc.
+    """
+    # Tokens that AutoDock-GPU --import_dpf supports
+    _SUPPORTED_TOKENS = {
+        "parameter_file", "ligand_types", "fld", "map", "elecmap",
+        "desolvmap", "move", "about", "tran0", "quaternion0", "dihe0",
+        "torsdof", "rmstol", "ga_pop_size", "ga_num_evals",
+        "ga_num_generations", "ga_elitism", "ga_mutation_rate",
+        "ga_crossover_rate", "ga_window_size", "ga_run",
+        "sw_max_its", "sw_max_succ", "sw_max_fail", "sw_rho",
+        "sw_lb_rho", "ls_search_freq", "unbound_model",
+        "set_ga", "set_psw1", "analysis",
+        "ga_cauchy_alpha", "ga_cauchy_beta",
+        "extnrg", "e0max", "seed",
+    }
+
+    dpf_path = Path(dpf_path)
+    gpu_dpf = dpf_path.parent / f"{dpf_path.stem}_gpu.dpf"
+
+    filtered_lines = []
+    for line in dpf_path.read_text().split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        token = stripped.split()[0]
+        if token in _SUPPORTED_TOKENS:
+            filtered_lines.append(stripped)
+
+    gpu_dpf.write_text("\n".join(filtered_lines) + "\n")
+    return gpu_dpf
 
 
 # ── DLG Parsing ────────────────────────────────────────────────
