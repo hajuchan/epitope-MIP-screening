@@ -14,7 +14,7 @@ we can trust it for the novel CD63/CD81/CD9 targets.
 RAJPAL_EPITOPE_SEQUENCE = "YQAGSTPCNGVEGFNCYFPLQSYGF"
 RAJPAL_EPITOPE_PDB_ID = "7JMO"
 RAJPAL_EPITOPE_CHAIN = "A"
-RAJPAL_EPITOPE_RESIDUES = (438, 462)  # approximate RBD epitope range
+RAJPAL_EPITOPE_RESIDUES = (473, 497)  # RBD epitope (verified in PDB 7JMO Chain A)
 
 # ── SMD Reference Data (Rajpal 2024, Table 1) ─────────────────
 # Mean binding energy (kcal/mol) of highest-ranked cluster per monomer

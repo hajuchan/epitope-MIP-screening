@@ -1,20 +1,19 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Validation Runner
-=================
+Validation Runner - Project Root Entry Point
+=============================================
 Runs the actual pipeline (Phase 1-3) against the Rajpal 2024
-benchmark system (SARS-CoV-2 spike epitope + 11 silane monomers)
-to verify that our code reproduces the published results.
-
-This imports and calls the pipeline modules directly — it is NOT
-an independent re-implementation. If validation passes, we can
-trust the pipeline for novel CD63/CD81/CD9 targets.
+and Sullivan 2019 benchmark systems to verify that our code
+reproduces published experimental results.
 
 Usage:
     conda activate GROMACS
     cd "/home/chan/Research/Monomer screening in Bio"
-    python -m code.validation.run_validation              # full validation
-    python -m code.validation.run_validation --smd-only    # Phase 2 only
-    python -m code.validation.run_validation --check-only  # check existing results
+    python run_validation.py                   # full validation
+    python run_validation.py --smd-only        # Phase 2 only
+    python run_validation.py --quick           # fewer GA runs
+    python run_validation.py --check-only      # check existing results
 """
 
 import argparse
@@ -24,12 +23,12 @@ import sys
 import time
 from pathlib import Path
 
-# Ensure pipeline is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# code/ 디렉토리를 Python path에 추가
+sys.path.insert(0, str(Path(__file__).resolve().parent / "code"))
 
 logger = logging.getLogger(__name__)
 
-VALIDATION_DIR = Path(__file__).resolve().parent.parent.parent / "results" / "validation"
+VALIDATION_DIR = Path(__file__).resolve().parent / "results" / "validation"
 
 
 def parse_args():
@@ -54,7 +53,7 @@ def step_prepare_benchmark(output_dir: Path) -> dict:
     Download the SARS-CoV-2 spike epitope and prepare it as a
     validation target, using our Phase 1 pipeline code.
     """
-    from .config_validation import (
+    from validation.config_validation import (
         RAJPAL_EPITOPE_PDB_ID, RAJPAL_EPITOPE_CHAIN,
         RAJPAL_EPITOPE_RESIDUES, RAJPAL_EPITOPE_SEQUENCE,
     )
@@ -110,7 +109,7 @@ def step_run_smd(benchmark: dict, output_dir: Path,
     Run Phase 2 SMD using the actual pipeline code against the
     Rajpal epitope with the 11 silane monomers from the paper.
     """
-    from .config_validation import RAJPAL_SMD_REFERENCE
+    from validation.config_validation import RAJPAL_SMD_REFERENCE
     from pipeline.config import SILANE_MONOMERS, AUTODOCK4_GA_RUNS
     from pipeline.utils_structure import smiles_to_pdbqt
     from pipeline.utils_autodock import dock_single
@@ -174,7 +173,7 @@ def step_run_mmsd(benchmark: dict, smd_results: dict,
     Run Phase 3 MMSD using pipeline code for selected 4-monomer
     combinations matching Rajpal 2024 Table 3.
     """
-    from .config_validation import RAJPAL_EXPERIMENTAL_IF
+    from validation.config_validation import RAJPAL_EXPERIMENTAL_IF
     from pipeline.utils_autodock import dock_single, merge_ligand_into_receptor
     from pipeline.utils_structure import prepare_receptor_pdbqt
     from pipeline.config import AUTODOCK4_GA_RUNS
@@ -283,7 +282,7 @@ def step_run_sullivan(output_dir: Path, quick: bool = False) -> dict:
     Step 5: Run Sullivan 2019 validation — Myoglobin + 5 acrylamide monomers.
     Tests whether computed BE predicts experimental IF ranking.
     """
-    from .validate_sullivan import run_sullivan_validation
+    from validation.validate_sullivan import run_sullivan_validation
     logger.info("\nStep 5: Sullivan 2019 validation (Myoglobin)...")
     sullivan_dir = output_dir / "sullivan"
     return run_sullivan_validation(sullivan_dir, quick=quick)
@@ -291,9 +290,9 @@ def step_run_sullivan(output_dir: Path, quick: bool = False) -> dict:
 
 def step_check_results(output_dir: Path) -> dict:
     """Run all validation checks on computed results."""
-    from .validate_smd import validate_smd
-    from .validate_mmsd import validate_mmsd
-    from .validate_ranking import validate_ranking
+    from validation.validate_smd import validate_smd
+    from validation.validate_mmsd import validate_mmsd
+    from validation.validate_ranking import validate_ranking
 
     logger.info("\nChecking results against reference data...")
 

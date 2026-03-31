@@ -49,10 +49,32 @@ def generate_gpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
     if not map_types:
         map_types = ["A", "C", "HD", "N", "NA", "OA", "SA"]
 
+    # Check for non-standard atom types (e.g., Si in silane monomers)
+    # AutoDock4 doesn't know Si — add custom parameter file
+    has_custom_types = any(t not in _AD4_STANDARD_TYPES for t in map_types)
+    custom_param_file = None
+    if has_custom_types:
+        custom_param_file = _write_custom_params(output_dir)
+        # Remap unknown types: Si → S (sulfur-like vdW), others → C
+        remapped = []
+        for t in map_types:
+            if t in _AD4_STANDARD_TYPES:
+                remapped.append(t)
+            elif t == "Si":
+                remapped.append("Si")  # handled by custom params
+            else:
+                remapped.append("C")
+                logger.warning(f"Remapping unknown atom type '{t}' → C")
+        map_types = sorted(set(remapped))
+
     gpf_name = f"{receptor_pdbqt.stem}_{ligand_pdbqt.stem}"
     gpf_path = output_dir / f"{gpf_name}.gpf"
 
-    lines = [
+    lines = []
+    # Custom parameter file must come FIRST in GPF
+    if custom_param_file:
+        lines.append(f"parameter_file {custom_param_file.name}")
+    lines.extend([
         f"npts {npts[0]} {npts[1]} {npts[2]}",
         f"gridfld {gpf_name}.maps.fld",
         f"spacing {spacing:.3f}",
@@ -61,8 +83,7 @@ def generate_gpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
         f"receptor {receptor_pdbqt.name}",
         f"gridcenter {center[0]:.3f} {center[1]:.3f} {center[2]:.3f}",
         f"smooth 0.5",
-        f"map {gpf_name}.A.map",
-    ]
+    ])
     # Add map line for each ligand atom type
     for atype in map_types:
         lines.append(f"map {gpf_name}.{atype}.map")
@@ -126,17 +147,33 @@ def generate_dpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
     ligand_types = _extract_atom_types(ligand_pdbqt)
     map_types = sorted(set(ligand_types))
 
+    # Handle non-standard types (Si etc.)
+    has_custom = any(t not in _AD4_STANDARD_TYPES for t in map_types)
+    custom_param = None
+    if has_custom:
+        custom_param = _write_custom_params(output_dir)
+        remapped = []
+        for t in map_types:
+            if t in _AD4_STANDARD_TYPES or t == "Si":
+                remapped.append(t)
+            else:
+                remapped.append("C")
+        map_types = sorted(set(remapped))
+
     dpf_name = f"{receptor_pdbqt.stem}_{ligand_pdbqt.stem}"
     dpf_path = output_dir / f"{dpf_name}.dpf"
 
-    lines = [
+    lines = []
+    if custom_param:
+        lines.append(f"parameter_file {custom_param.name}")
+    lines.extend([
         f"autodock_parameter_version 4.2",
         f"outlev 1",
         f"intelec",
         f"seed pid time",
         f"ligand_types {' '.join(map_types)}",
         f"fld {map_prefix}.maps.fld",
-    ]
+    ])
 
     for atype in map_types:
         lines.append(f"map {map_prefix}.{atype}.map")
@@ -190,7 +227,7 @@ def run_autodock(dpf_path: Path, timeout: int = 3600) -> dict:
     dpf_path = Path(dpf_path)
     dlg_path = dpf_path.with_suffix(".dlg")
 
-    cmd = [AUTODOCK4_BIN, "-s", "-p", dpf_path.name, "-l", dlg_path.name]
+    cmd = [AUTODOCK4_BIN, "-p", dpf_path.name, "-l", dlg_path.name]
     try:
         result = subprocess.run(
             cmd, cwd=str(dpf_path.parent),
@@ -405,6 +442,47 @@ def dock_single(receptor_pdbqt: Path, ligand_pdbqt: Path,
         "best_pose_path": str(best_pose) if best_pose.exists() else None,
         "clusters": clusters[:5],  # top-5 clusters for reporting
     }
+
+
+# ── AutoDock4 Standard Atom Types ──────────────────────────────
+
+_AD4_STANDARD_TYPES = {
+    "H", "HD", "HS", "C", "A", "N", "NA", "NS", "OA", "OS",
+    "F", "Mg", "MN", "P", "SA", "S", "Cl", "CL", "Ca", "Mn",
+    "Fe", "Zn", "Br", "BR", "I",
+}
+
+
+def _write_custom_params(output_dir: Path) -> Path:
+    """
+    Write AutoDock4 custom parameter file with Si atom type.
+
+    Per autodock.scripps.edu/how-to-add-new-atom-types:
+    Si parameters from UFF (Rappe et al., JACS 1992) Si_3 tetrahedral.
+    Rajpal 2024 used silane monomers with AutoDock4 — this is the
+    standard approach for non-standard atom types.
+    """
+    param_path = Path(output_dir) / "AD4_parameters_Si.dat"
+    if param_path.exists():
+        return param_path
+
+    # UFF (Rappe et al., JACS 1992) Si_3 (tetrahedral silicon):
+    #   Rii = 4.295 A (vdW distance)
+    #   epsii = 0.402 kcal/mol (well depth)
+    #   vol = 4/3 * pi * (4.295/2 / 2)^3 = 12.175 A^3
+    #   solpar = -0.00143 (adopted from S)
+    # Per: autodock.scripps.edu/how-to-add-new-atom-types-to-the-autodock-force-field/
+    content = """\
+# AutoDock4 custom parameters for Silicon (Si) atom type
+# Source: UFF Si_3 (Rappe et al., JACS 1992, 114, 10024-10035)
+# For silane monomers: PTES, APTES, APTMS, UPTMS, TEOS, etc.
+#
+# atom_par  Rii    epsii   vol      solpar    Rij_hb epsij_hb hbond rec map
+atom_par Si  4.295  0.402  12.175  -0.00143  0.0  0.0  0  -1  -1
+"""
+    param_path.write_text(content)
+    logger.info(f"Custom AD4 parameters (Si) written: {param_path}")
+    return param_path
 
 
 # ── Internal Helpers ───────────────────────────────────────────

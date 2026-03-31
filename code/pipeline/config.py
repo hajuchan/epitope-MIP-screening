@@ -246,9 +246,15 @@ HARTREE_TO_KCAL = 627.509         # 1 Hartree in kcal/mol
 
 # ── External Tool Paths (auto-detected or user-set) ────────────
 import shutil as _shutil
+import os as _os
 
-AUTODOCK4_BIN = _shutil.which("autodock4") or "autodock4"
-AUTOGRID4_BIN = _shutil.which("autogrid4") or "autogrid4"
+# Add GROMACS conda env bin to PATH for tool discovery
+_GROMACS_BIN = _Path(_os.path.expanduser("~/anaconda3/envs/GROMACS/bin"))
+if _GROMACS_BIN.exists():
+    _os.environ["PATH"] = str(_GROMACS_BIN) + _os.pathsep + _os.environ.get("PATH", "")
+
+AUTODOCK4_BIN = _shutil.which("autodock4") or str(_GROMACS_BIN / "autodock4")
+AUTOGRID4_BIN = _shutil.which("autogrid4") or str(_GROMACS_BIN / "autogrid4")
 PREPARE_RECEPTOR = (_shutil.which("prepare_receptor4")
                     or _shutil.which("prepare_receptor4.py")
                     or _shutil.which("prepare_receptor")
