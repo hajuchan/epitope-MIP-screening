@@ -247,8 +247,15 @@ def assign_protonation_states(pdb_path: Path, output_path: Path = None,
     try:
         import propka.run as propka_run
         import propka.molecular_container
+        import os
 
-        mol = propka_run.single(str(pdb_path))
+        # PROPKA writes .pka file to cwd — change to output directory
+        original_cwd = os.getcwd()
+        os.chdir(str(output_path.parent))
+        try:
+            mol = propka_run.single(str(pdb_path))
+        finally:
+            os.chdir(original_cwd)
         # Get pKa predictions
         protonation_changes = []
         for group in mol.conformations["AVR"].groups:

@@ -370,7 +370,13 @@ def run_production_md(work_dir: Path, time_ns: float = 200.0,
     md_cmd = ["mdrun", "-deffnm", "md", "-v"]
     from .config import USE_GPU
     if USE_GPU:
-        md_cmd.extend(["-nb", "gpu", "-gpu_id", gpu_id])
+        md_cmd.extend([
+            "-nb", "gpu",
+            "-pme", "gpu",
+            "-bonded", "gpu",
+            "-update", "gpu",
+            "-gpu_id", gpu_id,
+        ])
 
     logger.info(f"Starting {time_ns}ns production MD in {work_dir}")
     _gmx(md_cmd, work_dir, timeout=int(time_ns * 3600))  # generous timeout
