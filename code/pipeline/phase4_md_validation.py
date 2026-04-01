@@ -85,9 +85,16 @@ def run_phase4(phase1_results: dict = None,
             pc_id = pc_data["pc_id"]
             monomers = pc_data["monomers"]
             # Separate functional monomers from crosslinker
-            from .config import MMSD_DEFAULT_CROSSLINKER
-            functional = [m for m in monomers if m != MMSD_DEFAULT_CROSSLINKER]
-            crosslinker = MMSD_DEFAULT_CROSSLINKER
+            # Crosslinker is stored in pc_data by Phase 3, or detect from monomers list
+            from .config import CROSSLINKER_LIBRARY
+            crosslinker = pc_data.get("crosslinker")
+            if crosslinker is None:
+                # Fallback: last monomer in MMSD list is the crosslinker
+                for m in reversed(monomers):
+                    if m in CROSSLINKER_LIBRARY:
+                        crosslinker = m
+                        break
+            functional = [m for m in monomers if m != crosslinker]
 
             logger.info(f"\n--- {target}/{pc_id}: {functional} + {crosslinker} ---")
 

@@ -72,20 +72,23 @@ Phase 2: Single Monomer Docking (SMD) — AutoDock4/GPU
   └── 필터: BE ≤ -2.0 kcal/mol, 상위 12개 선택 (선택도는 Phase 3/4에서 평가)
     ↓ 타겟별 상위 12개 모노머
 
-Phase 3: Bayesian Optimization + MMSD — Gryffin (Hase 2021) + Rajpal 2024
-  ├── Gryffin BO: 물리화학 descriptor 기반 범주형 최적화
-  │   → 조합 크기(2-6종) + 모노머 종류를 동시 탐색
-  │   → ~30-50회 MMSD 평가로 전역 최적 근사 (전수 탐색 ~15,000회 대비)
+Phase 3: Greedy Forward Selection + MMSD — Rajpal 2024
+  ├── Greedy forward selection: Phase 2 SMD BE 순으로 모노머를 순차 추가
+  │   → Round 1: 12개 각각 단독 MMSD → best 1종 선택
+  │   → Round 2: 나머지 추가 시도 → avg BE 개선 시 2종 선택 → 반복
+  │   → avg BE 악화 시 중단 → 최적 크기 자동 결정 (2-6종)
+  ├── Swap refinement: 선택된 각 위치에서 대안 모노머 교체 시도
   ├── MMSD sequential docking (이전 결과를 수용체에 병합)
-  ├── MMSD sum vs SMD sum → 시너지/간섭 판별
+  │   → 마지막 step에서 호환 가교제 전부 도킹 → BE 최소 가교제 자동 선택
+  ├── 목적함수: mmsd_per_monomer + 간섭 페널티 (크기 정규화)
   ├── 경쟁 분석: 같은 부위 점유 시 페널티 (Sullivan 2019)
   └── 비경쟁 + 저에너지 우선 랭킹 → 최적 PC 선발
-    ↓ 최적 모노머 조합 (종류 + 개수 자동 결정)
+    ↓ 최적 모노머 조합 (종류 + 개수 + 가교제 자동 결정)
 
 Phase 4: Pre-polymerization MD + 최적 비율 결정
   ├── GAFF2 모노머 파라미터화 (acpype) + topology 자동 병합
-  ├── 선택된 모노머를 실험 비율(1:20)로 배치
-  │   예) 에피토프 1 + APBA 5 + PTES 5 + APTMS 5 + TEOS 5 = 21분자
+  ├── 선택된 모노머 + 가교제를 실험 비율(1:20)로 배치
+  │   예) 에피토프 1 + APBA 5 + PTES 5 + APTMS 5 + 가교제 5 = 21분자
   ├── 50ns 전원자 MD (amber99sb-ildn + GAFF2 + TIP3P + 0.15M NaCl)
   ├── 에피토프 주위 모노머 분포 분석 → 최적 합성 비율 제안
   │   contact frequency per monomer type → occupancy 비율 = 합성 비율
@@ -228,7 +231,7 @@ Phase 2의 역할은 **"결합 가능한 모노머"를 선별**하는 것이지,
 
 ---
 
-## 5. Phase 3: Bayesian Optimization + MMSD
+## 5. Phase 3: Greedy Forward Selection + MMSD
 
 **파일**: `code/pipeline/phase3_mmsd.py`
 
@@ -243,17 +246,27 @@ Phase 2의 역할은 **"결합 가능한 모노머"를 선별**하는 것이지,
 - DIDMS, IBTES: MMSD에서 5-7% 감소 (간섭)
 - **실험 검증**: MMSD 예측 최상위 PC I (PTES+APTMS+APTES+TEOS)이 IF 1.73으로 가장 높은 성능
 
-#### Bayesian Optimization (Hase et al. 2021)
+#### Greedy Forward Selection + Swap Refinement
 
-기존 MMSD의 한계: 4종 고정 조합만 탐색 (과학적 근거 부족). **Gryffin** (Hase et al. 2021)을 도입하여 조합 크기(2-6종)와 모노머 종류를 **동시에 최적화**:
+기존 MMSD의 한계: 4종 고정 조합만 탐색 (과학적 근거 부족). **Greedy forward selection**으로 조합 크기(2-6종)와 모노머 종류를 **동시에 최적화**:
 
-1. 각 모노머를 **RDKit 물리화학 descriptor** 8차원으로 인코딩 (MW, LogP, HBD, HBA, TPSA, RotatableBonds, AromaticRings, HeavyAtoms)
-2. 초기 15회 랜덤 다양한 조합 MMSD 실행 (explore phase)
-3. GPR surrogate model 학습 → 미탐색 조합의 MMSD sum 예측
-4. Expected Improvement acquisition function으로 다음 탐색 조합 선택 (exploit phase)
-5. Gryffin 활성화 후 8회 연속 무개선 시 수렴 종료 (~25-50회 MMSD 평가)
+1. Phase 2 SMD BE 순으로 모노머 정렬 (best BE first)
+2. Round 1: 12개 모노머 각각 단독 MMSD → best 1종 선택 (12회 도킹)
+3. Round 2: 나머지 11개를 각각 추가 → **모노머당 평균 BE** 최소인 2종 선택 (11회)
+4. 반복... avg BE가 더 이상 개선 안 되면 중단 → **최적 크기 자동 결정**
+5. Swap refinement: 선택된 각 위치에서 대안 모노머로 교체 시도 → 개선 시 교체
 
-**전수 탐색 ~15,000회 대비 ~30-50회로 전역 최적 근사.**
+**~70-90회 MMSD 평가로 결정론적 최적 탐색** (greedy + local search).
+
+#### 목적함수 (Size-Normalized)
+
+```
+bo_objective = mmsd_per_monomer + 0.3 × max(0, delta_sum)
+```
+
+- `mmsd_per_monomer = mmsd_sum / n_monomers` : 크기 정규화 — 3종 우수(avg -5.5) > 6종 보통(avg -3.0)
+- `delta_sum > 0`일 때만 간섭 페널티: MMSD > SMD이면 모노머 간 경쟁 (Rajpal 2024 Table 2)
+- 시너지(delta < 0)는 자연 반영: MMSD에서 BE가 증가하면 avg가 자동으로 좋아짐
 
 ### Sequential Docking 프로토콜
 
@@ -262,23 +275,41 @@ Step 1: Monomer-1 → 에피토프에 도킹 → best pose
 Step 2: Monomer-1 pose를 수용체에 병합
 Step 3: Monomer-2 → (에피토프 + Monomer-1)에 도킹
 Step 4: 반복 ... (조합 크기만큼)
-Step N: 가교제(TEOS) → 전체 복합체에 최종 도킹
+Step N: 호환 가교제 전부 시도 → BE 최소 가교제 자동 선택
 ```
+
+### 가교제 자동 선택 (MMSD 마지막 step 분기)
+
+MMSD의 마지막 step에서 **호환 가교제를 모두 도킹**하여 BE가 가장 낮은 가교제를 자동 선택한다. 가교제에 따라 MMSD sum이 달라지므로, 도킹 결과 기반 선택이 가장 과학적이다.
+
+- **실란 조합** → TEOS, TMOS 2종 시도 → best 선택
+- **비닐 조합** → MBAAm, EGDMA, DVB, TRIM 4종 시도 → best 선택
+- 추가 비용: 비닐 조합당 +3 도킹 (마지막 step만, ~수초)
+
+| 가교제 | 화학 유형 | 관능기수 | 호환 모노머 | 특징 |
+|--------|----------|---------|------------|------|
+| **TEOS** | 실란 | 4 | 실란 모노머 | Sol-gel SiO₂ 네트워크, 느린 가수분해 (~16h) |
+| **TMOS** | 실란 | 4 | 실란 모노머 | Sol-gel SiO₂ 네트워크, 빠른 가수분해 (~6× TEOS) |
+| **MBAAm** | 비닐 | 2 | 비닐/아크릴 모노머 | Free-radical 가교, 유연 |
+| **EGDMA** | 메타크릴 | 2 | 비닐/아크릴 모노머 | Free-radical 가교, 보편적 |
+| **DVB** | 스티렌계 | 2 | 비닐 모노머 | 강성 가교, 소수성 |
+| **TRIM** | 메타크릴 | 3 | 비닐/아크릴 모노머 | 높은 가교밀도, 기계적 안정 |
+
+결과에 `crosslinker_comparison` 필드로 각 가교제별 BE가 기록되어 비교 분석이 가능하다.
 
 ### 평가 지표
 
-- **MMSD sum**: k개 모노머 BE의 합 (낮을수록 좋음)
+- **bo_objective**: mmsd_per_monomer + 간섭 페널티 (랭킹 기준, 낮을수록 좋음)
+- **mmsd_per_monomer**: MMSD sum / n_monomers (크기 정규화)
+- **MMSD sum**: k개 모노머 + 가교제 BE의 합
 - **SMD sum**: 동일 k개 모노머의 개별 SMD BE 합
 - **Δ = MMSD - SMD**: 음수 = 시너지, 양수 = 간섭
 - **경쟁 분석** (Sullivan 2019): 두 모노머가 5 Å 이내에 도킹 → 같은 부위 경쟁 → 페널티
-- **상호작용 다양성**: H-bond + hydrophobic + pi-pi + electrostatic coverage
 
 ### 참고
 
-- Hase F et al. "Gryffin: Bayesian optimization of categorical variables informed by expert knowledge." *Appl. Phys. Rev.* 2021;8:031406. [DOI](https://aip.scitation.org/doi/abs/10.1063/5.0048164)
-- Griffiths RR et al. "Race to the bottom: Bayesian optimisation for chemical problems." *Digital Discovery* 2024;3:1086. [DOI](https://pubs.rsc.org/en/content/articlelanding/2024/dd/d3dd00234a)
-- Tamasi MJ et al. "Machine Learning on a Robotic Platform for the Design of Polymer-Protein Hybrids." *Adv. Mater.* 2022;34:2201809. [DOI](https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.202201809)
 - Rajpal S et al. "Rational design based on multi-monomer simultaneous docking for epitope imprinting." *Sci. Rep.* 2024;14:23057.
+- Rajpal S, Mizaikoff B. "An in silico predictive method to select multi-monomer combinations for peptide imprinting." *J. Mater. Chem. B* 2022;10:6618-6626.
 
 ---
 
@@ -296,8 +327,8 @@ Phase 3에서 선택된 모노머 조합을 **실험 비율(1:20 에피토프:�
 
 Phase 3에서 선택된 모노머 k종 × 여러 copy = 총 ~20개 분자를 에피토프와 함께 시뮬레이션:
 ```
-예) Phase 3 최적: [APBA, PTES, APTMS] + TEOS
-  → 에피토프 1 + APBA 5 + PTES 5 + APTMS 5 + TEOS 5 = 21분자
+예) Phase 3 최적: [APBA, PTES, APTMS] + EGDMA (greedy selection)
+  → 에피토프 1 + APBA 5 + PTES 5 + APTMS 5 + EGDMA 5 = 21분자
 ```
 
 - GAFF2 파라미터화(acpype) + ITP/GRO를 GROMACS topology에 자동 병합
@@ -366,7 +397,7 @@ CD63에 최적화된 PC를 CD81과 CD9 에피토프에 적용하여 **선택도*
 
 | 방법 | 모노머 유형 | 핵심 특징 | 참고 |
 |------|------------|----------|------|
-| **Sol-gel** | 실란 | SiO₂ NP + TEOS 가교, RT 16h | Rajpal 2024 |
+| **Sol-gel** | 실란 | SiO₂ NP + 실란 가교제(TEOS 등), RT 16h | Rajpal 2024 |
 | **Solid-phase** | 실란/비닐 | Glass bead + 고온 용출, nanoMIP 생산 | Sehit 2024 |
 | **Free-radical** | 비닐/아크릴 | APS/TEMED 또는 AIBN 개시제 | 전통적 방법 |
 
@@ -403,7 +434,7 @@ CD63의 3개 N-glycan을 활용한 **펩타이드 + glycan 이중 각인**:
 
 ## 8. 모노머 라이브러리
 
-### A. 실란 모노머 (15종, Sol-gel용)
+### A. 실란 모노머 (14종 functional + 2 가교제, Sol-gel용)
 
 | 약어 | 이름 | 주 상호작용 |
 |------|------|------------|
@@ -414,7 +445,8 @@ CD63의 3개 N-glycan을 활용한 **펩타이드 + glycan 이중 각인**:
 | MPTMS | (3-Mercaptopropyl)trimethoxysilane | Thiol-Cys, H-bond |
 | IBTES | Isobutyltriethoxysilane | 소수성, alkyl |
 | MTMS | Methyltrimethoxysilane | 소수성 |
-| **TEOS** | Tetraethyl orthosilicate | **가교제** |
+| **TEOS** | Tetraethyl orthosilicate | **가교제** (느린 가수분해) |
+| **TMOS** | Tetramethyl orthosilicate | **가교제** (빠른 가수분해, Rajpal 2024) |
 | EDTMS | N-[3-(Trimethoxysilyl)propyl]ethylenediamine | 킬레이트형 H-bond |
 | ICTES | 3-(Triethoxysilyl)propyl isocyanate | 공유결합 (Lys) |
 | VTMS | Vinyltrimethoxysilane | 소수성 + 가교 가능 |
@@ -423,7 +455,7 @@ CD63의 3개 N-glycan을 활용한 **펩타이드 + glycan 이중 각인**:
 | CETES | 3-Cyanopropyltriethoxysilane | 약한 H-bond acceptor (CN) |
 | TTMS | p-Tolyltrimethoxysilane | π-π + 약한 소수성 |
 
-### B. 비닐/아크릴 모노머 (12종, Free-radical용)
+### B. 비닐/아크릴 모노머 (10종 functional + 2 가교제, Free-radical용)
 
 | 약어 | 이름 | 주 상호작용 |
 |------|------|------------|
@@ -439,8 +471,10 @@ CD63의 3개 N-glycan을 활용한 **펩타이드 + glycan 이중 각인**:
 | TBAm | N-tert-Butylacrylamide | 소수성 |
 | **APBA** | 3-Aminophenylboronic acid | **Glycan(diol) 인식 — CD63 특이적** |
 | **EGDMA** | Ethylene glycol dimethacrylate | **가교제** |
+| **DVB** | Divinylbenzene | **가교제** (소수성, 강성) |
+| **TRIM** | Trimethylolpropane trimethacrylate | **가교제** (3관능성, 높은 가교밀도) |
 
-> TEOS, MBAAm, EGDMA는 가교제로 functional monomer 스크리닝에서 제외. 실제 스크리닝 대상은 **24종 functional monomer**.
+> TEOS, TMOS, MBAAm, EGDMA, DVB, TRIM은 가교제(6종)로 functional monomer 스크리닝에서 제외. 실제 스크리닝 대상은 **24종 functional monomer**. Phase 3 MMSD 마지막 step에서 호환 가교제를 모두 도킹하여 최적 가교제를 자동 선택한다.
 
 ---
 
@@ -642,9 +676,10 @@ python run_validation.py --check-only            # 기존 결과만 확인
 | 2 | ΔΔG | 참고용 (비활성) | Phase 3/4에서 평가 |
 | 2 | Backbone H-bond | ≤ 30% | Sullivan 2019 |
 | 2 | Contact MD | 10 ns/pair | Sehit 2024 |
-| 3 | 조합 크기 탐색 | 2-6종 (자동) | Gryffin BO |
-| 3 | BO 초기 탐색 | 15-20회 랜덤 | Hase 2021 |
-| 3 | BO 총 평가 | ~30-50회 MMSD | 수렴까지 |
+| 3 | 조합 크기 탐색 | 2-6종 (자동) | Greedy forward selection (avg BE 악화 시 중단) |
+| 3 | 가교제 선택 | MMSD 도킹 기반 | 마지막 step에서 호환 XL 전부 시도 → BE 최소 선택 |
+| 3 | 총 평가 | ~70-90회 MMSD | Forward selection ~56 + swap ~20-30 |
+| 3 | 목적함수 | mmsd_per_monomer | + 0.3 × max(0, delta_sum) 간섭 페널티 |
 | 3 | 경쟁 거리 | 5.0 Å | Sullivan 2019 |
 | 4 | 에피토프:모노머 비율 | 1:20 | Sehit 2024 |
 | 4 | MD 시간 | 50 ns | pre-polymerization 수렴 |
@@ -677,20 +712,18 @@ python run_validation.py --check-only            # 기존 결과만 확인
 | 2 | UFF 비표준 원자 (Si, B) | Rappe 1992 [8] |
 | 2 | SMD 모노머 랭킹 | Rajpal 2024 [9] |
 | 3 | MMSD sequential docking | Rajpal 2024 [9], Rajpal 2022 [10] |
-| 3 | Gryffin Bayesian optimization | Hase 2021 [11] |
-| 3 | 화학 BO 리뷰 | Griffiths 2024 [12] |
-| 3 | GPR + BO polymer design | Tamasi/Webb/Gormley 2022 [13] |
+| 3 | Greedy forward selection + swap | 본 파이프라인 설계 |
 | 3 | 비경쟁 결합 원칙 | Sullivan 2019 [7] |
-| 4 | Pre-polymerization MD | Nicholls 2015 [14] |
+| 4 | Pre-polymerization MD | Nicholls 2015 [11] |
 | 4 | MM-GBSA | Sullivan 2019 [7] |
-| 4 | GROMACS + gmx_MMPBSA | Rebelo 2023 [15] |
-| 4 | DSSP 2차 구조 | Kabsch & Sander 1983 [16] |
+| 4 | GROMACS + gmx_MMPBSA | Rebelo 2023 [12] |
+| 4 | DSSP 2차 구조 | Kabsch & Sander 1983 [13] |
 | 4 | 에피토프:모노머 1:20 | Sehit 2024 [3] |
 | 5 | Sol-gel 합성 프로토콜 | Rajpal 2024 [9] |
 | 5 | Solid-phase nanoMIP | Sehit 2024 [3] |
 | 5 | 이중 에피토프 (glycan) | Teixeira 2021 [1] |
-| 5 | 보론산-glycan 인식 | Bie 2015 [17] |
-| 5 | SPR/QCM-D 검증 | Kowalczyk 2023 [18] |
+| 5 | 보론산-glycan 인식 | Bie 2015 [14] |
+| 5 | SPR/QCM-D 검증 | Kowalczyk 2023 [15] |
 
 ### 전체 문헌 목록
 
@@ -718,27 +751,19 @@ python run_validation.py --check-only            # 기존 결과만 확인
 
 [10] Rajpal S, Mizaikoff B. "An in silico predictive method to select multi-monomer combinations for peptide imprinting." *J. Mater. Chem. B* 2022;10:6618-6626.
 
-**Bayesian Optimization**
-
-[11] Hase F et al. "Gryffin: An algorithm for Bayesian optimization of categorical variables informed by expert knowledge." *Appl. Phys. Rev.* 2021;8:031406. [DOI](https://aip.scitation.org/doi/abs/10.1063/5.0048164)
-
-[12] Griffiths RR et al. "Race to the bottom: Bayesian optimisation for chemical problems." *Digital Discovery* 2024;3:1086. [DOI](https://pubs.rsc.org/en/content/articlelanding/2024/dd/d3dd00234a)
-
-[13] Tamasi MJ et al. "Machine Learning on a Robotic Platform for the Design of Polymer-Protein Hybrids." *Adv. Mater.* 2022;34:2201809. [DOI](https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.202201809)
-
 **MD 시뮬레이션**
 
-[14] Nicholls IA et al. "Theoretical and computational strategies for the study of the molecular imprinting process and polymer performance." *Adv. Biochem. Eng. Biotechnol.* 2015;150:25-50.
+[11] Nicholls IA et al. "Theoretical and computational strategies for the study of the molecular imprinting process and polymer performance." *Adv. Biochem. Eng. Biotechnol.* 2015;150:25-50.
 
-[15] Rebelo P et al. "Rational In Silico Design of MIPs: Current Challenges and Future Potential." *Int. J. Mol. Sci.* 2023;24:6785.
+[12] Rebelo P et al. "Rational In Silico Design of MIPs: Current Challenges and Future Potential." *Int. J. Mol. Sci.* 2023;24:6785.
 
-[16] Kabsch W, Sander C. "Dictionary of protein secondary structure." *Biopolymers* 1983;22:2577-2637.
+[13] Kabsch W, Sander C. "Dictionary of protein secondary structure." *Biopolymers* 1983;22:2577-2637.
 
 **보론산 + 타겟 검증**
 
-[17] Bie Z et al. "Boronate-affinity glycan-oriented surface imprinting." *Angew. Chem. Int. Ed.* 2015;54:10211-10215.
+[14] Bie Z et al. "Boronate-affinity glycan-oriented surface imprinting." *Angew. Chem. Int. Ed.* 2015;54:10211-10215.
 
-[18] Kowalczyk A et al. "Parallel SPR and QCM-D Quantitative Analysis of CD9, CD63, and CD81 Tetraspanins." *Anal. Chem.* 2023;95:9520-9530.
+[15] Kowalczyk A et al. "Parallel SPR and QCM-D Quantitative Analysis of CD9, CD63, and CD81 Tetraspanins." *Anal. Chem.* 2023;95:9520-9530.
 
 ---
 

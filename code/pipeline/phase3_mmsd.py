@@ -1,20 +1,22 @@
 """
-Phase 3: Bayesian Optimization + MMSD
-======================================
-Gryffin Bayesian Optimization (Hase et al. 2021) to find the optimal
+Phase 3: Greedy Forward Selection + MMSD
+=========================================
+Greedy forward selection with swap refinement to find the optimal
 monomer combination (type + number), evaluated by MMSD sequential
 docking (Rajpal et al. 2024).
 
-Instead of exhaustive search of fixed 4-monomer combinations (~36-330),
-Gryffin explores 2-6 monomer combinations with physicochemical
-descriptors, finding near-optimal solutions in ~30-50 evaluations.
+Phase 2 SMD results are used to rank candidates (best BE first).
+Forward selection iteratively adds monomers while avg BE improves,
+then swap refinement tests replacements at each position.
+
+Objective: mmsd_per_monomer + interference_penalty
+  (size-normalized — fair comparison across 2-6종 combinations)
 
 Key concept: MMSD sum vs SMD sum reveals synergy/interference.
   MMSD sum < SMD sum → synergy (cooperative binding)
   MMSD sum > SMD sum → interference (steric clash)
 
 Reference:
-  Hase F et al., Appl. Phys. Rev. 2021;8:031406 — Gryffin BO
   Rajpal et al., Sci. Rep. 2024 — MMSD protocol
   Sullivan et al., J. Phys. Chem. B 2019 — non-competitive binding
 """
@@ -28,7 +30,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── Monomer Physicochemical Descriptors for Gryffin ────────────
+# ── Monomer Physicochemical Descriptors ────────────────────────
 # Computed from RDKit: [MW, LogP, HBD, HBA, TPSA, RotatableBonds, AromaticRings, HeavyAtoms]
 # All values are continuous and well-distributed → no normalization issues.
 # Enables GPR to generalize: "H-bond monomers were good → try similar ones"
@@ -63,22 +65,22 @@ MONOMER_DESCRIPTORS = {
 }
 
 
+
 def run_phase3(phase1_results: dict = None,
                phase2_results: dict = None,
                target_names: list = None,
                output_dir: str = None) -> dict:
     """
-    Phase 3 entry point: Gryffin BO + MMSD for all targets.
+    Phase 3 entry point: Greedy Forward Selection + MMSD for all targets.
 
     For each target:
-    1. Configure Gryffin with monomer descriptors
-    2. BO loop: suggest combination → run MMSD → observe result
+    1. Forward selection: iteratively add best monomer by avg BE
+    2. Swap refinement: try replacing each monomer with alternatives
     3. Automatically determine optimal combination size (2-6)
     4. Rank and select top polymer compositions (PCs)
     """
     from .config import (TARGETS, FUNCTIONAL_MONOMERS,
-                         MMSD_DEFAULT_CROSSLINKER, MMSD_TOP_PC,
-                         MMSD_HIGH_AFFINITY_THRESHOLD,
+                         MMSD_TOP_PC, MMSD_HIGH_AFFINITY_THRESHOLD,
                          AUTODOCK4_GA_RUNS, get_output_path)
 
     if output_dir is None:
@@ -103,7 +105,7 @@ def run_phase3(phase1_results: dict = None,
     results = {}
 
     for target in target_names:
-        logger.info(f"\n{'='*20} Phase 3 BO+MMSD: {target} {'='*20}")
+        logger.info(f"\n{'='*20} Phase 3 Greedy+MMSD: {target} {'='*20}")
 
         be_matrix = phase2_results["be_matrix"].get(target, {})
         filtered = phase2_results["filtered"].get(target, [])
@@ -119,11 +121,9 @@ def run_phase3(phase1_results: dict = None,
         center = tuple(p1["grid_center"])
         npts = tuple(p1["grid_npts"])
 
-        crosslinker = MMSD_DEFAULT_CROSSLINKER
-
-        # Available monomers for BO:
-        # Use filtered list if sufficient, otherwise expand to top-N by BE
-        available = [m for m in filtered if m != crosslinker]
+        # Available monomers for BO (exclude all crosslinkers)
+        from .config import CROSSLINKERS
+        available = [m for m in filtered if m not in CROSSLINKERS]
         if not available:
             logger.warning(f"[{target}] No monomers passed Phase 2 filter")
             results[target] = {"error": "No candidates from Phase 2"}
@@ -132,11 +132,10 @@ def run_phase3(phase1_results: dict = None,
         target_dir = output_dir / target
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Run Gryffin BO + MMSD
-        all_pc_results = _run_bo_mmsd(
+        # Run Greedy Forward Selection + MMSD
+        all_pc_results = _run_greedy_mmsd(
             target=target,
             available_monomers=available,
-            crosslinker=crosslinker,
             be_matrix=be_matrix,
             receptor_pdbqt=receptor_pdbqt,
             epitope_pdb=epitope_pdb,
@@ -148,19 +147,18 @@ def run_phase3(phase1_results: dict = None,
         # Remove excluded PCs
         all_pc_results = [r for r in all_pc_results if not r.get("excluded")]
 
-        # Rank: uniform first, then by MMSD sum
+        # Rank: uniform first, then by bo_objective (size-normalized)
         all_pc_results.sort(key=lambda x: (
             not x.get("is_uniform", True),
-            x.get("mmsd_sum") if x.get("mmsd_sum") is not None else 0,
+            x.get("bo_objective") if x.get("bo_objective") is not None else 0,
         ))
 
         top_pcs = all_pc_results[:MMSD_TOP_PC]
 
         results[target] = {
-            "method": "Gryffin BO + MMSD",
+            "method": "Greedy Forward Selection + MMSD",
             "n_evaluations": len(all_pc_results),
             "available_monomers": available,
-            "crosslinker": crosslinker,
             "top_pcs": top_pcs,
             "all_results": all_pc_results,
             "high_affinity_count": sum(
@@ -175,9 +173,11 @@ def run_phase3(phase1_results: dict = None,
                     f"(from {len(all_pc_results)} BO evaluations):")
         for j, pc in enumerate(top_pcs, 1):
             logger.info(
-                f"  {j}. {pc['monomers']} ({len(pc['monomers'])}종): "
-                f"MMSD={pc.get('mmsd_sum', 'N/A')}, "
-                f"synergy={pc.get('synergy', '?')}"
+                f"  {j}. {pc['monomers']} "
+                f"(XL={pc.get('crosslinker', '?')}): "
+                f"obj={pc.get('bo_objective', 'N/A')}, "
+                f"avg={pc.get('mmsd_per_monomer', 'N/A')}, "
+                f"sum={pc.get('mmsd_sum', 'N/A')}"
             )
 
     # Save results
@@ -189,161 +189,181 @@ def run_phase3(phase1_results: dict = None,
     return results
 
 
-# ── Gryffin BO + MMSD Loop ────────────────────────────────────
+# ── Crosslinker Compatibility ─────────────────────────────────
 
-def _run_bo_mmsd(target: str, available_monomers: list,
-                  crosslinker: str, be_matrix: dict,
-                  receptor_pdbqt: Path, epitope_pdb: Path,
-                  center: tuple, npts: tuple,
-                  work_dir: Path, ga_runs: int = 25,
-                  n_initial: int = 15, max_iter: int = 50,
-                  min_size: int = 2, max_size: int = 6) -> list:
+def _get_compatible_crosslinkers(monomers: list) -> list:
     """
-    Gryffin Bayesian Optimization loop for monomer combination search.
-
-    Each iteration:
-    1. Gryffin suggests a monomer combination (type + size)
-    2. Run MMSD sequential docking
-    3. Report MMSD sum back to Gryffin
-    4. Repeat until convergence or max iterations
+    Return list of compatible crosslinkers based on monomer chemistry.
+    - All silane → ["TEOS"]
+    - All vinyl/acrylic → ["MBAAm", "EGDMA", "DVB", "TRIM"]
+    - Mixed → all 5
     """
-    from gryffin import Gryffin
+    from .config import SILANE_MONOMERS, VINYL_MONOMERS, CROSSLINKER_LIBRARY
 
-    n_slots = max_size  # max monomer slots
+    has_silane = any(m in SILANE_MONOMERS for m in monomers)
+    has_vinyl = any(m in VINYL_MONOMERS for m in monomers)
 
-    # Build Gryffin config with descriptor-informed categorical variables
-    # Each slot is a categorical variable: which monomer (or "empty")
-    options_with_empty = available_monomers + ["_empty_"]
+    if has_silane and not has_vinyl:
+        return [k for k, v in CROSSLINKER_LIBRARY.items() if v["type"] == "silane"]
+    elif has_vinyl and not has_silane:
+        return [k for k, v in CROSSLINKER_LIBRARY.items() if v["type"] == "vinyl"]
+    else:
+        return list(CROSSLINKER_LIBRARY.keys())
 
-    # Build descriptor dict for each option
-    descriptors = {}
-    for m in available_monomers:
-        if m in MONOMER_DESCRIPTORS:
-            descriptors[m] = MONOMER_DESCRIPTORS[m]
-        else:
-            descriptors[m] = [0, 0, 0, 0, 0, 100]
-    # _empty_ = "no monomer in this slot"
-    # Values set to minimum of each descriptor column across real monomers
-    # This ensures _empty_ is at the edge of the distribution, not an outlier
-    import numpy as np
-    all_desc = np.array(list(descriptors.values()))
-    empty_desc = list(np.min(all_desc, axis=0))
-    descriptors["_empty_"] = empty_desc
 
-    config = {
-        "parameters": [
-            {
-                "name": f"monomer_{i}",
-                "type": "categorical",
-                "category_details": descriptors,
-            }
-            for i in range(n_slots)
-        ],
-        "objectives": [
-            {"name": "mmsd_sum", "goal": "min"},
-        ],
-    }
+# ── Greedy Forward Selection + Swap Refinement ──────────────
 
-    import warnings
-    warnings.filterwarnings("ignore", category=RuntimeWarning,
-                            module="gryffin")
-    gryffin = Gryffin(config_dict=config, silent=True)
+def _run_greedy_mmsd(target: str, available_monomers: list,
+                      be_matrix: dict,
+                      receptor_pdbqt: Path, epitope_pdb: Path,
+                      center: tuple, npts: tuple,
+                      work_dir: Path, ga_runs: int = 25,
+                      min_size: int = 2, max_size: int = 6) -> list:
+    """
+    Greedy forward selection + swap refinement for optimal monomer combination.
+
+    Phase A — Forward Selection:
+      Round 1: try each monomer alone → pick best by avg BE
+      Round 2: try adding each remaining monomer → pick best pair
+      ...continue until avg BE stops improving or max_size reached
+
+    Phase B — Swap Refinement:
+      Try replacing each selected monomer with every unselected one.
+      Accept if bo_objective improves. Repeat until no more swaps help.
+
+    Uses Phase 2 SMD BE (be_matrix) to sort candidates — best SMD monomers
+    are tried first for efficiency.
+    """
+    from .config import MMSD_MIN_COMBO_SIZE
 
     all_results = []
-    observations = []
-    evaluated_combos = set()
-    best_mmsd = float("inf")
-    no_improvement_count = 0
+    selected = []
+    best_avg = float("inf")
+    best_obj = float("inf")
+    best_result = None
 
-    logger.info(f"[{target}] Gryffin BO: {len(available_monomers)} monomers, "
-                f"slots={n_slots}, max_iter={max_iter}")
+    # Sort available monomers by Phase 2 SMD BE (best first)
+    smd_sorted = sorted(available_monomers,
+                        key=lambda m: be_matrix.get(m, 0) or 0)
 
-    import random as _rng
-    _rng.seed(42)
+    logger.info(f"[{target}] Greedy Forward Selection: "
+                f"{len(available_monomers)} monomers, max_size={max_size}")
+    logger.info(f"  Phase 2 SMD ranking: {smd_sorted}")
 
-    for iteration in range(max_iter):
-        # Phase 1: Random diverse exploration (first n_initial iterations)
-        # Phase 2: Gryffin-guided exploitation (after sufficient observations)
-        use_gryffin = len(observations) >= n_initial
+    # ── Phase A: Forward Selection ──────────────────────────────
+    for round_k in range(max_size):
+        candidates = [m for m in smd_sorted if m not in selected]
+        if not candidates:
+            break
 
-        combo = None
+        logger.info(f"\n  Round {round_k+1}: testing {len(candidates)} "
+                    f"candidates (current: {selected})")
 
-        if use_gryffin:
-            try:
-                suggestions = gryffin.recommend(
-                    observations=observations,
-                    num_batches=1,
+        round_best_candidate = None
+        round_best_obj = float("inf")
+        round_best_result = None
+
+        for candidate in candidates:
+            trial = selected + [candidate]
+            compatible_xls = _get_compatible_crosslinkers(trial)
+            pc_id = f"FWD{round_k+1}_{candidate}"
+
+            result = _run_single_mmsd(
+                target, pc_id, trial, compatible_xls,
+                receptor_pdbqt, epitope_pdb,
+                center, npts, be_matrix,
+                work_dir / pc_id,
+                ga_runs=ga_runs,
+            )
+            all_results.append(result)
+
+            obj = result.get("bo_objective")
+            avg = result.get("mmsd_per_monomer")
+            xl = result.get("crosslinker", "?")
+            if obj is not None:
+                logger.info(f"    {pc_id}: obj={obj:.3f} avg={avg:.3f} XL={xl}")
+                if obj < round_best_obj:
+                    round_best_obj = obj
+                    round_best_candidate = candidate
+                    round_best_result = result
+
+        if round_best_candidate is None:
+            logger.warning(f"  Round {round_k+1}: all candidates failed")
+            break
+
+        new_avg = round_best_result["mmsd_per_monomer"]
+
+        # Stop if adding monomer worsens avg BE (after minimum size reached)
+        if len(selected) >= min_size and new_avg >= best_avg:
+            logger.info(f"  STOP at {len(selected)} monomers: "
+                        f"adding {round_best_candidate} worsens avg "
+                        f"({new_avg:.3f} vs {best_avg:.3f})")
+            break
+
+        selected.append(round_best_candidate)
+        best_avg = new_avg
+        best_obj = round_best_obj
+        best_result = round_best_result
+        logger.info(f"  → Selected: {selected} "
+                    f"(avg={best_avg:.3f}, obj={best_obj:.3f})")
+
+    if not selected:
+        logger.warning(f"[{target}] Forward selection failed — no valid combos")
+        return all_results
+
+    logger.info(f"\n  Forward selection result: {selected} "
+                f"(obj={best_obj:.3f})")
+
+    # ── Phase B: Swap Refinement ────────────────────────────────
+    logger.info(f"\n  Swap refinement: testing alternatives for each position")
+    swap_round = 0
+    improved = True
+
+    while improved:
+        improved = False
+        swap_round += 1
+        logger.info(f"  Swap round {swap_round}:")
+
+        for i, current_mono in enumerate(selected):
+            alternatives = [m for m in smd_sorted
+                            if m not in selected]
+
+            for alt in alternatives:
+                trial = selected[:i] + [alt] + selected[i+1:]
+                compatible_xls = _get_compatible_crosslinkers(trial)
+                pc_id = f"SWAP{swap_round}_{current_mono}to{alt}"
+
+                result = _run_single_mmsd(
+                    target, pc_id, trial, compatible_xls,
+                    receptor_pdbqt, epitope_pdb,
+                    center, npts, be_matrix,
+                    work_dir / pc_id,
+                    ga_runs=ga_runs,
                 )
-                if suggestions:
-                    suggestion = suggestions[0]
-                    combo = []
-                    for i in range(n_slots):
-                        m = suggestion[f"monomer_{i}"]
-                        if m != "_empty_" and m not in combo:
-                            combo.append(m)
-            except Exception as e:
-                logger.warning(f"  Gryffin recommend failed: {e}")
+                all_results.append(result)
 
-        # Random sampling: during initial phase, or if Gryffin gave duplicate
-        combo_key = tuple(sorted(combo)) if combo else ()
-        if not combo or combo_key in evaluated_combos:
-            # Generate random unique combination
-            for _ in range(50):
-                k = _rng.randint(min_size, max_size)
-                combo = _rng.sample(available_monomers, min(k, len(available_monomers)))
-                combo_key = tuple(sorted(combo))
-                if combo_key not in evaluated_combos:
-                    break
-            else:
-                logger.info(f"  Exhausted unique combinations after "
-                            f"{len(evaluated_combos)} evaluations")
+                obj = result.get("bo_objective")
+                if obj is not None and obj < best_obj:
+                    logger.info(f"    SWAP: {current_mono}→{alt} "
+                                f"improves obj {best_obj:.3f}→{obj:.3f}")
+                    selected[i] = alt
+                    best_obj = obj
+                    best_result = result
+                    improved = True
+                    break  # restart position loop
+            if improved:
                 break
 
-        evaluated_combos.add(combo_key)
+        if not improved:
+            logger.info(f"  No more improvements found")
 
-        # Add crosslinker at the end
-        monomers_with_xl = combo + [crosslinker]
-        pc_id = f"BO{iteration+1:03d}"
-
-        logger.info(f"  [{pc_id}] {monomers_with_xl} ({len(combo)}+XL)")
-
-        # Run MMSD
-        pc_result = _run_single_mmsd(
-            target, pc_id, monomers_with_xl,
-            receptor_pdbqt, epitope_pdb,
-            center, npts, be_matrix,
-            work_dir / pc_id,
-            ga_runs=ga_runs,
-        )
-        all_results.append(pc_result)
-
-        # Report to Gryffin
-        mmsd_sum = pc_result.get("mmsd_sum")
-        if mmsd_sum is not None:
-            obs = {f"monomer_{i}": "_empty_" for i in range(n_slots)}
-            for i, m in enumerate(combo):
-                if i < n_slots:
-                    obs[f"monomer_{i}"] = m
-            obs["mmsd_sum"] = mmsd_sum
-            observations.append(obs)
-
-            # Convergence check
-            if mmsd_sum < best_mmsd - 0.3:
-                best_mmsd = mmsd_sum
-                no_improvement_count = 0
-                logger.info(f"    NEW BEST: {mmsd_sum:.2f} kcal/mol")
-            else:
-                no_improvement_count += 1
-
-            if no_improvement_count >= 8 and len(observations) >= n_initial + 10:
-                logger.info(f"  Converged after {iteration+1} iterations "
-                            f"(no improvement in 8 steps)")
-                break
-        else:
-            logger.warning(f"    {pc_id}: MMSD failed, skipping observation")
-
-    logger.info(f"[{target}] BO completed: {len(all_results)} evaluations, "
-                f"best MMSD={best_mmsd:.2f}")
+    # ── Summary ─────────────────────────────────────────────────
+    logger.info(f"\n[{target}] Greedy result: {selected} + "
+                f"{best_result.get('crosslinker', '?')}")
+    logger.info(f"  obj={best_obj:.3f}, "
+                f"avg={best_result.get('mmsd_per_monomer', '?')}, "
+                f"sum={best_result.get('mmsd_sum', '?')}")
+    logger.info(f"  Total evaluations: {len(all_results)}")
 
     return all_results
 
@@ -351,7 +371,8 @@ def _run_bo_mmsd(target: str, available_monomers: list,
 # ── MMSD Sequential Docking (unchanged from Rajpal 2024) ──────
 
 def _run_single_mmsd(target: str, pc_id: str,
-                      monomers: list,
+                      functional_monomers: list,
+                      compatible_crosslinkers: list,
                       receptor_pdbqt: Path,
                       epitope_pdb: Path,
                       center: tuple, npts: tuple,
@@ -360,7 +381,9 @@ def _run_single_mmsd(target: str, pc_id: str,
                       ga_runs: int = 25) -> dict:
     """
     Run sequential MMSD for a single polymer composition.
-    Unchanged from Rajpal 2024 protocol.
+
+    Steps 1~N-1: dock functional monomers sequentially (once).
+    Step N: try each compatible crosslinker → pick best by BE.
     """
     from .utils_autodock import dock_single, merge_ligand_into_receptor
     from .utils_structure import prepare_receptor_pdbqt
@@ -368,11 +391,12 @@ def _run_single_mmsd(target: str, pc_id: str,
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Phase A: Sequential docking of functional monomers ──────
     monomer_energies = {}
     current_receptor_pdb = epitope_pdb
     current_receptor_pdbqt = receptor_pdbqt
 
-    for step, monomer_name in enumerate(monomers):
+    for step, monomer_name in enumerate(functional_monomers):
         step_dir = work_dir / f"step{step}_{monomer_name}"
 
         monomer_pdbqt = _get_monomer_pdbqt(monomer_name, work_dir.parent)
@@ -406,22 +430,75 @@ def _run_single_mmsd(target: str, pc_id: str,
             current_receptor_pdb = merged_pdb
             current_receptor_pdbqt = merged_pdbqt
 
-    # Compute MMSD sum — skip if any monomer failed
-    valid_energies = {m: e for m, e in monomer_energies.items() if e is not None}
-    if len(valid_energies) < len(monomers):
-        n_fail = len(monomers) - len(valid_energies)
-        logger.warning(f"    {pc_id}: {n_fail} monomer(s) failed — excluded")
+    # Check functional monomer failures
+    valid_func = {m: e for m, e in monomer_energies.items() if e is not None}
+    if len(valid_func) < len(functional_monomers):
+        n_fail = len(functional_monomers) - len(valid_func)
+        logger.warning(f"    {pc_id}: {n_fail} functional monomer(s) failed — excluded")
         return {
-            "pc_id": pc_id, "monomers": monomers,
+            "pc_id": pc_id, "monomers": functional_monomers,
             "monomer_energies": monomer_energies,
+            "crosslinker": None, "crosslinker_comparison": {},
             "mmsd_sum": None, "smd_sum": None, "delta_sum": None,
             "synergy": False, "is_uniform": False, "excluded": True,
         }
 
-    mmsd_sum = sum(valid_energies.values())
-    smd_sum = sum(smd_be.get(m, 0.0) for m in monomers
+    # ── Phase B: Try each compatible crosslinker at last step ───
+    xl_step = len(functional_monomers)
+    xl_results = {}
+
+    for xl_name in compatible_crosslinkers:
+        xl_step_dir = work_dir / f"step{xl_step}_{xl_name}"
+
+        xl_pdbqt = _get_monomer_pdbqt(xl_name, work_dir.parent)
+        if xl_pdbqt is None:
+            logger.warning(f"    {pc_id}: {xl_name} PDBQT not found")
+            xl_results[xl_name] = None
+            continue
+
+        xl_dock = dock_single(
+            current_receptor_pdbqt, xl_pdbqt,
+            center, npts, xl_step_dir,
+            ga_runs=ga_runs,
+        )
+        xl_be = xl_dock.get("mean_cluster_energy")
+        xl_results[xl_name] = xl_be
+        if xl_be is not None:
+            logger.info(f"    XL {xl_name}: BE={xl_be:.2f}")
+        else:
+            logger.warning(f"    XL {xl_name}: docking failed")
+
+    # Pick best crosslinker
+    valid_xls = {k: v for k, v in xl_results.items() if v is not None}
+    if not valid_xls:
+        logger.warning(f"    {pc_id}: all crosslinkers failed — excluded")
+        return {
+            "pc_id": pc_id, "monomers": functional_monomers,
+            "monomer_energies": monomer_energies,
+            "crosslinker": None, "crosslinker_comparison": xl_results,
+            "mmsd_sum": None, "smd_sum": None, "delta_sum": None,
+            "synergy": False, "is_uniform": False, "excluded": True,
+        }
+
+    best_xl = min(valid_xls, key=valid_xls.get)
+    best_xl_be = valid_xls[best_xl]
+    logger.info(f"    Best XL: {best_xl} (BE={best_xl_be:.2f})")
+
+    # ── Compute final MMSD metrics ──────────────────────────────
+    all_monomers = functional_monomers + [best_xl]
+    monomer_energies[best_xl] = best_xl_be
+
+    mmsd_sum = sum(valid_func.values()) + best_xl_be
+    smd_sum = sum(smd_be.get(m, 0.0) for m in all_monomers
                   if smd_be.get(m) is not None)
     delta_sum = mmsd_sum - smd_sum
+
+    # Size-normalized BO objective
+    from .config import BO_INTERFERENCE_PENALTY
+    n_mono = len(all_monomers)
+    mmsd_per_monomer = mmsd_sum / n_mono
+    bo_objective = (mmsd_per_monomer
+                    + BO_INTERFERENCE_PENALTY * max(0, delta_sum))
 
     # Competition analysis (Sullivan 2019)
     from .config import MMSD_PENALIZE_COMPETITION, MMSD_COMPETITION_DISTANCE
@@ -429,7 +506,7 @@ def _run_single_mmsd(target: str, pc_id: str,
     monomer_centers = {}
 
     if MMSD_PENALIZE_COMPETITION:
-        for step, m_name in enumerate(monomers):
+        for step, m_name in enumerate(functional_monomers):
             pose_path = work_dir / f"step{step}_{m_name}" / f"{m_name}_best.pdbqt"
             if pose_path.exists():
                 from .utils_structure import compute_grid_center
@@ -444,12 +521,17 @@ def _run_single_mmsd(target: str, pc_id: str,
 
     return {
         "pc_id": pc_id,
-        "monomers": monomers,
-        "n_functional": len(monomers) - 1,  # exclude crosslinker
+        "monomers": all_monomers,
+        "n_functional": len(functional_monomers),
+        "crosslinker": best_xl,
+        "crosslinker_comparison": {k: round(v, 3) if v is not None else None
+                                   for k, v in xl_results.items()},
         "monomer_energies": monomer_energies,
         "mmsd_sum": round(mmsd_sum, 3),
         "smd_sum": round(smd_sum, 3),
         "delta_sum": round(delta_sum, 3),
+        "mmsd_per_monomer": round(mmsd_per_monomer, 3),
+        "bo_objective": round(bo_objective, 3),
         "synergy": delta_sum < 0,
         "competition": competition,
         "is_uniform": competition.get("is_uniform", True),
@@ -520,7 +602,7 @@ def _plot_mmsd_comparison(results: dict, output_dir: Path):
                      "-", color="red", linewidth=2, label="Best so far")
             ax1.set_xlabel("BO Iteration")
             ax1.set_ylabel("MMSD Sum (kcal/mol)")
-            ax1.set_title(f"{target}: Gryffin BO Convergence")
+            ax1.set_title(f"{target}: Greedy Selection Convergence")
             ax1.legend()
 
             # Top 10 bar chart

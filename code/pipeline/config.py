@@ -149,11 +149,37 @@ VINYL_MONOMERS = {
                "interaction": "Cross-linker"},
 }
 
-# Combined libraries
-ALL_MONOMERS = {**SILANE_MONOMERS, **VINYL_MONOMERS}
+# Cross-linkers (auto-selected by monomer chemistry compatibility)
+CROSSLINKER_LIBRARY = {
+    "TEOS":  {"smiles": "CCO[Si](OCC)(OCC)OCC",
+              "name": "Tetraethyl orthosilicate",
+              "type": "silane", "functionality": 4,
+              "interaction": "Sol-gel Si-O-Si network, slow hydrolysis (~16h)"},
+    "TMOS":  {"smiles": "CO[Si](OC)(OC)OC",
+              "name": "Tetramethyl orthosilicate",
+              "type": "silane", "functionality": 4,
+              "interaction": "Sol-gel Si-O-Si network, fast hydrolysis (~6x TEOS)"},
+    "MBAAm": {"smiles": "C=CC(=O)NCNC(=O)C=C",
+              "name": "N,N'-Methylenebisacrylamide",
+              "type": "vinyl", "functionality": 2,
+              "interaction": "Free-radical, flexible"},
+    "EGDMA": {"smiles": "C=C(C)C(=O)OCCOC(=O)C(=C)C",
+              "name": "Ethylene glycol dimethacrylate",
+              "type": "vinyl", "functionality": 2,
+              "interaction": "Free-radical, semi-rigid"},
+    "DVB":   {"smiles": "C=Cc1ccc(C=C)cc1",
+              "name": "Divinylbenzene",
+              "type": "vinyl", "functionality": 2,
+              "interaction": "Free-radical, rigid aromatic"},
+    "TRIM":  {"smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+              "name": "Trimethylolpropane trimethacrylate",
+              "type": "vinyl", "functionality": 3,
+              "interaction": "Free-radical, tri-functional high crosslink"},
+}
+CROSSLINKERS = set(CROSSLINKER_LIBRARY.keys())
 
-# Cross-linkers (excluded from functional monomer screening)
-CROSSLINKERS = {"TEOS", "MBAAm", "EGDMA"}
+# Combined libraries
+ALL_MONOMERS = {**SILANE_MONOMERS, **VINYL_MONOMERS, **CROSSLINKER_LIBRARY}
 
 # Functional monomers only (for SMD/MMSD screening)
 FUNCTIONAL_MONOMERS = {k: v for k, v in ALL_MONOMERS.items()
@@ -189,16 +215,13 @@ MAX_BACKBONE_HBOND_RATIO = 0.3     # >30% backbone = structural disruption risk
 MONOMER_CONTACT_MD = True           # mandatory: run short MD per monomer-epitope pair
 MONOMER_CONTACT_MD_NS = 10          # simulation time for contact frequency
 
-# ── Phase 3: Gryffin BO + MMSD ─────────────────────────────────
-# Bayesian Optimization (Hase 2021) replaces exhaustive search
+# ── Phase 3: Greedy Forward Selection + MMSD ───────────────────
 MMSD_MIN_COMBO_SIZE = 2           # minimum functional monomers (excl. crosslinker)
 MMSD_MAX_COMBO_SIZE = 6           # maximum functional monomers
-MMSD_DEFAULT_CROSSLINKER = "TEOS" # cross-linker (always added last)
-MMSD_BO_INITIAL = 15              # initial random evaluations for BO
-MMSD_BO_MAX_ITER = 50             # maximum BO iterations
-MMSD_BO_CONVERGENCE = 8           # stop if no improvement in N steps
 MMSD_HIGH_AFFINITY_THRESHOLD = -11.0  # kcal/mol — high-affinity PC threshold
 MMSD_TOP_PC = 8                   # top PCs to pass to Phase 4
+# BO objective weights (size-normalized scoring)
+BO_INTERFERENCE_PENALTY = 0.3     # weight for interference (delta_sum > 0) penalty
 # Sullivan 2019: non-competitive binding
 MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site competition check
 MMSD_PENALIZE_COMPETITION = True  # penalize competing monomers
