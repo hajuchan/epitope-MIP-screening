@@ -206,20 +206,24 @@ def setup_protein_topology(pdb_path: Path, work_dir: Path,
                             water: str = "tip3p") -> Path:
     """
     Generate GROMACS topology for the protein epitope.
+    Automatically fixes missing heavy atoms before pdb2gmx.
     Returns path to processed .gro file.
     """
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fix missing heavy atoms (e.g., side chains not resolved in X-ray)
+    fixed_pdb = _fix_missing_atoms(pdb_path, work_dir)
+
     result = _gmx([
         "pdb2gmx",
-        "-f", str(pdb_path),
+        "-f", str(fixed_pdb),
         "-o", str(work_dir / "protein.gro"),
         "-p", str(work_dir / "topol.top"),
         "-ignh",
         "-ff", forcefield,
         "-water", water,
-    ], work_dir, input_text="1\n")  # select force field
+    ], work_dir)
 
     if result.returncode != 0:
         logger.error(f"pdb2gmx failed: {result.stderr[:500]}")
@@ -400,12 +404,14 @@ def analyze_trajectory(work_dir: Path) -> dict:
                "-o", "rmsd.xvg"],
               work_dir, input_text="Backbone\nBackbone\n")
         rmsd_data = _parse_xvg(work_dir / "rmsd.xvg")
-        if rmsd_data:
+        if rmsd_data is not None and len(rmsd_data) > 0:
             import numpy as np
             results["rmsd_mean_nm"] = float(np.mean(rmsd_data[:, 1]))
-            results["rmsd_last50ns_mean_nm"] = float(
-                np.mean(rmsd_data[rmsd_data[:, 0] > rmsd_data[-1, 0] - 50000, 1])
-            )
+            # Last 50% of trajectory
+            half_time = rmsd_data[-1, 0] / 2
+            last_half = rmsd_data[rmsd_data[:, 0] > half_time]
+            if len(last_half) > 0:
+                results["rmsd_last50ns_mean_nm"] = float(np.mean(last_half[:, 1]))
     except Exception as e:
         logger.warning(f"RMSD analysis failed: {e}")
 
@@ -416,7 +422,7 @@ def analyze_trajectory(work_dir: Path) -> dict:
                "-o", "rmsf.xvg", "-res"],
               work_dir, input_text="Backbone\n")
         rmsf_data = _parse_xvg(work_dir / "rmsf.xvg")
-        if rmsf_data is not None:
+        if rmsf_data is not None and len(rmsf_data) > 0:
             import numpy as np
             results["rmsf_mean_nm"] = float(np.mean(rmsf_data[:, 1]))
             results["rmsf_max_nm"] = float(np.max(rmsf_data[:, 1]))
@@ -430,7 +436,7 @@ def analyze_trajectory(work_dir: Path) -> dict:
                "-num", "hbond.xvg"],
               work_dir, input_text="Protein\nNon-Protein\n")
         hb_data = _parse_xvg(work_dir / "hbond.xvg")
-        if hb_data is not None:
+        if hb_data is not None and len(hb_data) > 0:
             import numpy as np
             results["hbond_mean"] = float(np.mean(hb_data[:, 1]))
             results["hbond_max"] = float(np.max(hb_data[:, 1]))
@@ -444,7 +450,7 @@ def analyze_trajectory(work_dir: Path) -> dict:
                "-o", "gyrate.xvg"],
               work_dir, input_text="Protein\n")
         rg_data = _parse_xvg(work_dir / "gyrate.xvg")
-        if rg_data is not None:
+        if rg_data is not None and len(rg_data) > 0:
             import numpy as np
             results["rg_mean_nm"] = float(np.mean(rg_data[:, 1]))
     except Exception as e:
@@ -633,6 +639,40 @@ def run_full_md_pipeline(protein_pdb: Path, monomer_itps: list,
 
 
 # ── Internal Helpers ───────────────────────────────────────────
+
+def _fix_missing_atoms(pdb_path: Path, work_dir: Path) -> Path:
+    """
+    Fix missing heavy atoms in PDB (e.g., unresolved side chains in X-ray).
+    Uses pdbfixer (OpenMM) if available, otherwise returns original PDB.
+    """
+    fixed_path = work_dir / f"{Path(pdb_path).stem}_fixed.pdb"
+
+    try:
+        from pdbfixer import PDBFixer
+        from openmm.app import PDBFile
+
+        fixer = PDBFixer(filename=str(pdb_path))
+        fixer.findMissingResidues()
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens(7.4)  # pH 7.4
+
+        with open(str(fixed_path), "w") as f:
+            PDBFile.writeFile(fixer.topology, fixer.positions, f)
+
+        n_added = len(fixer.missingAtoms)
+        if n_added > 0:
+            logger.info(f"Fixed {n_added} residue(s) with missing atoms → {fixed_path.name}")
+        return fixed_path
+
+    except ImportError:
+        logger.warning("pdbfixer not installed (pip install pdbfixer openmm). "
+                       "Using original PDB — pdb2gmx may fail if atoms are missing.")
+        return pdb_path
+    except Exception as e:
+        logger.warning(f"pdbfixer failed: {e}. Using original PDB.")
+        return pdb_path
+
 
 def _parse_xvg(xvg_path: Path):
     """Parse GROMACS .xvg file, returns numpy array or None."""

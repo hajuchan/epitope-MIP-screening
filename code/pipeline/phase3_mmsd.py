@@ -128,6 +128,9 @@ def run_phase3(phase1_results: dict = None,
             )
             all_pc_results.append(pc_result)
 
+        # Remove excluded PCs (incomplete docking)
+        all_pc_results = [r for r in all_pc_results if not r.get("excluded")]
+
         # 4. Rank by MMSD sum (Sullivan 2019: penalize competing PCs)
         # Uniform (non-competing) PCs get priority at equal MMSD sum
         all_pc_results.sort(key=lambda x: (
@@ -216,7 +219,11 @@ def _run_single_mmsd(target: str, pc_id: str,
             ga_runs=ga_runs,
         )
 
-        be = dock_result.get("mean_cluster_energy", 0.0)
+        be = dock_result.get("mean_cluster_energy")
+        if be is None:
+            logger.warning(f"    Step {step} {monomer_name}: docking failed, skipping")
+            monomer_energies[monomer_name] = None
+            continue
         monomer_energies[monomer_name] = be
 
         # Merge docked ligand into receptor for next step
@@ -232,9 +239,20 @@ def _run_single_mmsd(target: str, pc_id: str,
             current_receptor_pdb = merged_pdb
             current_receptor_pdbqt = merged_pdbqt
 
-    # Compute MMSD sum and SMD sum
-    mmsd_sum = sum(monomer_energies.values())
-    smd_sum = sum(smd_be.get(m, 0.0) for m in monomers)
+    # Compute MMSD sum and SMD sum — skip if any monomer failed
+    valid_energies = {m: e for m, e in monomer_energies.items() if e is not None}
+    if len(valid_energies) < len(monomers):
+        n_fail = len(monomers) - len(valid_energies)
+        logger.warning(f"    {pc_id}: {n_fail} monomer(s) failed — PC excluded")
+        return {
+            "pc_id": pc_id, "monomers": monomers,
+            "monomer_energies": monomer_energies,
+            "mmsd_sum": None, "smd_sum": None, "delta_sum": None,
+            "synergy": False, "is_uniform": False, "excluded": True,
+        }
+
+    mmsd_sum = sum(valid_energies.values())
+    smd_sum = sum(smd_be.get(m, 0.0) for m in monomers if smd_be.get(m) is not None)
     delta_sum = mmsd_sum - smd_sum  # negative = synergy
 
     # Sullivan 2019: analyze competition (monomers at same binding site)

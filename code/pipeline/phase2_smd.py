@@ -125,11 +125,13 @@ def run_phase2(phase1_results: dict = None,
                 binding_sites=binding_sites,
             )
 
-            # Merge: keep best BE per monomer across conformers
+            # Merge: keep best BE per monomer across conformers (skip failures)
             for m, r in conf_results.items():
+                if r.get("mean_cluster_energy") is None:
+                    continue  # skip failed docking
                 prev = all_conf_results.get(m)
-                if prev is None or r.get("mean_cluster_energy", 0) < \
-                        prev.get("mean_cluster_energy", 0):
+                if prev is None or prev.get("mean_cluster_energy") is None \
+                        or r["mean_cluster_energy"] < prev["mean_cluster_energy"]:
                     all_conf_results[m] = r
 
         target_results = all_conf_results
@@ -140,8 +142,16 @@ def run_phase2(phase1_results: dict = None,
             target_results = _analyze_hbond_types_for_target(
                 target, target_results, t_result, output_dir)
 
+        # Only include monomers with successful docking (non-None BE)
+        failed = [m for m, r in target_results.items()
+                  if r.get("mean_cluster_energy") is None]
+        if failed:
+            logger.warning(f"  [{target}] {len(failed)} monomer(s) failed docking: {failed}")
+
         be_matrix[target] = {
-            m: r["mean_cluster_energy"] for m, r in target_results.items()
+            m: r["mean_cluster_energy"]
+            for m, r in target_results.items()
+            if r.get("mean_cluster_energy") is not None
         }
         all_dock_results[target] = target_results
 

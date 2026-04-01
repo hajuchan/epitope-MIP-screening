@@ -55,13 +55,13 @@ def generate_gpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
     custom_param_file = None
     if has_custom_types:
         custom_param_file = _write_custom_params(output_dir)
-        # Remap unknown types: Si → S (sulfur-like vdW), others → C
+        # Keep custom types that have parameters in our file; remap rest to C
         remapped = []
         for t in map_types:
             if t in _AD4_STANDARD_TYPES:
                 remapped.append(t)
-            elif t == "Si":
-                remapped.append("Si")  # handled by custom params
+            elif t in ("Si", "B"):
+                remapped.append(t)  # handled by custom params
             else:
                 remapped.append("C")
                 logger.warning(f"Remapping unknown atom type '{t}' → C")
@@ -154,7 +154,7 @@ def generate_dpf(receptor_pdbqt: Path, ligand_pdbqt: Path,
         custom_param = _write_custom_params(output_dir)
         remapped = []
         for t in map_types:
-            if t in _AD4_STANDARD_TYPES or t == "Si":
+            if t in _AD4_STANDARD_TYPES or t in ("Si", "B"):
                 remapped.append(t)
             else:
                 remapped.append("C")
@@ -253,11 +253,17 @@ def run_autodock(dpf_path: Path, timeout: int = 3600) -> dict:
             # The actual vdW parameters come from the custom
             # parameter_file (AD4_parameters_Si.dat) in the DPF,
             # which --import_dpf reads — identical to AD4 CPU.
+            # Declare non-standard atom types for AD-GPU
             ligand_pdbqt = dpf_path.parent / ligand_name
+            derivtypes = []
             if ligand_pdbqt.exists():
                 ligand_text = ligand_pdbqt.read_text()
                 if " Si" in ligand_text or "\tSi" in ligand_text:
-                    cmd.extend(["--derivtype", "Si=S"])
+                    derivtypes.append("Si=S")
+                if " B\n" in ligand_text or " B " in ligand_text or "\tB" in ligand_text:
+                    derivtypes.append("B=C")
+            if derivtypes:
+                cmd.extend(["--derivtype", "/".join(derivtypes)])
 
             # Import DPF: reads parameter_file, GA params, etc.
             # AD-GPU --import_dpf has "partial support" — some AD4
@@ -513,7 +519,8 @@ def dock_single(receptor_pdbqt: Path, ligand_pdbqt: Path,
                         output_dir=work_dir)
     grid_result = run_autogrid(gpf)
     if not grid_result["success"]:
-        return {"binding_energy": 0.0, "error": grid_result["stderr"]}
+        return {"binding_energy": None, "mean_cluster_energy": None,
+                "error": grid_result["stderr"], "success": False}
 
     # 2. AutoDock
     map_prefix = f"{rec_local.stem}_{lig_local.stem}"
@@ -527,7 +534,8 @@ def dock_single(receptor_pdbqt: Path, ligand_pdbqt: Path,
     )
     dock_result = run_autodock(dpf)
     if not dock_result["success"]:
-        return {"binding_energy": 0.0, "error": dock_result["stderr"]}
+        return {"binding_energy": None, "mean_cluster_energy": None,
+                "error": dock_result["stderr"], "success": False}
 
     # 3. Parse results
     dlg = dock_result["dlg_path"]
@@ -560,30 +568,33 @@ _AD4_STANDARD_TYPES = {
 
 def _write_custom_params(output_dir: Path) -> Path:
     """
-    Write AutoDock4 custom parameter file with Si atom type.
+    Write AutoDock4 custom parameter file with non-standard atom types.
 
     Per autodock.scripps.edu/how-to-add-new-atom-types:
-    Si parameters from UFF (Rappe et al., JACS 1992) Si_3 tetrahedral.
-    Rajpal 2024 used silane monomers with AutoDock4 — this is the
-    standard approach for non-standard atom types.
+    - Si: UFF (Rappe et al., JACS 1992) Si_3 tetrahedral.
+    - B:  UFF B_3 trigonal (for boronic acid APBA monomer).
     """
-    param_path = Path(output_dir) / "AD4_parameters_Si.dat"
+    param_path = Path(output_dir) / "AD4_parameters_custom.dat"
     if param_path.exists():
         return param_path
 
-    # UFF (Rappe et al., JACS 1992) Si_3 (tetrahedral silicon):
-    #   Rii = 4.295 A (vdW distance)
-    #   epsii = 0.402 kcal/mol (well depth)
-    #   vol = 4/3 * pi * (4.295/2 / 2)^3 = 12.175 A^3
-    #   solpar = -0.00143 (adopted from S)
-    # Per: autodock.scripps.edu/how-to-add-new-atom-types-to-the-autodock-force-field/
+    # Si: UFF Si_3 (tetrahedral silicon)
+    #   Rii = 4.295 A, epsii = 0.402 kcal/mol
+    # B:  UFF B_3 (trigonal boron)
+    #   Rii = 4.083 A, epsii = 0.180 kcal/mol
+    #   B in boronic acid B(OH)2 is sp2 trigonal → B_2 in UFF
+    #   Rij_hb = 0 (no H-bond), hbond = 0
     content = """\
-# AutoDock4 custom parameters for Silicon (Si) atom type
-# Source: UFF Si_3 (Rappe et al., JACS 1992, 114, 10024-10035)
-# For silane monomers: PTES, APTES, APTMS, UPTMS, TEOS, etc.
+# AutoDock4 custom parameters for non-standard atom types
+# Source: UFF (Rappe et al., JACS 1992, 114, 10024-10035)
+# Per: autodock.scripps.edu/how-to-add-new-atom-types-to-the-autodock-force-field/
+#
+# Si: for silane monomers (PTES, APTES, APTMS, TEOS, etc.)
+# B:  for boronic acid monomer (APBA — glycan recognition)
 #
 # atom_par  Rii    epsii   vol      solpar    Rij_hb epsij_hb hbond rec map
 atom_par Si  4.295  0.402  12.175  -0.00143  0.0  0.0  0  -1  -1
+atom_par B   4.083  0.180  11.000  -0.00110  0.0  0.0  0  -1  -1
 """
     param_path.write_text(content)
     logger.info(f"Custom AD4 parameters (Si) written: {param_path}")

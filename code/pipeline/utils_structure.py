@@ -404,14 +404,26 @@ def smiles_to_pdbqt(smiles: str, name: str, output_dir: Path) -> Path:
     params.randomSeed = 42
     status = AllChem.EmbedMolecule(mol, params)
     if status != 0:
-        # fallback to less strict embedding
-        AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+        # Fallback 1: ETKDG
+        status = AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+    if status != 0:
+        # Fallback 2: random coordinates (for large molecules like Lipid IVA)
+        params2 = AllChem.ETKDGv3()
+        params2.useRandomCoords = True
+        params2.maxIterations = 5000
+        params2.randomSeed = 42
+        status = AllChem.EmbedMolecule(mol, params2)
+    if status != 0:
+        raise ValueError(f"Failed to generate 3D coordinates for {name}")
 
-    # MMFF94 optimization
+    # MMFF94 optimization (fallback to UFF for non-standard atoms)
     try:
         AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
     except Exception:
-        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+        try:
+            AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+        except Exception:
+            logger.warning(f"  {name}: optimization failed, using raw coordinates")
 
     # Write PDB
     pdb_path = output_dir / f"{name}.pdb"
@@ -424,17 +436,26 @@ def smiles_to_pdbqt(smiles: str, name: str, output_dir: Path) -> Path:
     #   2. Restore Si atom type in the PDBQT file
     #   3. Provide custom parameter_file with Si params (UFF-based)
     #      in GPF/DPF — handled by utils_autodock.py
-    si_atom_indices = [a.GetIdx() for a in mol.GetAtoms()
-                       if a.GetAtomicNum() == 14]
-    has_si = len(si_atom_indices) > 0
+    # Detect non-standard atoms (Si, B) that need proxy substitution
+    nonstandard = {}
+    for a in mol.GetAtoms():
+        anum = a.GetAtomicNum()
+        if anum == 14:   # Si → S proxy
+            nonstandard.setdefault("Si", []).append(a.GetIdx())
+        elif anum == 5:  # B → C proxy
+            nonstandard.setdefault("B", []).append(a.GetIdx())
 
-    # Make a copy with Si→S for Gasteiger-compatible PDBQT generation
+    # Make a copy with proxy substitutions for Gasteiger charge calculation
     mol_for_pdbqt = mol
-    if has_si:
+    if nonstandard:
         rw = Chem.RWMol(mol)
-        for idx in si_atom_indices:
-            rw.GetAtomWithIdx(idx).SetAtomicNum(16)  # S as proxy
+        for idx in nonstandard.get("Si", []):
+            rw.GetAtomWithIdx(idx).SetAtomicNum(16)  # S proxy
+        for idx in nonstandard.get("B", []):
+            rw.GetAtomWithIdx(idx).SetAtomicNum(6)   # C proxy
         mol_for_pdbqt = rw.GetMol()
+        subs = ", ".join(f"{k}({len(v)})" for k, v in nonstandard.items())
+        logger.info(f"  {name}: proxy substitution for PDBQT: {subs}")
 
     pdbqt_path = output_dir / f"{name}.pdbqt"
     pdbqt_text = None
@@ -489,9 +510,15 @@ def smiles_to_pdbqt(smiles: str, name: str, output_dir: Path) -> Path:
         pdbqt_path.write_text("")
         return pdbqt_path
 
-    # Restore Si atom type in PDBQT (replace proxy S/SA → Si)
-    if has_si:
-        pdbqt_text = _restore_si_in_pdbqt(pdbqt_text, len(si_atom_indices))
+    # Restore non-standard atom types in PDBQT
+    if "Si" in nonstandard:
+        pdbqt_text = _restore_atom_in_pdbqt(
+            pdbqt_text, proxy_types=("S", "SA"), target_type="Si",
+            n_atoms=len(nonstandard["Si"]))
+    if "B" in nonstandard:
+        pdbqt_text = _restore_atom_in_pdbqt(
+            pdbqt_text, proxy_types=("C",), target_type=" B",
+            n_atoms=len(nonstandard["B"]))
 
     pdbqt_path.write_text(pdbqt_text)
 
@@ -591,7 +618,7 @@ def check_epitope_uniqueness(sequence: str, target_name: str,
 
         # Poll for results (max 2 minutes)
         logger.info(f"BLAST submitted (RID={rid}), waiting for results...")
-        for _ in range(24):
+        for _ in range(60):  # 5 minutes max wait
             _time.sleep(5)
             check_url = (f"https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi?"
                          f"CMD=Get&FORMAT_TYPE=XML&RID={rid}")
@@ -693,28 +720,30 @@ def compute_grid_size(pdb_path: Path, padding: float = 8.0) -> tuple:
 
 # ── Internal Helpers ───────────────────────────────────────────
 
-def _restore_si_in_pdbqt(pdbqt_text: str, n_si: int) -> str:
+def _restore_atom_in_pdbqt(pdbqt_text: str, proxy_types: tuple,
+                            target_type: str, n_atoms: int) -> str:
     """
-    Restore Si atom type in PDBQT after Si→S proxy generation.
+    Restore non-standard atom types in PDBQT after proxy substitution.
 
-    In PDBQT format, atom type occupies columns 77-78.
-    S or SA atoms that were originally Si are replaced back to Si.
-    We match by count (same order as RDKit atom indices).
+    Parameters
+    ----------
+    proxy_types : tuple of proxy atom type strings to match (e.g., ("S", "SA"))
+    target_type : 2-char target type to restore (e.g., "Si" or " B")
+    n_atoms : expected number of atoms to restore
     """
     restored = []
-    si_restored = 0
+    count = 0
     for line in pdbqt_text.split("\n"):
         if (line.startswith(("ATOM", "HETATM"))
                 and len(line) >= 78
-                and si_restored < n_si):
+                and count < n_atoms):
             atype = line[77:79].strip()
-            if atype in ("S", "SA"):
-                # Pad to 2 chars right-justified in columns 77-78
-                line = line[:77] + "Si" + line[79:]
-                si_restored += 1
+            if atype in proxy_types:
+                line = line[:77] + target_type + line[79:]
+                count += 1
         restored.append(line)
-    if si_restored > 0:
-        logger.info(f"  Restored {si_restored} Si atom(s) in PDBQT")
+    if count > 0:
+        logger.info(f"  Restored {count} {target_type.strip()} atom(s) in PDBQT")
     return "\n".join(restored)
 
 

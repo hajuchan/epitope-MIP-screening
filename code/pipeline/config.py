@@ -153,7 +153,7 @@ VINYL_MONOMERS = {
 ALL_MONOMERS = {**SILANE_MONOMERS, **VINYL_MONOMERS}
 
 # Cross-linkers (excluded from functional monomer screening)
-CROSSLINKERS = {"TEOS", "MBAAm", "EGDMA"}
+CROSSLINKERS = {"MBAAm", "EGDMA"}
 
 # Functional monomers only (for SMD/MMSD screening)
 FUNCTIONAL_MONOMERS = {k: v for k, v in ALL_MONOMERS.items()
