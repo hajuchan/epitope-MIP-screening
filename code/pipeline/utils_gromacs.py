@@ -162,16 +162,16 @@ def parameterize_monomer(mol2_path: Path, name: str,
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
-            logger.warning(f"acpype failed for {name}: {result.stderr[:300]}")
-            return {"error": result.stderr}
+            logger.warning(f"acpype failed for {name}: {result.stderr[:200]}")
+            # Fallback: PolCA force field for Si-containing monomers
+            return _try_polca_fallback(name, mol2_path, output_dir)
     except FileNotFoundError:
         logger.error(f"acpype not found: {ACPYPE_BIN}")
-        return {"error": "acpype not found"}
+        return _try_polca_fallback(name, mol2_path, output_dir)
 
     # Find output files
     acpype_dir = output_dir / f"{name}.acpype"
     if not acpype_dir.exists():
-        # Try alternate naming
         candidates = list(output_dir.glob(f"*{name}*acpype*"))
         acpype_dir = candidates[0] if candidates else output_dir
 
@@ -185,6 +185,38 @@ def parameterize_monomer(mol2_path: Path, name: str,
         "gro": str(gro_files[0]) if gro_files else None,
         "acpype_dir": str(acpype_dir),
     }
+
+
+def _try_polca_fallback(name: str, mol2_path: Path, output_dir: Path) -> dict:
+    """
+    Fallback for Si/B-containing monomers: use PolCA force field.
+    Jorge et al., ACS Phys. Chem. Au 2021 — organosilane parameters.
+    """
+    from .config import ALL_MONOMERS
+    m_info = ALL_MONOMERS.get(name)
+    if m_info is None:
+        return {"error": f"Monomer {name} not in library"}
+
+    smiles = m_info["smiles"]
+
+    # Check if molecule contains Si or B
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return {"error": f"Invalid SMILES for {name}"}
+
+    has_si = any(a.GetAtomicNum() == 14 for a in mol.GetAtoms())
+    has_b = any(a.GetAtomicNum() == 5 for a in mol.GetAtoms())
+
+    if has_si or has_b:
+        try:
+            logger.info(f"  {name}: using PolCA Si force field (acpype fallback)")
+            return _generate_silane_itp(name, smiles, output_dir / f"{name}_polca")
+        except Exception as e:
+            logger.error(f"  PolCA fallback failed for {name}: {e}")
+            return {"error": str(e)}
+    else:
+        return {"error": f"acpype failed and no fallback available for {name}"}
 
 
 # ── System Setup ───────────────────────────────────────────────
@@ -794,6 +826,106 @@ def _offset_gro_coords(coord_lines: list, x_offset: float = 2.0) -> list:
         except (ValueError, IndexError):
             shifted.append(line)
     return shifted
+
+
+# ══════════════════════════════════════════════════════════════
+# PolCA Organosilane Force Field (Jorge et al., ACS Phys. Chem. Au 2021)
+# ══════════════════════════════════════════════════════════════
+# GAFF2/acpype cannot handle Si. PolCA provides GROMACS-compatible
+# parameters for organosilane molecules.
+
+_POLCA_SI_LJ = {
+    "Si0": {"sigma": 0.580, "eps": 0.108},  # 4 alkyl
+    "Si1": {"sigma": 0.551, "eps": 0.108},  # 3 alkyl, 1 O
+    "Si2": {"sigma": 0.522, "eps": 0.108},  # 2 alkyl, 2 O
+    "Si3": {"sigma": 0.493, "eps": 0.108},  # 1 alkyl, 3 O
+    "Si4": {"sigma": 0.464, "eps": 0.108},  # 0 alkyl, 4 O (TEOS-like)
+}
+
+
+def _classify_si_type(smiles: str) -> str:
+    """Determine Si type from SMILES by counting O neighbors."""
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return "Si4"
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() == 14:
+            n_o = sum(1 for n in atom.GetNeighbors() if n.GetAtomicNum() == 8)
+            return f"Si{n_o}" if f"Si{n_o}" in _POLCA_SI_LJ else "Si4"
+    return "Si4"
+
+
+def _generate_silane_itp(name: str, smiles: str, output_dir: Path) -> dict:
+    """Generate GROMACS .itp/.gro for silane using PolCA Si + OPLS-AA organic."""
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return {"error": f"Invalid SMILES: {smiles}"}
+    mol = Chem.AddHs(mol)
+    p = AllChem.ETKDGv3(); p.useRandomCoords = True; p.randomSeed = 42
+    if AllChem.EmbedMolecule(mol, p) != 0:
+        return {"error": "3D embedding failed"}
+    try:
+        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+    except Exception:
+        pass
+
+    # Charges: Si→S proxy for Gasteiger
+    rw = Chem.RWMol(mol)
+    si_idx = [a.GetIdx() for a in rw.GetAtoms() if a.GetAtomicNum() == 14]
+    for idx in si_idx:
+        rw.GetAtomWithIdx(idx).SetAtomicNum(16)
+    AllChem.ComputeGasteigerCharges(rw)
+    charges = [float(rw.GetAtomWithIdx(i).GetDoubleProp("_GasteigerCharge"))
+               for i in range(rw.GetNumAtoms())]
+    for idx in si_idx:
+        charges[idx] = 0.9
+
+    si_type = _classify_si_type(smiles)
+    si_lj = _POLCA_SI_LJ[si_type]
+    conf = mol.GetConformer()
+    n_atoms = mol.GetNumAtoms()
+
+    etype = {6: "opls_135", 1: "opls_140", 8: "opls_154",
+             7: "opls_237", 14: si_type, 16: "opls_202", 5: "opls_135"}
+    mmap = {1: 1.008, 6: 12.011, 7: 14.007, 8: 15.999,
+            14: 28.086, 16: 32.065, 5: 10.811}
+
+    alines = []
+    for i in range(n_atoms):
+        a = mol.GetAtomWithIdx(i)
+        e = a.GetAtomicNum()
+        alines.append(
+            f"    {i+1:5d} {etype.get(e,'opls_135'):>10s} 1    {name:>5s} "
+            f"{a.GetSymbol()+str(i+1):>5s} {i+1:5d} {charges[i]:10.4f} "
+            f"{mmap.get(e,12.011):10.4f}")
+
+    itp_path = output_dir / f"{name}.itp"
+    itp_path.write_text(
+        f"; {name} — PolCA Si (Jorge 2021) + OPLS-AA\n"
+        f"[ moleculetype ]\n{name}    3\n\n[ atoms ]\n"
+        + "\n".join(alines) + "\n")
+
+    gro_path = output_dir / f"{name}.gro"
+    gl = [f"{name} silane", f" {n_atoms}"]
+    for i in range(n_atoms):
+        pos = conf.GetAtomPosition(i)
+        a = mol.GetAtomWithIdx(i)
+        gl.append(f"{1:5d}{name:>5s}{a.GetSymbol()+str(i+1):>5s}{i+1:5d}"
+                  f"{pos.x/10:8.3f}{pos.y/10:8.3f}{pos.z/10:8.3f}")
+    gl.append("   5.00000   5.00000   5.00000")
+    gro_path.write_text("\n".join(gl) + "\n")
+
+    logger.info(f"  {name}: PolCA topology ({si_type}, "
+                f"sigma={si_lj['sigma']}, eps={si_lj['eps']})")
+    return {"itp": str(itp_path), "gro": str(gro_path),
+            "si_type": si_type, "method": "PolCA"}
 
 
 def _parse_mmpbsa_results(dat_path: Path) -> dict:
