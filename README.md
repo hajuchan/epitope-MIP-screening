@@ -72,25 +72,31 @@ Phase 2: Single Monomer Docking (SMD) — AutoDock4/GPU
   └── 필터: BE ≤ -2.0 kcal/mol, ΔΔG ≤ -0.5 kcal/mol
     ↓ 타겟별 후보 모노머 리스트
 
-Phase 3: Multi-Monomer Simultaneous Docking (MMSD) — Rajpal 2024
-  ├── 고정 2종 (최고 BE + TEOS 가교제) + 변수 2종 조합
-  ├── 4-monomer sequential docking (이전 결과를 수용체에 병합)
+Phase 3: Bayesian Optimization + MMSD — Gryffin (Hase 2021) + Rajpal 2024
+  ├── Gryffin BO: 물리화학 descriptor 기반 범주형 최적화
+  │   → 조합 크기(2-6종) + 모노머 종류를 동시 탐색
+  │   → ~30-50회 MMSD 평가로 전역 최적 근사 (전수 탐색 ~15,000회 대비)
+  ├── MMSD sequential docking (이전 결과를 수용체에 병합)
   ├── MMSD sum vs SMD sum → 시너지/간섭 판별
   ├── 경쟁 분석: 같은 부위 점유 시 페널티 (Sullivan 2019)
-  └── 비경쟁 + 저에너지 우선 랭킹 → 상위 8 PC 선발
-    ↓ 타겟별 상위 Polymer Composition (PC)
+  └── 비경쟁 + 저에너지 우선 랭킹 → 최적 PC 선발
+    ↓ 최적 모노머 조합 (종류 + 개수 자동 결정)
 
-Phase 4: GROMACS MD 검증 + MM-GBSA
+Phase 4: Pre-polymerization MD + 최적 비율 결정
   ├── GAFF2 모노머 파라미터화 (acpype) + topology 자동 병합
+  ├── 선택된 모노머를 실험 비율(1:20)로 배치
+  │   예) 에피토프 1 + APBA 5 + PTES 5 + APTMS 5 + TEOS 5 = 21분자
   ├── 50ns 전원자 MD (amber99sb-ildn + GAFF2 + TIP3P + 0.15M NaCl)
+  ├── 에피토프 주위 모노머 분포 분석 → 최적 합성 비율 제안
+  │   contact frequency per monomer type → occupancy 비율 = 합성 비율
   ├── 궤적 분석: RMSD, RMSF, H-bond, Rg
   ├── DSSP 2차 구조 변화 추적 (계산적 CD 대체)
   ├── MM-GBSA 결합 자유 에너지 (Sullivan 2019)
   └── 교차 반응성: CD63-PC를 CD81/CD9 에피토프에 테스트
-    ↓ 검증된 PC + ΔG 순위
+    ↓ 검증된 PC + 최적 모노머 비율 + ΔG 순위
 
 Phase 5: 합성 레시피 + 검증 프로토콜
-  ├── 모노머 비율 (1:20 에피토프:모노머, Sehit 2024)
+  ├── Phase 4에서 결정된 최적 모노머 비율 적용
   ├── 합성 프로토콜 (sol-gel / solid-phase / free-radical)
   ├── CD63 이중 에피토프 (펩타이드 + glycan, Teixeira 2021)
   ├── 검증: SPR two-state fitting + QCM-D (Kowalczyk 2023)
@@ -134,10 +140,17 @@ ECL2의 **head subdomain** (helix C-D + 연결 루프)은 서열 가변성이 �
 9. **MD 안정성**: ECL2 전체 GROMACS 20ns → RMSD < 3.0 Å (Sehit 2024)
 10. **Ensemble conformer 추출**: MD 궤적에서 5개 대표 구조 추출 → 각각 receptor PDBQT 생성. Phase 2에서 다중 conformer에 도킹하여 receptor 유연성 반영
 
-### 참고
+### 방법별 참조 문헌
 
-- Sehit E et al. "Computationally Designed Epitope-Mediated Imprinted Polymers." *ACS Sensors* 2024;9:1831-1841.
-- Teixeira SPB et al. "Epitope-imprinted polymers: Design principles." *Science Advances* 2021;7:eabi9884.
+| 방법 | 참조 |
+|------|------|
+| 에피토프 길이 9-16 잔기 | Teixeira SPB et al. *Science Advances* 2021;7:eabi9884 |
+| ECL2 전체를 receptor로 사용 | 본 파이프라인 설계 (disulfide 유지 근거) |
+| PROPKA protonation (pH 7.4) | Li H et al. *Proteins* 2005;61:704-721 |
+| BLAST 에피토프 고유성 | Bossi AM et al. *Anal. Bioanal. Chem.* 2021;413:6101-6112 |
+| MD 안정성 + Ensemble conformer | Sehit E et al. *ACS Sensors* 2024;9:1831-1841 |
+| AlphaFold 구조 사용 | Jumper J et al. *Nature* 2021;596:583-589 |
+| pdbfixer missing atom 수정 | Eastman P et al. *PLoS Comput. Biol.* 2017;13:e1005659 (OpenMM) |
 
 ---
 
@@ -168,13 +181,14 @@ AutoDock4를 Vina 대신 사용하는 이유:
 
 Phase 1 MD에서 추출한 **5개 conformer + 원본 구조 = 6개 receptor**에 각각 도킹. 모노머별로 가장 좋은 BE를 선택. Receptor 유연성을 고려하여 single-structure docking의 한계를 극복
 
-### Si 원자 처리 (AutoDock4 비표준 원자)
+### 비표준 원자 처리 (Si, B)
 
-실란 모노머의 Si 원자는 AutoDock4 기본 force field에 포함되지 않음. [Scripps 공식 가이드](https://autodock.scripps.edu/how-to-add-new-atom-types-to-the-autodock-force-field/)에 따라:
-1. **PDBQT 생성**: Si → S(황) 치환 후 meeko로 PDBQT 생성 → PDBQT 내 Si 원자 타입 복원
-2. **커스텀 파라미터**: UFF (Rappe et al., JACS 1992) Si_3 값으로 `AD4_parameters_Si.dat` 생성
-   - Rii = 4.295 A, epsii = 0.402 kcal/mol
-3. **GPF/DPF**: `parameter_file AD4_parameters_Si.dat` 지시자 자동 삽입
+실란 모노머의 Si와 보론산(APBA)의 B는 AutoDock4 기본 force field에 포함되지 않음. [Scripps 공식 가이드](https://autodock.scripps.edu/how-to-add-new-atom-types-to-the-autodock-force-field/)에 따라:
+1. **PDBQT 생성**: Si→S, B→C proxy 치환 후 meeko로 PDBQT → 원래 원자 타입 복원
+2. **커스텀 파라미터**: UFF (Rappe et al., JACS 1992) 값으로 `AD4_parameters_custom.dat` 생성
+   - Si_3: Rii=4.295A, epsii=0.402 kcal/mol
+   - B_3: Rii=4.083A, epsii=0.180 kcal/mol
+3. **AutoDock-GPU**: `--derivtype Si=S/B=C` + parameter_file
 
 ### 도킹 파라미터
 
@@ -188,13 +202,28 @@ Phase 1 MD에서 추출한 **5개 conformer + 원본 구조 = 6개 receptor**에
 | BE threshold | -2.0 kcal/mol | 유의미한 결합 최소값 |
 | ΔΔG threshold | -0.5 kcal/mol | 최소 선택도 |
 
+### 방법별 참조 문헌
+
+| 방법 | 참조 |
+|------|------|
+| AutoDock4 LGA 도킹 | Morris GM et al. *J. Comput. Chem.* 2009;30:2785-2791 |
+| AutoDock-GPU | Santos-Martins D et al. *J. Chem. Theory Comput.* 2021;17:1060-1073 |
+| fpocket 결합 부위 예측 | Le Guilloux V et al. *BMC Bioinformatics* 2009;10:168 |
+| Backbone H-bond 분석 | Sullivan MV et al. *J. Phys. Chem. B* 2019;123:5432-5443 |
+| Contact MD (10ns) | Sehit E et al. *ACS Sensors* 2024;9:1831-1841 |
+| Ensemble docking | Amaro RE et al. *J. Med. Chem.* 2018;61:7531 (일반 원리) |
+| UFF 비표준 원자 파라미터 | Rappe AK et al. *JACS* 1992;114:10024-10035 |
+| SMD 모노머 랭킹 | Rajpal S et al. *Sci. Rep.* 2024;14:23057 |
+
 ---
 
-## 5. Phase 3: Multi-Monomer Simultaneous Docking (MMSD)
+## 5. Phase 3: Bayesian Optimization + MMSD
 
 **파일**: `code/pipeline/phase3_mmsd.py`
 
-### 과학적 원리 (Rajpal et al. 2024)
+### 과학적 원리
+
+#### MMSD (Rajpal et al. 2024)
 
 단일 모노머 도킹(SMD)은 개별 결합력만 평가하지만, 실제 MIP는 **다수 모노머의 동시 상호작용**으로 작동한다. MMSD는 항체 파라토프의 다중점 결합을 모사한다.
 
@@ -203,46 +232,79 @@ Phase 1 MD에서 추출한 **5개 conformer + 원본 구조 = 6개 receptor**에
 - DIDMS, IBTES: MMSD에서 5-7% 감소 (간섭)
 - **실험 검증**: MMSD 예측 최상위 PC I (PTES+APTMS+APTES+TEOS)이 IF 1.73으로 가장 높은 성능
 
+#### Bayesian Optimization (Hase et al. 2021)
+
+기존 MMSD의 한계: 4종 고정 조합만 탐색 (과학적 근거 부족). **Gryffin** (Hase et al. 2021)을 도입하여 조합 크기(2-6종)와 모노머 종류를 **동시에 최적화**:
+
+1. 각 모노머를 물리화학 descriptor로 인코딩 (H-bond, hydrophobic, pi-pi, MW 등)
+2. 초기 15-20개 랜덤 조합 MMSD 실행
+3. GPR surrogate model 학습 → 미탐색 조합의 MMSD sum 예측
+4. Expected Improvement acquisition function으로 다음 탐색 조합 선택
+5. 수렴까지 반복 (~30-50회 MMSD 평가)
+
+**전수 탐색 ~15,000회 대비 ~50회로 전역 최적 근사.**
+
 ### Sequential Docking 프로토콜
 
 ```
-Step 1: Fixed-1 (최고 BE 모노머) → 에피토프에 도킹 → best pose
-Step 2: Fixed-1 pose를 수용체에 병합
-Step 3: Fixed-2 (TEOS 가교제) → (에피토프 + Fixed-1)에 도킹
-Step 4: Fixed-2 pose 병합
-Step 5: Variable-1 → (에피토프 + Fixed-1 + Fixed-2)에 도킹
-Step 6: Variable-1 병합
-Step 7: Variable-2 → 전체 복합체에 도킹
+Step 1: Monomer-1 → 에피토프에 도킹 → best pose
+Step 2: Monomer-1 pose를 수용체에 병합
+Step 3: Monomer-2 → (에피토프 + Monomer-1)에 도킹
+Step 4: 반복 ... (조합 크기만큼)
+Step N: 가교제(TEOS) → 전체 복합체에 최종 도킹
 ```
 
 ### 평가 지표
 
-- **MMSD sum**: 4개 모노머 BE의 합 (낮을수록 좋음)
-- **SMD sum**: 동일 4개 모노머의 개별 SMD BE 합
+- **MMSD sum**: k개 모노머 BE의 합 (낮을수록 좋음)
+- **SMD sum**: 동일 k개 모노머의 개별 SMD BE 합
 - **Δ = MMSD - SMD**: 음수 = 시너지, 양수 = 간섭
 - **경쟁 분석** (Sullivan 2019): 두 모노머가 5 Å 이내에 도킹 → 같은 부위 경쟁 → 페널티
+- **상호작용 다양성**: H-bond + hydrophobic + pi-pi + electrostatic coverage
 
 ### 참고
 
-- Rajpal S et al. "Rational design based on multi-monomer simultaneous docking for epitope imprinting of SARS-CoV-2 spike protein." *Sci. Rep.* 2024;14:23057.
-- Rajpal S, Mizaikoff B. "An in silico predictive method to select multi-monomer combinations for peptide imprinting." *J. Mater. Chem. B* 2022;10:6618-6626.
+- Hase F et al. "Gryffin: Bayesian optimization of categorical variables informed by expert knowledge." *Appl. Phys. Rev.* 2021;8:031406. [DOI](https://aip.scitation.org/doi/abs/10.1063/5.0048164)
+- Griffiths RR et al. "Race to the bottom: Bayesian optimisation for chemical problems." *Digital Discovery* 2024;3:1086. [DOI](https://pubs.rsc.org/en/content/articlelanding/2024/dd/d3dd00234a)
+- Tamasi MJ et al. "Machine Learning on a Robotic Platform for the Design of Polymer-Protein Hybrids." *Adv. Mater.* 2022;34:2201809. [DOI](https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.202201809)
+- Rajpal S et al. "Rational design based on multi-monomer simultaneous docking for epitope imprinting." *Sci. Rep.* 2024;14:23057.
 
 ---
 
-## 6. Phase 4: MD 검증 및 결합 자유 에너지
+## 6. Phase 4: Pre-polymerization MD + 최적 비율 결정
 
 **파일**: `code/pipeline/phase4_md_validation.py`
 
 ### 과학적 원리
 
-GROMACS를 이용한 **50ns 전원자 MD 시뮬레이션**으로 도킹 결과의 동적 안정성을 검증한다. 16-mer 에피토프 + 4개 소분자 시스템은 50ns면 RMSD/MM-GBSA가 충분히 수렴한다. Sullivan et al. (2019)의 프로토콜에 따라 **MM-GBSA**로 결합 자유 에너지를 계산한다.
+Phase 3에서 선택된 모노머 조합을 **실험 비율(1:20 에피토프:모노머)**로 배치하고 GROMACS MD를 수행한다. 이것은 중합 직전의 **pre-polymerization mixture**를 시뮬레이션하는 것으로, 모노머가 에피토프 주위에 어떻게 자발적으로 자기조립하는지 관찰한다.
+
+**Pre-polymerization MD의 핵심 가정**: 중합 전에 에피토프 주위에 모인 모노머가 중합 시 "그 자리에 잠기고", 이 배치가 MIP cavity의 형태를 결정한다. Rajpal 2024, Sullivan 2019, Altintas 2016 모두 이 가정으로 실험적 검증에 성공했다.
 
 ### 시스템 구축
 
-모노머 4종을 GAFF2로 파라미터화(acpype)하고, ITP/GRO를 GROMACS topology에 자동 병합한다:
-- `topol.top`에 모노머 `#include` 추가
-- 모노머 좌표를 에피토프 GRO에 병합 (steric clash 방지 오프셋)
+Phase 3에서 선택된 모노머 k종 × 여러 copy = 총 ~20개 분자를 에피토프와 함께 시뮬레이션:
+```
+예) Phase 3 최적: [APBA, PTES, APTMS] + TEOS
+  → 에피토프 1 + APBA 5 + PTES 5 + APTMS 5 + TEOS 5 = 21분자
+```
+
+- GAFF2 파라미터화(acpype) + ITP/GRO를 GROMACS topology에 자동 병합
 - PBS 조건: TIP3P + 0.15 M NaCl (`gmx genion -conc 0.15`)
+- pdbfixer로 missing atoms 자동 수정
+
+### 최적 모노머 비율 결정
+
+MD trajectory에서 에피토프 표면 3.5Å 이내의 각 모노머 타입별 **contact frequency** 분석:
+```
+시간 평균 occupancy:
+  APBA:  2.3 copies (glycan 부위에 항상 결합)
+  PTES:  1.8 copies (소수성 패치)
+  APTMS: 0.9 copies (H-bond 부위)
+  → 정규화: APBA:PTES:APTMS = 4:3:2 (최적 합성 몰비)
+```
+
+이 비율은 Phase 5 레시피에 직접 적용된다.
 
 ### MD 프로토콜
 
@@ -270,10 +332,18 @@ CD63에 최적화된 PC를 CD81과 CD9 에피토프에 적용하여 **선택도*
 ```
 음수일수록 CD63에 더 선택적.
 
-### 참고
+### 방법별 참조 문헌
 
-- Sullivan MV et al. "Toward rational design of selective MIPs for proteins." *J. Phys. Chem. B* 2019;123:5432-5443.
-- Rebelo P et al. "Rational In Silico Design of MIPs." *Int. J. Mol. Sci.* 2023;24:6785.
+| 방법 | 참조 |
+|------|------|
+| Pre-polymerization mixture MD | Nicholls IA et al. *Adv. Biochem. Eng. Biotechnol.* 2015;150:25-50 |
+| MM-GBSA 결합 자유 에너지 | Sullivan MV et al. *J. Phys. Chem. B* 2019;123:5432-5443 |
+| GROMACS + gmx_MMPBSA | Rebelo P et al. *Int. J. Mol. Sci.* 2023;24:6785 |
+| DSSP 2차 구조 (계산적 CD) | Kabsch W, Sander C. *Biopolymers* 1983;22:2577-2637 |
+| GAFF2 모노머 파라미터화 | Wang J et al. *J. Comput. Chem.* 2004;25:1157-1174 |
+| 에피토프:모노머 1:20 비율 | Sehit E et al. *ACS Sensors* 2024;9:1831-1841 |
+| Contact frequency → 비율 결정 | 본 파이프라인 독자적 방법 |
+| 교차 반응성 테스트 | Kowalczyk A et al. *Anal. Chem.* 2023;95:9520-9530 |
 
 ---
 
@@ -304,6 +374,19 @@ CD63의 3개 N-glycan을 활용한 **펩타이드 + glycan 이중 각인**:
 4. **SPR**: Two-state reaction model fitting (Kowalczyk 2023)
 5. **QCM-D**: 6.1×10⁴ - 6.1×10⁷ particles/mL 범위 교정
 6. **교차 반응성**: 각 MIP를 3개 에피토프 + HSA, BSA, lysozyme에 테스트
+
+### 방법별 참조 문헌
+
+| 방법 | 참조 |
+|------|------|
+| Sol-gel 실란 MIP 합성 | Rajpal S et al. *Sci. Rep.* 2024;14:23057 |
+| Solid-phase nanoMIP 합성 | Sehit E et al. *ACS Sensors* 2024;9:1831-1841 |
+| 이중 에피토프 (펩타이드+glycan) | Teixeira SPB et al. *Science Advances* 2021;7:eabi9884 |
+| 보론산-glycan 인식 | Bie Z et al. *Angew. Chem. Int. Ed.* 2015;54:10211-10215 |
+| SPR two-state binding model | Kowalczyk A et al. *Anal. Chem.* 2023;95:9520-9530 |
+| CD 분광법 2차 구조 확인 | Sullivan MV et al. *J. Phys. Chem. B* 2019;123:5432-5443 |
+| IF > 3, KD < 50 nM 목표 | Teixeira SPB et al. *Science Advances* 2021;7:eabi9884 |
+| Phase 4 occupancy → 합성 비율 | 본 파이프라인 독자적 방법 |
 
 ---
 
@@ -547,15 +630,19 @@ python run_validation.py --check-only            # 기존 결과만 확인
 | 2 | ΔΔG 기준 | ≤ -0.5 kcal/mol | 선택도 |
 | 2 | Backbone H-bond | ≤ 30% | Sullivan 2019 |
 | 2 | Contact MD | 10 ns/pair | Sehit 2024 |
-| 3 | 조합 크기 | 4-monomer | Rajpal 2024 |
+| 3 | 조합 크기 탐색 | 2-6종 (자동) | Gryffin BO |
+| 3 | BO 초기 탐색 | 15-20회 랜덤 | Hase 2021 |
+| 3 | BO 총 평가 | ~30-50회 MMSD | 수렴까지 |
 | 3 | 경쟁 거리 | 5.0 Å | Sullivan 2019 |
-| 3 | High-affinity | ≤ -11.0 kcal/mol | Rajpal 2024 |
-| 4 | MD 시간 | 50 ns | 16-mer+4소분자 수렴 |
+| 4 | 에피토프:모노머 비율 | 1:20 | Sehit 2024 |
+| 4 | MD 시간 | 50 ns | pre-polymerization 수렴 |
+| 4 | 모노머 총 수 | ~20개 (k종 × 여러 copy) | 실험 비율 |
+| 4 | Contact frequency cutoff | 3.5 Å | 비율 결정 기준 |
 | 4 | MM-GBSA window | 30-50 ns (마지막 20ns) | 평형 후 샘플링 |
 | 4 | MM-GBSA 방법 | GBSA (igb=5) | Sullivan 2019 |
 | 4 | 이온 강도 | 0.15 M NaCl | PBS 조건 |
 | 4 | 온도 | 300 K | 표준 조건 |
-| 5 | 에피토프:모노머 비율 | 1:20 | Sehit 2024 |
+| 5 | 모노머 비율 | Phase 4 occupancy 기반 | MD 결과 |
 | 5 | 목표 KD | < 50 nM | Teixeira 2021 |
 | 5 | 목표 IF | > 3 | Teixeira 2021 |
 
@@ -563,33 +650,83 @@ python run_validation.py --check-only            # 기존 결과만 확인
 
 ## 13. 참고 논문
 
-### 핵심 방법론
+### Phase별 핵심 참조
 
-1. **Rajpal S** et al. "Rational design based on multi-monomer simultaneous docking for epitope imprinting of SARS-CoV-2 spike protein." *Sci. Rep.* 2024;14:23057. — **MMSD 프로토콜 (Phase 3)**
+| Phase | 방법 | 참조 |
+|-------|------|------|
+| 1 | 에피토프 선정 원칙 (9-16 잔기) | Teixeira 2021 [1] |
+| 1 | BLAST 고유성 검증 | Bossi 2021 [2] |
+| 1 | 에피토프 MD 안정성 | Sehit 2024 [3] |
+| 1 | PROPKA protonation | Li 2005 [4] |
+| 2 | AutoDock4 LGA 도킹 | Morris 2009 [5] |
+| 2 | AutoDock-GPU 가속 | Santos-Martins 2021 [6] |
+| 2 | Backbone H-bond 분석 | Sullivan 2019 [7] |
+| 2 | Contact MD (10ns) | Sehit 2024 [3] |
+| 2 | UFF 비표준 원자 (Si, B) | Rappe 1992 [8] |
+| 2 | SMD 모노머 랭킹 | Rajpal 2024 [9] |
+| 3 | MMSD sequential docking | Rajpal 2024 [9], Rajpal 2022 [10] |
+| 3 | Gryffin Bayesian optimization | Hase 2021 [11] |
+| 3 | 화학 BO 리뷰 | Griffiths 2024 [12] |
+| 3 | GPR + BO polymer design | Tamasi/Webb/Gormley 2022 [13] |
+| 3 | 비경쟁 결합 원칙 | Sullivan 2019 [7] |
+| 4 | Pre-polymerization MD | Nicholls 2015 [14] |
+| 4 | MM-GBSA | Sullivan 2019 [7] |
+| 4 | GROMACS + gmx_MMPBSA | Rebelo 2023 [15] |
+| 4 | DSSP 2차 구조 | Kabsch & Sander 1983 [16] |
+| 4 | 에피토프:모노머 1:20 | Sehit 2024 [3] |
+| 5 | Sol-gel 합성 프로토콜 | Rajpal 2024 [9] |
+| 5 | Solid-phase nanoMIP | Sehit 2024 [3] |
+| 5 | 이중 에피토프 (glycan) | Teixeira 2021 [1] |
+| 5 | 보론산-glycan 인식 | Bie 2015 [17] |
+| 5 | SPR/QCM-D 검증 | Kowalczyk 2023 [18] |
 
-2. **Rajpal S**, Mizaikoff B. "An in silico predictive method to select multi-monomer combinations for peptide imprinting." *J. Mater. Chem. B* 2022;10:6618-6626. — **MMSD 원본 논문**
+### 전체 문헌 목록
 
-3. **Sehit E** et al. "Computationally Designed Epitope-Mediated Imprinted Polymers versus Conventional Epitope Imprints for Human Adenovirus Detection." *ACS Sensors* 2024;9:1831-1841. — **에피토프 MD 안정성, contact MD, solid-phase 합성 (Phase 1, 2)**
+**MIP 에피토프 설계**
 
-4. **Sullivan MV** et al. "Toward Rational Design of Selective Molecularly Imprinted Polymers (MIPs) for Proteins: Computational and Experimental Studies of Acrylamide Based Polymers for Myoglobin." *J. Phys. Chem. B* 2019;123:5432-5443. — **SiteMap, MM-GBSA, backbone H-bond, 비경쟁 원칙 (Phase 2, 3, 4)**
+[1] Teixeira SPB et al. "Epitope-imprinted polymers: Design principles of synthetic binding partners for natural biomacromolecules." *Science Advances* 2021;7:eabi9884.
 
-5. **Teixeira SPB** et al. "Epitope-imprinted polymers: Design principles of synthetic binding partners for natural biomacromolecules." *Science Advances* 2021;7:eabi9884. — **에피토프 선정, 이중 에피토프, 성능 목표 (Phase 1, 5)**
+[2] Bossi AM et al. "Molecularly imprinted polymers by epitope imprinting: bioinformatics resources to scout for epitope templates." *Anal. Bioanal. Chem.* 2021;413:6101-6112.
 
-### 타겟 검증
+[3] Sehit E et al. "Computationally Designed Epitope-Mediated Imprinted Polymers versus Conventional Epitope Imprints for Human Adenovirus Detection." *ACS Sensors* 2024;9:1831-1841.
 
-6. **Kowalczyk A** et al. "Parallel SPR and QCM-D Quantitative Analysis of CD9, CD63, and CD81 Tetraspanins." *Anal. Chem.* 2023;95:9520-9530. — **SPR/QCM-D 프로토콜, EV 친화도 순서 (Phase 5 검증)**
+[4] Li H, Robertson AD, Jensen JH. "Very fast empirical prediction and rationalization of protein pKa values." *Proteins* 2005;61:704-721. (PROPKA)
 
-### 보론산 MIP
+**도킹 + 모노머 스크리닝**
 
-7. **Bie Z** et al. "Boronate-affinity glycan-oriented surface imprinting." *Angew. Chem. Int. Ed.* 2015;54:10211-10215. — **APBA glycan 인식 (CD63 특이성)**
+[5] Morris GM et al. "AutoDock4 and AutoDockTools4: Automated docking with selective receptor flexibility." *J. Comput. Chem.* 2009;30:2785-2791.
 
-### 에피토프 선정
+[6] Santos-Martins D et al. "Accelerating AutoDock4 with GPUs and Gradient-Based Local Search." *J. Chem. Theory Comput.* 2021;17:1060-1073.
 
-8. **Bossi AM** et al. "Molecularly imprinted polymers by epitope imprinting: bioinformatics resources." *Anal. Bioanal. Chem.* 2021;413:6101-6112. — **BLAST 고유성 검증**
+[7] Sullivan MV et al. "Toward Rational Design of Selective Molecularly Imprinted Polymers (MIPs) for Proteins." *J. Phys. Chem. B* 2019;123:5432-5443.
 
-### MIP 계산 설계 리뷰
+[8] Rappe AK et al. "UFF, a full periodic table force field for molecular mechanics and molecular dynamics simulations." *JACS* 1992;114:10024-10035.
 
-9. **Rebelo P** et al. "Rational In Silico Design of MIPs: Current Challenges and Future Potential." *Int. J. Mol. Sci.* 2023;24:6785. — **GROMACS + gmx_MMPBSA 프로토콜**
+[9] Rajpal S et al. "Rational design based on multi-monomer simultaneous docking for epitope imprinting of SARS-CoV-2 spike protein." *Sci. Rep.* 2024;14:23057.
+
+[10] Rajpal S, Mizaikoff B. "An in silico predictive method to select multi-monomer combinations for peptide imprinting." *J. Mater. Chem. B* 2022;10:6618-6626.
+
+**Bayesian Optimization**
+
+[11] Hase F et al. "Gryffin: An algorithm for Bayesian optimization of categorical variables informed by expert knowledge." *Appl. Phys. Rev.* 2021;8:031406. [DOI](https://aip.scitation.org/doi/abs/10.1063/5.0048164)
+
+[12] Griffiths RR et al. "Race to the bottom: Bayesian optimisation for chemical problems." *Digital Discovery* 2024;3:1086. [DOI](https://pubs.rsc.org/en/content/articlelanding/2024/dd/d3dd00234a)
+
+[13] Tamasi MJ et al. "Machine Learning on a Robotic Platform for the Design of Polymer-Protein Hybrids." *Adv. Mater.* 2022;34:2201809. [DOI](https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.202201809)
+
+**MD 시뮬레이션**
+
+[14] Nicholls IA et al. "Theoretical and computational strategies for the study of the molecular imprinting process and polymer performance." *Adv. Biochem. Eng. Biotechnol.* 2015;150:25-50.
+
+[15] Rebelo P et al. "Rational In Silico Design of MIPs: Current Challenges and Future Potential." *Int. J. Mol. Sci.* 2023;24:6785.
+
+[16] Kabsch W, Sander C. "Dictionary of protein secondary structure." *Biopolymers* 1983;22:2577-2637.
+
+**보론산 + 타겟 검증**
+
+[17] Bie Z et al. "Boronate-affinity glycan-oriented surface imprinting." *Angew. Chem. Int. Ed.* 2015;54:10211-10215.
+
+[18] Kowalczyk A et al. "Parallel SPR and QCM-D Quantitative Analysis of CD9, CD63, and CD81 Tetraspanins." *Anal. Chem.* 2023;95:9520-9530.
 
 ---
 

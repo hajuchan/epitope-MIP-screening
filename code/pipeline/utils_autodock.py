@@ -378,8 +378,14 @@ def parse_dlg(dlg_path: Path) -> list:
     clusters = []
 
     # Parse CLUSTERING HISTOGRAM
+    # AD4 DLG RANKING format:
+    #   rank  sub  run    BE     clus_rmsd  ref_rmsd    RANKING
+    #   1     1    45    -3.50    0.00       0.00        RANKING
+    # or AD-GPU:
+    #   33    1    32    +0.60    0.00       13.92       RANKING
     cluster_pattern = re.compile(
-        r"RANKING\s+(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(\d+)"
+        r"^\s*(\d+)\s+\d+\s+\d+\s+([+-]?\d+\.\d+)\s+([+-]?\d+\.\d+)\s+[\d.]+\s+RANKING",
+        re.MULTILINE,
     )
 
     # Parse ranked results table
@@ -399,7 +405,7 @@ def parse_dlg(dlg_path: Path) -> list:
                 "rank": int(m.group(1)),
                 "binding_energy": float(m.group(2)),
                 "rmsd_from_ref": float(m.group(3)),
-                "cluster_size": int(m.group(4)),
+                "cluster_size": 1,
             })
 
     # If no clustering info found, parse individual runs

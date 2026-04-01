@@ -153,7 +153,7 @@ VINYL_MONOMERS = {
 ALL_MONOMERS = {**SILANE_MONOMERS, **VINYL_MONOMERS}
 
 # Cross-linkers (excluded from functional monomer screening)
-CROSSLINKERS = {"MBAAm", "EGDMA"}
+CROSSLINKERS = {"TEOS", "MBAAm", "EGDMA"}
 
 # Functional monomers only (for SMD/MMSD screening)
 FUNCTIONAL_MONOMERS = {k: v for k, v in ALL_MONOMERS.items()
@@ -189,15 +189,20 @@ MAX_BACKBONE_HBOND_RATIO = 0.3     # >30% backbone = structural disruption risk
 MONOMER_CONTACT_MD = True           # mandatory: run short MD per monomer-epitope pair
 MONOMER_CONTACT_MD_NS = 10          # simulation time for contact frequency
 
-# ── Phase 3: Multi-Monomer Simultaneous Docking (MMSD) ─────────
-MMSD_COMBO_SIZE = 4               # monomers per combination (Rajpal 2024)
-MMSD_N_FIXED = 2                  # fixed slots: best-BE + cross-linker
-MMSD_DEFAULT_CROSSLINKER = "TEOS" # cross-linker identity
-MMSD_HIGH_AFFINITY_THRESHOLD = -11.0  # kcal/mol — MMSD sum threshold
-MMSD_TOP_PC = 8                   # top polymer compositions to advance
-# Sullivan 2019: non-competitive binding — monomers should occupy different sites
-MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site threshold for competition check
-MMSD_PENALIZE_COMPETITION = True  # penalize PCs with competing monomers
+# ── Phase 3: Gryffin BO + MMSD ─────────────────────────────────
+# Bayesian Optimization (Hase 2021) replaces exhaustive search
+MMSD_MIN_COMBO_SIZE = 2           # minimum functional monomers (excl. crosslinker)
+MMSD_MAX_COMBO_SIZE = 6           # maximum functional monomers
+MMSD_DEFAULT_CROSSLINKER = "TEOS" # cross-linker (always added last)
+MMSD_BO_INITIAL = 15              # initial random evaluations for BO
+MMSD_BO_MAX_ITER = 50             # maximum BO iterations
+MMSD_BO_CONVERGENCE = 8           # stop if no improvement in N steps
+MMSD_HIGH_AFFINITY_THRESHOLD = -11.0  # kcal/mol — high-affinity PC threshold
+MMSD_TOP_PC = 8                   # top PCs to pass to Phase 4
+MMSD_MIN_POOL_SIZE = 8            # minimum monomer pool for BO (expand by BE if filtered < this)
+# Sullivan 2019: non-competitive binding
+MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site competition check
+MMSD_PENALIZE_COMPETITION = True  # penalize competing monomers
 
 # ── Phase 4: MD Validation — GROMACS ───────────────────────────
 MD_PRODUCTION_NS = 50             # 16-mer + 4 monomers: 50ns sufficient for convergence
@@ -237,7 +242,7 @@ VALIDATION_QCM_D = True           # QCM-D mass/viscoelastic
 VALIDATION_CD_SPECTROSCOPY = True # CD spectroscopy for 2° structure check
 
 # ── Pipeline Parameters ────────────────────────────────────────
-N_WORKERS = 16                    # CPU parallel processes
+N_WORKERS = 4                     # parallel docking processes (GPU 1개에 4 이하 권장)
 USE_GPU = True
 OUTPUT_DIR = str(_Path(__file__).resolve().parent.parent.parent / "results")
 OUTPUT_DIRS = {
