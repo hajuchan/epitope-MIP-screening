@@ -68,9 +68,9 @@ Phase 2: Single Monomer Docking (SMD) — AutoDock4/GPU
   ├── Ensemble docking: conformer별 도킹 → best BE 선택
   ├── Backbone H-bond 분석 (2차 구조 파괴 위험)
   ├── 10ns monomer-epitope contact MD (Sehit 2024)
-  ├── 선택도 매트릭스: ΔΔG = BE(target) - mean(BE(non-target))
-  └── 필터: BE ≤ -2.0 kcal/mol, ΔΔG ≤ -0.5 kcal/mol
-    ↓ 타겟별 후보 모노머 리스트
+  ├── 선택도 매트릭스: ΔΔG = BE(target) - mean(BE(non-target)) (참고용)
+  └── 필터: BE ≤ -2.0 kcal/mol, 상위 12개 선택 (선택도는 Phase 3/4에서 평가)
+    ↓ 타겟별 상위 12개 모노머
 
 Phase 3: Bayesian Optimization + MMSD — Gryffin (Hase 2021) + Rajpal 2024
   ├── Gryffin BO: 물리화학 descriptor 기반 범주형 최적화
@@ -190,6 +190,16 @@ Phase 1 MD에서 추출한 **5개 conformer + 원본 구조 = 6개 receptor**에
    - B_3: Rii=4.083A, epsii=0.180 kcal/mol
 3. **AutoDock-GPU**: `--derivtype Si=S/B=C` + parameter_file
 
+### Phase 3 전달 필터링 전략
+
+Phase 2의 역할은 **"결합 가능한 모노머"를 선별**하는 것이지, 종 간 선택도를 판단하는 것이 아니다:
+
+- **BE threshold**: ≤ -2.0 kcal/mol (유의미한 결합만)
+- **Top N**: BE 상위 12개를 Phase 3로 전달
+- **ΔΔG 선택도**: 계산은 하되 필터에 사용하지 않음 (참고용)
+
+**ΔΔG를 Phase 2에서 필터링하지 않는 이유**: SMD는 개별 모노머-에피토프 상호작용만 보므로, 3-way 선택도를 판단하기엔 정보가 부족하다. 선택도는 **Phase 3 MMSD 시너지 패턴 + Phase 4 교차 반응성 MD**에서 평가하는 것이 더 정확하다.
+
 ### 도킹 파라미터
 
 | 파라미터 | 값 | 설명 |
@@ -200,7 +210,8 @@ Phase 1 MD에서 추출한 **5개 conformer + 원본 구조 = 6개 receptor**에
 | Grid spacing | 0.375 Å | AutoGrid4 격자 간격 |
 | Grid points | 60×60×60 | 격자 차원 |
 | BE threshold | -2.0 kcal/mol | 유의미한 결합 최소값 |
-| ΔΔG threshold | -0.5 kcal/mol | 최소 선택도 |
+| Top N for Phase 3 | 12 | BE 상위 12개 → Phase 3 전달 |
+| ΔΔG | 참고용 | 선택도는 Phase 3 시너지 + Phase 4 교차반응성에서 평가 |
 
 ### 방법별 참조 문헌
 
@@ -236,13 +247,13 @@ Phase 1 MD에서 추출한 **5개 conformer + 원본 구조 = 6개 receptor**에
 
 기존 MMSD의 한계: 4종 고정 조합만 탐색 (과학적 근거 부족). **Gryffin** (Hase et al. 2021)을 도입하여 조합 크기(2-6종)와 모노머 종류를 **동시에 최적화**:
 
-1. 각 모노머를 물리화학 descriptor로 인코딩 (H-bond, hydrophobic, pi-pi, MW 등)
-2. 초기 15-20개 랜덤 조합 MMSD 실행
+1. 각 모노머를 **RDKit 물리화학 descriptor** 8차원으로 인코딩 (MW, LogP, HBD, HBA, TPSA, RotatableBonds, AromaticRings, HeavyAtoms)
+2. 초기 15회 랜덤 다양한 조합 MMSD 실행 (explore phase)
 3. GPR surrogate model 학습 → 미탐색 조합의 MMSD sum 예측
-4. Expected Improvement acquisition function으로 다음 탐색 조합 선택
-5. 수렴까지 반복 (~30-50회 MMSD 평가)
+4. Expected Improvement acquisition function으로 다음 탐색 조합 선택 (exploit phase)
+5. Gryffin 활성화 후 8회 연속 무개선 시 수렴 종료 (~25-50회 MMSD 평가)
 
-**전수 탐색 ~15,000회 대비 ~50회로 전역 최적 근사.**
+**전수 탐색 ~15,000회 대비 ~30-50회로 전역 최적 근사.**
 
 ### Sequential Docking 프로토콜
 
@@ -627,7 +638,8 @@ python run_validation.py --check-only            # 기존 결과만 확인
 | 2 | GA runs | 50 | AutoDock4 기본 |
 | 2 | Ensemble docking | 6 receptors/타겟 | 원본 + 5 MD conformer |
 | 2 | BE 기준 | ≤ -2.0 kcal/mol | 유의미한 결합 |
-| 2 | ΔΔG 기준 | ≤ -0.5 kcal/mol | 선택도 |
+| 2 | Top N for Phase 3 | 12 monomers | BE 상위 선택 |
+| 2 | ΔΔG | 참고용 (비활성) | Phase 3/4에서 평가 |
 | 2 | Backbone H-bond | ≤ 30% | Sullivan 2019 |
 | 2 | Contact MD | 10 ns/pair | Sehit 2024 |
 | 3 | 조합 크기 탐색 | 2-6종 (자동) | Gryffin BO |

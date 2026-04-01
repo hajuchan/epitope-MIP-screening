@@ -42,7 +42,7 @@ def run_phase2(phase1_results: dict = None,
     """
     from .config import (TARGETS, FUNCTIONAL_MONOMERS, N_WORKERS,
                          get_output_path, AUTODOCK4_GA_RUNS,
-                         SMD_BE_THRESHOLD, SMD_DDG_THRESHOLD)
+                         SMD_BE_THRESHOLD)
 
     if output_dir is None:
         output_dir = str(get_output_path("phase2"))
@@ -170,10 +170,11 @@ def run_phase2(phase1_results: dict = None,
     selectivity = _compute_selectivity(be_matrix, target_names)
 
     # 4. Filter candidates
+    from .config import SMD_TOP_N_FOR_PHASE3
     filtered = _filter_monomers(
         be_matrix, selectivity, target_names,
         be_threshold=SMD_BE_THRESHOLD,
-        ddg_threshold=SMD_DDG_THRESHOLD,
+        top_n=SMD_TOP_N_FOR_PHASE3,
     )
 
     # 5. Generate outputs
@@ -483,20 +484,29 @@ def _compute_selectivity(be_matrix: dict, target_names: list) -> dict:
 def _filter_monomers(be_matrix: dict, selectivity: dict,
                       target_names: list,
                       be_threshold: float = -2.0,
-                      ddg_threshold: float = -0.5) -> dict:
-    """Filter monomers by binding energy and selectivity thresholds."""
+                      top_n: int = 12) -> dict:
+    """
+    Select top N monomers by BE for Phase 3.
+
+    Selectivity (ΔΔG) is computed for reporting but NOT used for filtering.
+    Selectivity is assessed in Phase 3 (MMSD synergy) and Phase 4
+    (MD cross-reactivity) where it can be evaluated more accurately.
+    """
     filtered = {}
     for target in target_names:
         candidates = []
         for monomer in be_matrix.get(target, {}):
-            be = be_matrix[target].get(monomer, 0.0)
-            ddg = selectivity.get(target, {}).get(monomer, 0.0)
-            if be <= be_threshold and ddg <= ddg_threshold:
-                candidates.append((monomer, be, ddg))
+            be = be_matrix[target].get(monomer, None)
+            if be is None:
+                continue
+            if be <= be_threshold:
+                candidates.append((monomer, be))
 
-        # Sort by binding energy (most negative first)
         candidates.sort(key=lambda x: x[1])
-        filtered[target] = [c[0] for c in candidates]
+        filtered[target] = [c[0] for c in candidates[:top_n]]
+
+        logger.info(f"  [{target}] {len(filtered[target])} monomers selected "
+                    f"(BE ≤ {be_threshold}, top {top_n})")
     return filtered
 
 

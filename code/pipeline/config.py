@@ -178,7 +178,7 @@ AUTODOCK4_GA_NUM_EVALS = 2500000  # max energy evaluations
 AUTODOCK4_NPTS = (60, 60, 60)     # grid points (x, y, z)
 AUTODOCK4_SPACING = 0.375         # grid spacing (Å)
 SMD_BE_THRESHOLD = -2.0           # kcal/mol — minimum meaningful binding
-SMD_DDG_THRESHOLD = -0.5          # kcal/mol — minimum selectivity
+SMD_TOP_N_FOR_PHASE3 = 12         # pass top N monomers by BE to Phase 3 (per target)
 # Sullivan 2019: use fpocket/SiteMap to identify binding pockets first
 USE_BINDING_SITE_PREDICTION = True  # focused docking per site vs blind
 BINDING_SITE_TOOL = "fpocket"       # "fpocket" (free) or "sitemap" (Schrödinger)
@@ -199,7 +199,6 @@ MMSD_BO_MAX_ITER = 50             # maximum BO iterations
 MMSD_BO_CONVERGENCE = 8           # stop if no improvement in N steps
 MMSD_HIGH_AFFINITY_THRESHOLD = -11.0  # kcal/mol — high-affinity PC threshold
 MMSD_TOP_PC = 8                   # top PCs to pass to Phase 4
-MMSD_MIN_POOL_SIZE = 8            # minimum monomer pool for BO (expand by BE if filtered < this)
 # Sullivan 2019: non-competitive binding
 MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site competition check
 MMSD_PENALIZE_COMPETITION = True  # penalize competing monomers

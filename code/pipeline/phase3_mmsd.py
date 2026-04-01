@@ -123,18 +123,11 @@ def run_phase3(phase1_results: dict = None,
 
         # Available monomers for BO:
         # Use filtered list if sufficient, otherwise expand to top-N by BE
-        from .config import MMSD_MIN_POOL_SIZE
         available = [m for m in filtered if m != crosslinker]
-        if len(available) < MMSD_MIN_POOL_SIZE:
-            # Expand: top monomers by BE (regardless of ΔΔG filter)
-            sorted_by_be = sorted(
-                [(m, e) for m, e in be_matrix.items()
-                 if e is not None and m != crosslinker],
-                key=lambda x: x[1]
-            )
-            available = [m for m, _ in sorted_by_be[:max(MMSD_MIN_POOL_SIZE, len(available))]]
-            logger.info(f"[{target}] Expanded monomer pool to {len(available)} "
-                        f"(filtered {len(filtered)} was too small for BO)")
+        if not available:
+            logger.warning(f"[{target}] No monomers passed Phase 2 filter")
+            results[target] = {"error": "No candidates from Phase 2"}
+            continue
 
         target_dir = output_dir / target
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -342,7 +335,7 @@ def _run_bo_mmsd(target: str, available_monomers: list,
             else:
                 no_improvement_count += 1
 
-            if no_improvement_count >= 8 and len(observations) >= n_initial:
+            if no_improvement_count >= 8 and len(observations) >= n_initial + 10:
                 logger.info(f"  Converged after {iteration+1} iterations "
                             f"(no improvement in 8 steps)")
                 break
