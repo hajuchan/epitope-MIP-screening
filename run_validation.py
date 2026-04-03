@@ -9,7 +9,7 @@ reproduces published experimental results.
 
 Usage:
     conda activate GROMACS
-    cd "/home/chan/Research/Monomer screening in Bio"
+    cd "/home/chan/Research/Monomer_screening_in_Bio"
     python run_validation.py                   # full validation
     python run_validation.py --smd-only        # Phase 2 only
     python run_validation.py --quick           # fewer GA runs

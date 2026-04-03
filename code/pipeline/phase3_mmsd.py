@@ -30,39 +30,6 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── Monomer Physicochemical Descriptors ────────────────────────
-# Computed from RDKit: [MW, LogP, HBD, HBA, TPSA, RotatableBonds, AromaticRings, HeavyAtoms]
-# All values are continuous and well-distributed → no normalization issues.
-# Enables GPR to generalize: "H-bond monomers were good → try similar ones"
-
-MONOMER_DESCRIPTORS = {
-    # Silane monomers
-    "PTES":   [240.4, 1.94, 0, 3, 27.7, 7, 1, 16],
-    "APTES":  [237.4, 0.90, 1, 5, 62.9, 10, 0, 15],
-    "APTMS":  [195.3, -0.27, 1, 5, 62.9, 7, 0, 12],
-    "UPTMS":  [238.3, -0.56, 2, 5, 92.0, 8, 0, 15],
-    "MPTMS":  [212.3, 0.70, 1, 5, 36.9, 7, 0, 12],
-    "IBTES":  [236.4, 2.20, 0, 4, 36.9, 9, 0, 15],
-    "MTMS":   [136.2, 0.49, 0, 3, 27.7, 3, 0, 8],
-    "EDTMS":  [238.4, -0.68, 2, 6, 75.0, 10, 0, 15],
-    "ICTES":  [263.4, 1.27, 0, 6, 66.4, 11, 0, 17],
-    "VTMS":   [148.2, 0.59, 0, 3, 27.7, 4, 0, 9],
-    "GPTMS":  [208.3, 0.17, 0, 5, 49.5, 7, 0, 13],
-    "DIDMS":  [120.2, 0.98, 0, 2, 18.5, 2, 0, 7],
-    "CETES":  [247.4, 1.85, 0, 5, 60.7, 10, 0, 16],
-    "TTMS":   [212.3, 1.08, 0, 3, 27.7, 4, 1, 14],
-    # Vinyl/acrylic monomers
-    "AA":     [72.1, 0.26, 1, 1, 37.3, 1, 0, 5],
-    "MAA":    [86.1, 0.65, 1, 1, 37.3, 1, 0, 6],
-    "AAm":    [71.1, -0.34, 1, 1, 43.1, 1, 0, 5],
-    "NIPAm":  [113.2, 0.70, 1, 1, 29.1, 2, 0, 8],
-    "4VIm":   [94.1, 1.05, 1, 1, 28.7, 1, 1, 7],
-    "HEMA":   [130.1, 0.10, 1, 3, 46.5, 3, 0, 9],
-    "DA":     [153.2, 0.60, 3, 3, 66.5, 2, 1, 11],
-    "NE":     [169.2, 0.09, 4, 4, 86.7, 2, 1, 12],
-    "TBAm":   [127.2, 1.09, 1, 1, 29.1, 1, 0, 9],
-    "APBA":   [136.9, -1.05, 3, 3, 66.5, 1, 1, 10],
-}
 
 
 
@@ -147,11 +114,10 @@ def run_phase3(phase1_results: dict = None,
         # Remove excluded PCs
         all_pc_results = [r for r in all_pc_results if not r.get("excluded")]
 
-        # Rank: uniform first, then by bo_objective (size-normalized)
-        all_pc_results.sort(key=lambda x: (
-            not x.get("is_uniform", True),
+        # Rank by bo_objective only (competition is informational, not filtering)
+        all_pc_results.sort(key=lambda x:
             x.get("bo_objective") if x.get("bo_objective") is not None else 0,
-        ))
+        )
 
         top_pcs = all_pc_results[:MMSD_TOP_PC]
 

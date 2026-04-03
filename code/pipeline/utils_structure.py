@@ -547,18 +547,33 @@ def smiles_to_mol2(smiles: str, name: str, output_dir: Path) -> Path:
     pdb_path = output_dir / f"{name}.pdb"
     Chem.MolToPDBFile(mol, str(pdb_path))
 
-    # PDB → mol2 via obabel
+    # PDB → mol2 via obabel (use tempdir to avoid spaces in path)
     mol2_path = output_dir / f"{name}.mol2"
     try:
-        subprocess.run(
-            ["obabel", str(pdb_path), "-O", str(mol2_path), "--gen3d"],
-            check=True, capture_output=True, text=True,
-        )
-    except FileNotFoundError:
-        # If obabel not available, use RDKit mol2 writer
+        import sys, shutil, tempfile
+        obabel_bin = shutil.which("obabel") or "obabel"
+
+        # Work in tempdir to avoid space-in-path issues with older obabel
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_pdb = Path(tmpdir) / f"{name}.pdb"
+            tmp_mol2 = Path(tmpdir) / f"{name}.mol2"
+            shutil.copy2(pdb_path, tmp_pdb)
+            result = subprocess.run(
+                [obabel_bin, str(tmp_pdb), "-O", str(tmp_mol2)],
+                capture_output=True, text=True,
+            )
+            if tmp_mol2.exists():
+                shutil.copy2(tmp_mol2, mol2_path)
+            else:
+                logger.warning(f"obabel mol2 failed for {name}: "
+                               f"{result.stderr[:200]}")
+    except Exception as e:
+        logger.warning(f"obabel not available ({e}), using RDKit .mol")
         Chem.MolToMolFile(mol, str(output_dir / f"{name}.mol"))
         mol2_path = output_dir / f"{name}.mol"
-        logger.warning(f"obabel not found, saved as .mol: {mol2_path}")
+
+    if not mol2_path.exists():
+        logger.error(f"Failed to create mol2 for {name}")
 
     return mol2_path
 

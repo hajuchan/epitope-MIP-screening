@@ -191,7 +191,7 @@ EPITOPE_MAX_LENGTH = 16           # Teixeira 2021: >16 causes intramolecular fol
 EPITOPE_MD_TIME_NS = 20           # 16-mer peptide: 20ns sufficient for RMSD convergence
 EPITOPE_RMSD_THRESHOLD = 3.0      # Å — max RMSD for "stable" epitope
 EPITOPE_PLDDT_THRESHOLD = 70      # AlphaFold confidence cutoff
-EPITOPE_MONOMER_MOLAR_RATIO = 20  # Sehit 2024: epitope:monomer = 1:20
+EPITOPE_MONOMER_MOLAR_RATIO = 100 # Rajpal 2024 JMM: 100 monomers for statistical reliability
 EPITOPE_STABILITY_MD = True       # Sehit 2024: mandatory stability MD
 # Ensemble docking: extract N conformers from Phase 1 MD, dock to each
 ENSEMBLE_DOCKING = True           # dock to multiple receptor conformations
@@ -218,16 +218,16 @@ MONOMER_CONTACT_MD_NS = 10          # simulation time for contact frequency
 # ── Phase 3: Greedy Forward Selection + MMSD ───────────────────
 MMSD_MIN_COMBO_SIZE = 2           # minimum functional monomers (excl. crosslinker)
 MMSD_MAX_COMBO_SIZE = 6           # maximum functional monomers
-MMSD_HIGH_AFFINITY_THRESHOLD = -11.0  # kcal/mol — high-affinity PC threshold
-MMSD_TOP_PC = 8                   # top PCs to pass to Phase 4
+MMSD_HIGH_AFFINITY_THRESHOLD = -11.0  # kcal/mol — high-affinity PC threshold (informational)
+MMSD_TOP_PC = 1                   # top PCs to pass to Phase 4 (greedy finds 1 optimal)
 # BO objective weights (size-normalized scoring)
 BO_INTERFERENCE_PENALTY = 0.3     # weight for interference (delta_sum > 0) penalty
 # Sullivan 2019: non-competitive binding
-MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site competition check
-MMSD_PENALIZE_COMPETITION = True  # penalize competing monomers
+MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site competition check (informational)
+MMSD_PENALIZE_COMPETITION = False # disabled — competition info recorded but not used for ranking
 
 # ── Phase 4: MD Validation — GROMACS ───────────────────────────
-MD_PRODUCTION_NS = 50             # 16-mer + 4 monomers: 50ns sufficient for convergence
+MD_PRODUCTION_NS = 200            # pre-polymerization MD (Rajpal 2024 JMM: 350ns, 200ns practical)
 MD_TIMESTEP_FS = 2.0              # integration timestep
 MD_TEMPERATURE_K = 300.0          # K
 MD_PRESSURE_BAR = 1.0             # bar
@@ -321,5 +321,6 @@ PREPARE_LIGAND = (_shutil.which("prepare_ligand4")
                   or _shutil.which("prepare_ligand4.py")
                   or _shutil.which("prepare_ligand")
                   or "prepare_ligand4.py")
-GMX_BIN = _shutil.which("gmx") or "gmx"
+# Use GROMACS GPU build (2025.2) — /usr/bin/gmx is old 2021.4
+GMX_BIN = "/usr/local/gromacs-gpu/bin/gmx"
 ACPYPE_BIN = _shutil.which("acpype") or "acpype"

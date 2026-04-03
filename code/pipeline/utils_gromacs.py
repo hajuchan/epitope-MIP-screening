@@ -135,19 +135,31 @@ def parameterize_monomer(mol2_path: Path, name: str,
                           output_dir: Path,
                           charge_method: str = "bcc") -> dict:
     """
-    Generate GAFF2 topology for a monomer using acpype.
-
-    Returns dict with paths to .itp and .gro files.
+    Generate topology for a monomer.
+    Si/B-containing monomers → PolCA force field (Jorge 2021).
+    Others → acpype GAFF2.
     """
-    from .config import ACPYPE_BIN
+    from .config import ACPYPE_BIN, ALL_MONOMERS
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     mol2_path = Path(mol2_path)
+
+    # Si/B monomers: always use PolCA (acpype generates zero Si parameters)
+    m_info = ALL_MONOMERS.get(name)
+    if m_info:
+        from rdkit import Chem
+        mol_check = Chem.MolFromSmiles(m_info["smiles"])
+        if mol_check and any(a.GetAtomicNum() in (14, 5) for a in mol_check.GetAtoms()):
+            logger.info(f"  {name}: Si/B detected → using PolCA force field")
+            return _try_polca_fallback(name, mol2_path, output_dir)
     work_dir = output_dir / f"acpype_{name}"
 
+    # Run acpype via current Python interpreter to ensure openbabel is available
+    # (acpype shebang may point to system python without openbabel)
+    import sys
     cmd = [
-        ACPYPE_BIN,
+        sys.executable, ACPYPE_BIN,
         "-i", str(mol2_path),
         "-b", name,
         "-c", charge_method,
@@ -156,14 +168,22 @@ def parameterize_monomer(mol2_path: Path, name: str,
         "-o", "gmx",
     ]
 
+    # Ensure conda env bin is in PATH (antechamber, sqm, tleap etc.)
+    env = os.environ.copy()
+    conda_bin = str(Path(sys.executable).parent)
+    if conda_bin not in env.get("PATH", ""):
+        env["PATH"] = conda_bin + os.pathsep + env.get("PATH", "")
+
     try:
         result = subprocess.run(
             cmd, cwd=str(output_dir),
             capture_output=True, text=True, timeout=300,
+            env=env,
         )
         if result.returncode != 0:
-            logger.warning(f"acpype failed for {name}: {result.stderr[:200]}")
-            # Fallback: PolCA force field for Si-containing monomers
+            # Si/B monomers are expected to fail GAFF2 → PolCA fallback
+            err_msg = result.stderr[:300] or result.stdout[-300:]
+            logger.debug(f"acpype GAFF2 failed for {name} (rc={result.returncode}), trying fallback")
             return _try_polca_fallback(name, mol2_path, output_dir)
     except FileNotFoundError:
         logger.error(f"acpype not found: {ACPYPE_BIN}")
@@ -223,14 +243,37 @@ def _try_polca_fallback(name: str, mol2_path: Path, output_dir: Path) -> dict:
 
 def _gmx(cmd_args: list, work_dir: Path, input_text: str = None,
           timeout: int = 600) -> subprocess.CompletedProcess:
-    """Run a gmx command."""
+    """Run a gmx command. Converts absolute paths to relative to handle spaces."""
     from .config import GMX_BIN
-    full_cmd = [GMX_BIN] + cmd_args
-    return subprocess.run(
+    work_dir = Path(work_dir)
+
+    # Convert absolute paths in args to relative (avoids GROMACS space-in-path issues)
+    rel_args = []
+    for arg in cmd_args:
+        if str(work_dir) in str(arg):
+            try:
+                rel_args.append(str(Path(arg).relative_to(work_dir)))
+            except ValueError:
+                rel_args.append(arg)
+        else:
+            rel_args.append(arg)
+
+    # Ensure grompp writes mdout.mdp to work_dir (not project root)
+    if rel_args and rel_args[0] == "grompp" and "-po" not in rel_args:
+        rel_args.extend(["-po", "mdout.mdp"])
+
+    full_cmd = [GMX_BIN] + rel_args
+    result = subprocess.run(
         full_cmd, cwd=str(work_dir),
         input=input_text, capture_output=True, text=True,
         timeout=timeout,
     )
+
+    if result.returncode != 0:
+        logger.debug(f"gmx {rel_args[0]} rc={result.returncode}: "
+                     f"{result.stderr[-200:] if result.stderr else ''}")
+
+    return result
 
 
 def setup_protein_topology(pdb_path: Path, work_dir: Path,
@@ -265,16 +308,18 @@ def setup_protein_topology(pdb_path: Path, work_dir: Path,
 
 
 def setup_simulation_box(gro_path: Path, work_dir: Path,
-                          box_type: str = "dodecahedron",
-                          distance: float = 1.2) -> Path:
-    """Create simulation box, solvate, and add ions."""
+                          box_type: str = "cubic",
+                          distance: float = 1.0) -> Path:
+    """Create simulation box, solvate, and add ions.
+    Uses cubic box (simpler PBC) with 1.0nm padding."""
     work_dir = Path(work_dir)
 
-    # Define box
+    # Define box — center system in box
     _gmx(["editconf",
            "-f", str(gro_path),
            "-o", str(work_dir / "boxed.gro"),
-           "-c", "-d", str(distance),
+           "-c",                    # center in box
+           "-d", str(distance),     # min distance to box edge
            "-bt", box_type], work_dir)
 
     # Solvate
@@ -324,7 +369,8 @@ def run_energy_minimization(work_dir: Path) -> Path:
            "-o", str(work_dir / "em.tpr"),
            "-maxwarn", "2"], work_dir)
 
-    result = _gmx(["mdrun", "-deffnm", "em"], work_dir, timeout=1800)
+    result = _gmx(["mdrun", "-deffnm", "em"],
+                   work_dir, timeout=1800)
     if result.returncode != 0:
         logger.warning(f"EM mdrun issue: {result.stderr[:300]}")
 
@@ -352,7 +398,13 @@ def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0,
            "-maxwarn", "2"], work_dir)
 
     _gmx(["mdrun", "-deffnm", "nvt"], work_dir, timeout=3600)
-    return work_dir / "nvt.gro"
+    # Extract final frame from checkpoint/trajectory if gro not created
+    nvt_gro = work_dir / "nvt.gro"
+    if not nvt_gro.exists() and (work_dir / "nvt.cpt").exists():
+        _gmx(["trjconv", "-f", "nvt.cpt", "-s", "nvt.tpr",
+               "-o", "nvt.gro", "-dump", "0"],
+              work_dir, input_text="0\n")
+    return nvt_gro
 
 
 def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0,
@@ -375,10 +427,15 @@ def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0,
            "-t", str(work_dir / "nvt.cpt"),
            "-p", str(work_dir / "topol.top"),
            "-o", str(work_dir / "npt.tpr"),
-           "-maxwarn", "2"], work_dir)
+           "-maxwarn", "5"], work_dir)
 
     _gmx(["mdrun", "-deffnm", "npt"], work_dir, timeout=3600)
-    return work_dir / "npt.gro"
+    npt_gro = work_dir / "npt.gro"
+    if not npt_gro.exists() and (work_dir / "npt.cpt").exists():
+        _gmx(["trjconv", "-f", "npt.cpt", "-s", "npt.tpr",
+               "-o", "npt.gro", "-dump", "0"],
+              work_dir, input_text="0\n")
+    return npt_gro
 
 
 def run_production_md(work_dir: Path, time_ns: float = 200.0,
@@ -401,7 +458,7 @@ def run_production_md(work_dir: Path, time_ns: float = 200.0,
            "-t", str(work_dir / "npt.cpt"),
            "-p", str(work_dir / "topol.top"),
            "-o", str(work_dir / "md.tpr"),
-           "-maxwarn", "2"], work_dir)
+           "-maxwarn", "5"], work_dir)
 
     md_cmd = ["mdrun", "-deffnm", "md", "-v"]
     from .config import USE_GPU
@@ -552,7 +609,7 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
             /
         """))
 
-    # gmx_MMPBSA command
+    # gmx_MMPBSA command (uses system python via shebang)
     cmd = [
         "gmx_MMPBSA",
         "-O",
@@ -608,43 +665,67 @@ def run_full_md_pipeline(protein_pdb: Path, monomer_itps: list,
     results = {"work_dir": str(work_dir), "time_ns": time_ns}
 
     try:
+        # Each step checks if output exists → skip if already done
+
         # 1. Protein topology
-        logger.info("Setting up protein topology...")
-        setup_protein_topology(protein_pdb, work_dir)
+        if not (work_dir / "topol.top").exists():
+            logger.info("Setting up protein topology...")
+            setup_protein_topology(protein_pdb, work_dir)
+        else:
+            logger.info("Protein topology: FOUND, skipping")
 
         # 1b. Include monomer ITP/GRO in topology
-        if monomer_itps:
-            logger.info(f"Including {len(monomer_itps)} monomer(s) in topology...")
-            _include_monomers_in_topology(work_dir, monomer_itps)
-            system_gro = work_dir / "complex.gro"
+        if not (work_dir / "complex.gro").exists():
+            if monomer_itps:
+                logger.info(f"Including {len(monomer_itps)} monomer(s) in topology...")
+                _include_monomers_in_topology(work_dir, monomer_itps)
+                system_gro = work_dir / "complex.gro"
+            else:
+                system_gro = work_dir / "protein.gro"
         else:
-            system_gro = work_dir / "protein.gro"
+            logger.info("Complex GRO: FOUND, skipping")
+            system_gro = work_dir / "complex.gro"
 
         # 2. Solvate & ionize
-        logger.info("Setting up simulation box...")
-        setup_simulation_box(system_gro, work_dir)
+        if not (work_dir / "ionized.gro").exists():
+            logger.info("Setting up simulation box...")
+            setup_simulation_box(system_gro, work_dir)
+        else:
+            logger.info("Ionized system: FOUND, skipping")
 
         # 3. Energy minimization
-        logger.info("Running energy minimization...")
-        run_energy_minimization(work_dir)
+        if not (work_dir / "em.gro").exists():
+            logger.info("Running energy minimization...")
+            run_energy_minimization(work_dir)
+        else:
+            logger.info("EM: FOUND, skipping")
 
         # 4. NVT equilibration (100 ps)
-        logger.info("NVT equilibration...")
-        run_nvt_equilibration(work_dir, time_ps=100.0,
-                               temperature=MD_TEMPERATURE_K)
+        if not (work_dir / "nvt.gro").exists():
+            logger.info("NVT equilibration...")
+            run_nvt_equilibration(work_dir, time_ps=100.0,
+                                   temperature=MD_TEMPERATURE_K)
+        else:
+            logger.info("NVT: FOUND, skipping")
 
         # 5. NPT equilibration (100 ps)
-        logger.info("NPT equilibration...")
-        run_npt_equilibration(work_dir, time_ps=100.0,
-                               temperature=MD_TEMPERATURE_K,
-                               pressure=MD_PRESSURE_BAR)
+        if not (work_dir / "npt.gro").exists():
+            logger.info("NPT equilibration...")
+            run_npt_equilibration(work_dir, time_ps=100.0,
+                                   temperature=MD_TEMPERATURE_K,
+                                   pressure=MD_PRESSURE_BAR)
+        else:
+            logger.info("NPT: FOUND, skipping")
 
         # 6. Production MD
-        logger.info(f"Production MD ({time_ns} ns)...")
-        run_production_md(work_dir, time_ns=time_ns,
-                           temperature=MD_TEMPERATURE_K,
-                           pressure=MD_PRESSURE_BAR,
-                           gpu_id=MD_GPU_ID)
+        if not (work_dir / "md.gro").exists():
+            logger.info(f"Production MD ({time_ns} ns)...")
+            run_production_md(work_dir, time_ns=time_ns,
+                               temperature=MD_TEMPERATURE_K,
+                               pressure=MD_PRESSURE_BAR,
+                               gpu_id=MD_GPU_ID)
+        else:
+            logger.info(f"Production MD: FOUND, skipping")
 
         # 7. Trajectory analysis
         logger.info("Analyzing trajectory...")
@@ -750,9 +831,61 @@ def _include_monomers_in_topology(work_dir: Path, monomer_itps: list):
     coord_lines = prot_lines[2:2+prot_natoms]
     box_line = prot_lines[-1]
 
+    # Compute protein center and radius for monomer placement
+    prot_center = _get_gro_center(coord_lines)
+    prot_radius = _get_gro_radius(coord_lines, prot_center)
+    logger.info(f"  Protein center: ({prot_center[0]:.2f}, {prot_center[1]:.2f}, "
+                f"{prot_center[2]:.2f}) nm, radius: {prot_radius:.2f} nm")
+
+    # Pre-compute non-overlapping monomer positions (PACKMOL-style)
+    import random, math
+    n_monomers = len(monomer_itps)
+    min_dist_nm = 0.5  # minimum distance between monomer centers
+    r_inner = prot_radius + 0.3  # start just outside protein surface
+    r_outer = r_inner + max(2.0, 0.2 * n_monomers ** (1/3))  # compact shell
+
+    placed_centers = []
+    monomer_positions = []  # pre-computed (x, y, z) for each monomer
+
+    for mi in range(n_monomers):
+        # Try to place without overlapping other monomers
+        for attempt in range(500):
+            angle1 = random.uniform(0, 2 * math.pi)
+            angle2 = random.uniform(-math.pi/2, math.pi/2)
+            r = random.uniform(r_inner, r_outer)
+            x = prot_center[0] + r * math.cos(angle1) * math.cos(angle2)
+            y = prot_center[1] + r * math.sin(angle1) * math.cos(angle2)
+            z = prot_center[2] + r * math.sin(angle2)
+
+            # Check distance to all already placed monomers
+            too_close = False
+            for px, py, pz in placed_centers:
+                d = math.sqrt((x-px)**2 + (y-py)**2 + (z-pz)**2)
+                if d < min_dist_nm:
+                    too_close = True
+                    break
+
+            if not too_close:
+                placed_centers.append((x, y, z))
+                monomer_positions.append((x, y, z))
+                break
+        else:
+            # Fallback: expand radius and place
+            r = r_outer + mi * 0.3
+            angle1 = random.uniform(0, 2 * math.pi)
+            angle2 = random.uniform(-math.pi/2, math.pi/2)
+            x = prot_center[0] + r * math.cos(angle1) * math.cos(angle2)
+            y = prot_center[1] + r * math.sin(angle1) * math.cos(angle2)
+            z = prot_center[2] + r * math.sin(angle2)
+            placed_centers.append((x, y, z))
+            monomer_positions.append((x, y, z))
+
+    logger.info(f"  Placed {len(monomer_positions)} monomers in shell "
+                f"r={r_inner:.1f}-{r_outer:.1f} nm (min_sep={min_dist_nm} nm)")
+
     # Collect monomer coordinates and topology edits
-    include_lines = []
-    molecule_lines = []
+    seen_itps = {}   # itp_name → (mol_name, itp_src)
+    molecule_counts = {}  # mol_name → count
     all_mon_coords = []
 
     for i, param in enumerate(monomer_itps):
@@ -761,40 +894,114 @@ def _include_monomers_in_topology(work_dir: Path, monomer_itps: list):
         if not itp_path or not Path(itp_path).exists():
             continue
 
-        # Derive molecule name from ITP
         itp_src = Path(itp_path)
         mol_name = itp_src.stem.replace("_GMX", "")
 
-        # Copy ITP
-        itp_dst = work_dir / itp_src.name
-        shutil.copy2(str(itp_src), str(itp_dst))
-        include_lines.append(f'#include "{itp_src.name}"')
-        molecule_lines.append(f"{mol_name}     1")
+        # Copy ITP once, count molecules
+        if itp_src.name not in seen_itps:
+            shutil.copy2(str(itp_src), str(work_dir / itp_src.name))
+            seen_itps[itp_src.name] = (mol_name, itp_src)
+        molecule_counts[mol_name] = molecule_counts.get(mol_name, 0) + 1
 
-        # Read monomer GRO coordinates
+        # Place monomer at pre-computed non-overlapping position
         if gro_path and Path(gro_path).exists():
             mon_lines = Path(gro_path).read_text().strip().split("\n")
             mon_natoms = int(mon_lines[1].strip())
             mon_coords = mon_lines[2:2+mon_natoms]
+            mon_center = _get_gro_center(mon_coords)
 
-            # Offset monomer position to avoid overlap with protein
-            # Place each monomer at +2nm offset in x direction
-            offset_coords = _offset_gro_coords(mon_coords, x_offset=2.0 + i * 1.5)
+            tx, ty, tz = monomer_positions[i]
+            xo = tx - mon_center[0]
+            yo = ty - mon_center[1]
+            zo = tz - mon_center[2]
+
+            offset_coords = _offset_gro_coords(mon_coords,
+                                                x_offset=xo, y_offset=yo, z_offset=zo)
             all_mon_coords.extend(offset_coords)
 
-    # Edit topol.top
+    # Edit topol.top — proper directive ordering:
+    # 1. Extract [ atomtypes ] from ITPs → insert after forcefield.itp
+    # 2. Strip [ atomtypes ] from ITPs, include after forcefield.itp
+    # 3. Add molecule counts to [ molecules ]
     content = top_path.read_text()
-    include_block = "\n".join(include_lines)
-    molecule_block = "\n".join(molecule_lines)
+    lines = content.split("\n")
 
+    # Collect all atomtypes from monomer ITPs
+    all_atomtypes = []
+    for itp_name, (mol_name, itp_src) in seen_itps.items():
+        itp_content = (work_dir / itp_name).read_text()
+        # Extract [ atomtypes ] section
+        in_atomtypes = False
+        cleaned_lines = []
+        for line in itp_content.split("\n"):
+            if line.strip() == "[ atomtypes ]":
+                in_atomtypes = True
+                continue
+            elif line.strip().startswith("[") and in_atomtypes:
+                in_atomtypes = False
+            if in_atomtypes:
+                if line.strip() and not line.strip().startswith(";"):
+                    all_atomtypes.append(line)
+            else:
+                cleaned_lines.append(line)
+        # Fix Si atoms with mass=0 (acpype doesn't know Si mass)
+        fixed_lines = []
+        for line in cleaned_lines:
+            if "[ atoms ]" not in line and "Si" in line and "0.00000" in line:
+                # Check if this is an atoms line with mass=0 for Si
+                parts = line.split()
+                if len(parts) >= 8 and parts[1] == "Si" and float(parts[7]) == 0:
+                    parts[7] = "28.08600"
+                    line = "  ".join(parts)
+            fixed_lines.append(line)
+        (work_dir / itp_name).write_text("\n".join(fixed_lines))
+
+    # Build atomtypes block (deduplicate by atom name)
+    # Fix Si atom: acpype generates Si with mass=0, sigma=0 — replace with PolCA
+    seen_atoms = set()
+    unique_atomtypes = []
+    for line in all_atomtypes:
+        parts = line.split()
+        atom_name = parts[0] if parts else ""
+        if not atom_name or atom_name in seen_atoms:
+            continue
+        seen_atoms.add(atom_name)
+        # Replace broken Si atomtype with PolCA parameters
+        if atom_name == "Si" and len(parts) >= 7:
+            sigma = float(parts[5]) if parts[5] != "0.00000e+00" else 0
+            if sigma == 0:  # acpype generated empty Si params
+                line = (f" Si  Si  {28.086:.3f}  0.000  A  "
+                        f"4.29500e-01  4.02000e-01")  # UFF Si_3
+                logger.info("  Fixed Si atomtype: acpype → UFF Si_3 parameters")
+        unique_atomtypes.append(line)
+
+    atomtypes_block = ""
+    if unique_atomtypes:
+        atomtypes_block = "\n[ atomtypes ]\n" + "\n".join(unique_atomtypes) + "\n"
+
+    # Insert atomtypes after forcefield.itp include
+    include_block = "\n".join(f'#include "{name}"' for name in seen_itps)
+    molecule_block = "\n".join(f"{mol}     {cnt}"
+                               for mol, cnt in molecule_counts.items())
+
+    # Find insertion point: after #include "...forcefield.itp"
+    new_lines = []
+    ff_inserted = False
+    for line in lines:
+        new_lines.append(line)
+        if not ff_inserted and "forcefield.itp" in line:
+            new_lines.append(atomtypes_block)
+            new_lines.append(include_block)
+            ff_inserted = True
+
+    content = "\n".join(new_lines)
+
+    # Add molecules to [ molecules ] section
     if "[ molecules ]" in content:
-        content = content.replace(
-            "[ molecules ]",
-            f"{include_block}\n\n[ molecules ]"
-        )
         content = content.rstrip() + "\n" + molecule_block + "\n"
     else:
-        content += f"\n{include_block}\n\n[ molecules ]\n{molecule_block}\n"
+        content += f"\n[ molecules ]\n{molecule_block}\n"
+
     top_path.write_text(content)
 
     # Write complex.gro (protein + all monomers)
@@ -811,16 +1018,81 @@ def _include_monomers_in_topology(work_dir: Path, monomer_itps: list):
                 f"{total_atoms} total atoms → {complex_gro}")
 
 
-def _offset_gro_coords(coord_lines: list, x_offset: float = 2.0) -> list:
-    """Offset GRO coordinate lines by x_offset nm to avoid steric clash."""
+def _pdbqt_to_gro_coords(pdbqt_path: Path, mol_name: str) -> list:
+    """Extract coordinates from PDBQT docked pose → GRO format lines.
+    PDBQT coordinates are in Angstroms, GRO in nm."""
+    lines = Path(pdbqt_path).read_text().strip().split("\n")
+    gro_lines = []
+    atom_idx = 0
+    for line in lines:
+        if line.startswith("ATOM") or line.startswith("HETATM"):
+            atom_idx += 1
+            atom_name = line[12:16].strip()
+            x = float(line[30:38]) / 10.0  # Å → nm
+            y = float(line[38:46]) / 10.0
+            z = float(line[46:54]) / 10.0
+            gro_lines.append(
+                f"{1:5d}{mol_name:>5s}{atom_name:>5s}{atom_idx:5d}"
+                f"{x:8.3f}{y:8.3f}{z:8.3f}")
+    return gro_lines if gro_lines else None
+
+
+def _get_pdbqt_center(pdbqt_path: Path) -> tuple:
+    """Get center of mass from PDBQT file (returns nm)."""
+    lines = Path(pdbqt_path).read_text().strip().split("\n")
+    xs, ys, zs = [], [], []
+    for line in lines:
+        if line.startswith("ATOM") or line.startswith("HETATM"):
+            xs.append(float(line[30:38]) / 10.0)
+            ys.append(float(line[38:46]) / 10.0)
+            zs.append(float(line[46:54]) / 10.0)
+    if xs:
+        return (sum(xs)/len(xs), sum(ys)/len(ys), sum(zs)/len(zs))
+    return None
+
+
+def _get_gro_center(coord_lines: list) -> tuple:
+    """Get center of mass from GRO coordinate lines (nm)."""
+    xs, ys, zs = [], [], []
+    for line in coord_lines:
+        try:
+            xs.append(float(line[20:28]))
+            ys.append(float(line[28:36]))
+            zs.append(float(line[36:44]))
+        except (ValueError, IndexError):
+            pass
+    if xs:
+        return (sum(xs)/len(xs), sum(ys)/len(ys), sum(zs)/len(zs))
+    return (0, 0, 0)
+
+
+def _get_gro_radius(coord_lines: list, center: tuple) -> float:
+    """Get max distance from center to any atom (nm)."""
+    import math
+    max_r = 0
+    for line in coord_lines:
+        try:
+            x = float(line[20:28]) - center[0]
+            y = float(line[28:36]) - center[1]
+            z = float(line[36:44]) - center[2]
+            r = math.sqrt(x*x + y*y + z*z)
+            if r > max_r:
+                max_r = r
+        except (ValueError, IndexError):
+            pass
+    return max_r
+
+
+def _offset_gro_coords(coord_lines: list, x_offset: float = 2.0,
+                        y_offset: float = 0.0, z_offset: float = 0.0) -> list:
+    """Offset GRO coordinate lines by xyz offsets (nm)."""
     shifted = []
     for line in coord_lines:
         try:
-            # GRO format: resid(5) resname(5) atomname(5) atomnr(5) x(8.3) y(8.3) z(8.3)
             prefix = line[:20]
             x = float(line[20:28]) + x_offset
-            y = float(line[28:36])
-            z = float(line[36:44])
+            y = float(line[28:36]) + y_offset
+            z = float(line[36:44]) + z_offset
             rest = line[44:] if len(line) > 44 else ""
             shifted.append(f"{prefix}{x:8.3f}{y:8.3f}{z:8.3f}{rest}")
         except (ValueError, IndexError):
@@ -892,8 +1164,9 @@ def _generate_silane_itp(name: str, smiles: str, output_dir: Path) -> dict:
     conf = mol.GetConformer()
     n_atoms = mol.GetNumAtoms()
 
-    etype = {6: "opls_135", 1: "opls_140", 8: "opls_154",
-             7: "opls_237", 14: si_type, 16: "opls_202", 5: "opls_135"}
+    # Use GAFF2 atom types (compatible with amber99sb-ildn for MD)
+    etype = {6: "c3", 1: "h1", 8: "oh",
+             7: "n3", 14: si_type, 16: "ss", 5: "c3"}
     mmap = {1: 1.008, 6: 12.011, 7: 14.007, 8: 15.999,
             14: 28.086, 16: 32.065, 5: 10.811}
 
@@ -907,10 +1180,75 @@ def _generate_silane_itp(name: str, smiles: str, output_dir: Path) -> dict:
             f"{mmap.get(e,12.011):10.4f}")
 
     itp_path = output_dir / f"{name}.itp"
+    # Include [ atomtypes ] for Si + all GAFF2 types used by this molecule
+    _gaff2_lj = {
+        "c3": (0.33977, 0.45104), "h1": (0.24220, 0.08703),
+        "oh": (0.32429, 0.38911), "ho": (0.05379, 0.01966),
+        "n3": (0.33210, 0.41236), "hn": (0.11065, 0.04184),
+        "os": (0.31561, 0.30376), "ha": (0.26255, 0.06736),
+        "hc": (0.26002, 0.08703), "ss": (0.35636, 1.04600),
+        "ca": (0.33152, 0.41338), "c1": (0.34790, 0.66777),
+        "n1": (0.32735, 0.45940), "c2": (0.33152, 0.41338),
+    }
+    # Collect unique atom types used in this molecule
+    used_types = set()
+    for i in range(n_atoms):
+        e = mol.GetAtomWithIdx(i).GetAtomicNum()
+        used_types.add(etype.get(e, "c3"))
+    at_lines = [f"; name  bond_type  mass    charge  ptype  sigma       epsilon"]
+    at_lines.append(f"  {si_type}  {si_type}  {28.086:.3f}  0.000  A  "
+                    f"{si_lj['sigma']:.5e}  {si_lj['eps']:.5e}")
+    for t in sorted(used_types):
+        if t != si_type and t in _gaff2_lj:
+            s, e = _gaff2_lj[t]
+            m = {"c3": 12.011, "h1": 1.008, "oh": 15.999, "ho": 1.008,
+                 "n3": 14.007, "hn": 1.008, "os": 15.999, "ha": 1.008,
+                 "hc": 1.008, "ss": 32.065, "ca": 12.011, "c1": 12.011,
+                 "n1": 14.007, "c2": 12.011}.get(t, 12.011)
+            at_lines.append(f"  {t}  {t}  {m:.3f}  0.000  A  {s:.5e}  {e:.5e}")
+    atomtypes_section = "[ atomtypes ]\n" + "\n".join(at_lines) + "\n\n"
+    # Generate [ bonds ] from RDKit connectivity with standard bond lengths
+    _std_bond_len = {  # nm, standard covalent bond lengths
+        (6, 6): 0.1529, (6, 1): 0.1090, (6, 8): 0.1430,
+        (6, 7): 0.1470, (6, 14): 0.1860, (8, 14): 0.1640,
+        (8, 1): 0.0960, (7, 1): 0.1010, (14, 14): 0.2340,
+        (6, 16): 0.1810, (16, 1): 0.1340, (6, 5): 0.1560,
+        (5, 8): 0.1370, (5, 7): 0.1420,
+    }
+    blines = []
+    for bond in mol.GetBonds():
+        i = bond.GetBeginAtomIdx() + 1
+        j = bond.GetEndAtomIdx() + 1
+        e1 = mol.GetAtomWithIdx(bond.GetBeginAtomIdx()).GetAtomicNum()
+        e2 = mol.GetAtomWithIdx(bond.GetEndAtomIdx()).GetAtomicNum()
+        key = (min(e1, e2), max(e1, e2))
+        dist = _std_bond_len.get(key, 0.1500)  # default 0.15nm
+        blines.append(f"  {i:5d}  {j:5d}    1    {dist:.4f}  500000.0")
+
+    # Generate [ angles ] from RDKit
+    aangle_lines = []
+    from rdkit.Chem import rdMolTransforms
+    for atom in mol.GetAtoms():
+        idx = atom.GetIdx()
+        neighbors = [n.GetIdx() for n in atom.GetNeighbors()]
+        for ni in range(len(neighbors)):
+            for nj in range(ni+1, len(neighbors)):
+                a1, a2, a3 = neighbors[ni]+1, idx+1, neighbors[nj]+1
+                try:
+                    angle = rdMolTransforms.GetAngleDeg(conf, neighbors[ni], idx, neighbors[nj])
+                    aangle_lines.append(f"  {a1:5d}  {a2:5d}  {a3:5d}    1    {angle:.2f}  500.0")
+                except Exception:
+                    pass
+
+    bonds_section = "[ bonds ]\n" + "\n".join(blines) + "\n" if blines else ""
+    angles_section = "\n[ angles ]\n" + "\n".join(aangle_lines) + "\n" if aangle_lines else ""
+
     itp_path.write_text(
-        f"; {name} — PolCA Si (Jorge 2021) + OPLS-AA\n"
+        f"; {name} — PolCA Si (Jorge 2021) + GAFF2\n"
+        f"{atomtypes_section}"
         f"[ moleculetype ]\n{name}    3\n\n[ atoms ]\n"
-        + "\n".join(alines) + "\n")
+        + "\n".join(alines) + "\n\n"
+        + bonds_section + angles_section)
 
     gro_path = output_dir / f"{name}.gro"
     gl = [f"{name} silane", f" {n_atoms}"]

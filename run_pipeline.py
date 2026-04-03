@@ -4,7 +4,7 @@ Epitope-MIP Screening Pipeline — Project Root Entry Point
 ==========================================================
 Usage:
     conda activate GROMACS
-    cd "/home/chan/Research/Monomer screening in Bio"
+    cd "/home/chan/Research/Monomer_screening_in_Bio"
 
     # Full pipeline (Phase 1→2→3→4→5)
     python run_pipeline.py

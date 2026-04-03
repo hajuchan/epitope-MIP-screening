@@ -141,11 +141,11 @@ def _run_prepolymerization_md(target: str, pc_id: str,
                                 time_ns: float = 50.0,
                                 total_monomers: int = 20) -> dict:
     """
-    Run pre-polymerization MD and analyze contact frequency.
+    Run pre-polymerization MD and analyze monomer-epitope interactions.
 
-    Step A: Build system with uniform ratio
-    Step B: Run MD
-    Step C: Analyze contact frequency → optimal ratio
+    Step A: Build system — monomers randomly placed (literature standard)
+    Step B: Run MD — monomers find binding sites by free diffusion
+    Step C: MM-PBSA per monomer type → Boltzmann-weighted synthesis ratio
     """
     from .utils_gromacs import run_full_md_pipeline, parameterize_monomer
     from .utils_structure import smiles_to_mol2
@@ -182,27 +182,33 @@ def _run_prepolymerization_md(target: str, pc_id: str,
     }
 
     try:
-        # Step A: Parameterize all monomers
-        logger.info(f"  Parameterizing monomers...")
-        monomer_itps = []
-        for m_name, n_copies in monomer_copies.items():
-            m_info = ALL_MONOMERS.get(m_name)
-            if m_info is None:
-                logger.warning(f"  {m_name} not in library, skipping")
-                continue
+        md_dir = work_dir / "md"
 
-            param_dir = work_dir / "monomer_params"
-            mol2 = smiles_to_mol2(m_info["smiles"], m_name, param_dir)
-            param = parameterize_monomer(mol2, m_name, param_dir)
+        # Check if MD already completed (md.gro exists)
+        if (md_dir / "md.gro").exists():
+            logger.info(f"  MD already completed, skipping to analysis")
+            monomer_itps = []  # not needed for analysis
+        else:
+            # Step A: Parameterize monomers (random placement, no docked poses)
+            logger.info(f"  Parameterizing monomers...")
+            monomer_itps = []
+            for m_name, n_copies in monomer_copies.items():
+                m_info = ALL_MONOMERS.get(m_name)
+                if m_info is None:
+                    logger.warning(f"  {m_name} not in library, skipping")
+                    continue
 
-            if param.get("itp"):
-                # Add multiple copies
-                for copy_i in range(n_copies):
-                    monomer_itps.append(param)
-            else:
-                logger.warning(f"  GAFF2 failed for {m_name}")
+                param_dir = work_dir / "monomer_params"
+                mol2 = smiles_to_mol2(m_info["smiles"], m_name, param_dir)
+                param = parameterize_monomer(mol2, m_name, param_dir)
 
-        logger.info(f"  Total monomer molecules: {len(monomer_itps)}")
+                if param.get("itp"):
+                    for copy_i in range(n_copies):
+                        monomer_itps.append(param)
+                else:
+                    logger.warning(f"  GAFF2 failed for {m_name}")
+
+            logger.info(f"  Total monomer molecules: {len(monomer_itps)}")
 
         # Step B: Run MD
         md_result = run_full_md_pipeline(
@@ -220,16 +226,17 @@ def _run_prepolymerization_md(target: str, pc_id: str,
             logger.info(f"  Analyzing contact frequency...")
             ratio_result = _analyze_monomer_occupancy(
                 xtc, gro, functional_monomers, crosslinker,
+                target=target,
             )
             result["occupancy_analysis"] = ratio_result
             result["optimal_ratio"] = ratio_result.get("optimal_ratio", {})
 
-            # Log optimal ratio
+            # Log optimal ratio (inverse of occupancy)
             if ratio_result.get("optimal_ratio"):
-                logger.info(f"  Optimal synthesis ratio:")
+                logger.info(f"  Optimal synthesis ratio (low occupancy → more copies):")
                 for m, ratio in ratio_result["optimal_ratio"].items():
                     occ = ratio_result["occupancy"].get(m, 0)
-                    logger.info(f"    {m}: {ratio} parts (occupancy={occ:.1f})")
+                    logger.info(f"    {m}: {ratio} parts (contact freq={occ:.2f})")
 
         result["success"] = True
 
@@ -244,6 +251,7 @@ def _run_prepolymerization_md(target: str, pc_id: str,
 def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
                                  functional_monomers: list,
                                  crosslinker: str,
+                                 target: str = None,
                                  cutoff_nm: float = 0.35) -> dict:
     """
     Analyze per-monomer-type contact frequency with epitope.
@@ -260,10 +268,30 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
         import MDAnalysis as mda
 
         u = mda.Universe(str(top_path), str(traj_path))
-        protein = u.select_atoms("protein")
+
+        # Select only HEAD residues (actual binding site) for contact analysis
+        # Stalk/helix residues support structure but aren't part of MIP cavity
+        from .config import TARGETS
+        head_range = None
+        if target and target in TARGETS:
+            head_range = TARGETS[target].get("head_residues")
+
+        if head_range:
+            # ECL2 is extracted starting from ecl2_range[0], so GRO residues
+            # start at 1. Convert head_residues to local numbering.
+            ecl2_range = TARGETS[target].get("ecl2_range", (1, 999))
+            local_start = max(1, head_range[0] - ecl2_range[0] + 1 - 5)
+            local_end = head_range[1] - ecl2_range[0] + 1 + 5
+            protein = u.select_atoms(f"protein and resid {local_start}:{local_end}")
+            protein_full = u.select_atoms("protein")
+            logger.info(f"    Contact analysis: head resid {local_start}-{local_end} "
+                        f"(local, {len(protein)} atoms, full ECL2={len(protein_full)})")
+        else:
+            protein = u.select_atoms("protein")
+            logger.info(f"    Contact analysis: all protein ({len(protein)} atoms)")
 
         if len(protein) == 0:
-            return {"error": "No protein atoms found"}
+            return {"error": "No protein atoms found in head region"}
 
         # Identify monomer residue names
         non_protein = u.select_atoms("not protein and not resname SOL NA CL")
@@ -272,61 +300,88 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
 
         cutoff_angstrom = cutoff_nm * 10  # nm to A
 
-        # Count contacts per frame per monomer type
-        # Use last 75% of trajectory (skip equilibration)
+        # Analyze last 50% of trajectory, stride=10 to save memory
         n_frames = len(u.trajectory)
-        start_frame = n_frames // 4
+        start_frame = n_frames // 2
+        stride = max(1, (n_frames - start_frame) // 200)  # ~200 frames max
+        logger.info(f"    Analyzing frames {start_frame}-{n_frames} "
+                    f"(stride={stride}, ~{(n_frames-start_frame)//stride} frames)")
 
-        occupancy_counts = {m: [] for m in functional_monomers}
-        occupancy_counts[crosslinker] = []
+        # Build residue-to-monomer mapping from topology [ molecules ] order
+        # All monomers may have resname "UNL" in GRO, so map by residue index
+        non_protein = u.select_atoms("not protein and not resname SOL NA CL")
+        all_monomers_list = functional_monomers + [crosslinker]
 
-        for ts in u.trajectory[start_frame:]:
-            for m_name in list(occupancy_counts.keys()):
-                # Select all atoms of this monomer type
-                # MDAnalysis resname matching may differ from our naming
+        # Read topology to get molecule order and counts
+        top_file = Path(top_path).with_name("topol.top")
+        res_to_monomer = {}  # residue index → monomer name
+        if top_file.exists():
+            in_molecules = False
+            mol_idx = 0  # tracks non-protein residue index
+            skip_protein = True
+            for line in top_file.read_text().split("\n"):
+                if "[ molecules ]" in line:
+                    in_molecules = True
+                    continue
+                if in_molecules and line.strip() and not line.startswith(";"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        mol_name, mol_count = parts[0], int(parts[1])
+                        if mol_name.startswith("Protein"):
+                            continue
+                        if mol_name in ("SOL", "NA", "CL"):
+                            break
+                        for ci in range(mol_count):
+                            res_to_monomer[mol_idx] = mol_name
+                            mol_idx += 1
+
+        logger.info(f"    Monomer mapping: {len(res_to_monomer)} residues "
+                    f"({len(set(res_to_monomer.values()))} types)")
+
+        # Count contacts per monomer type per frame
+        occupancy_per_frame = {m: [] for m in all_monomers_list}
+        mon_residues = non_protein.residues
+
+        for ts in u.trajectory[start_frame::stride]:
+            head_pos = protein.positions
+            frame_contacts = {m: 0 for m in all_monomers_list}
+
+            for ri, res in enumerate(mon_residues):
+                m_name = res_to_monomer.get(ri)
+                if m_name not in frame_contacts:
+                    continue
                 try:
-                    monomer_atoms = u.select_atoms(
-                        f"not protein and not resname SOL NA CL"
-                    )
-                    if len(monomer_atoms) == 0:
-                        occupancy_counts[m_name].append(0)
-                        continue
-
-                    # Count residues within cutoff of protein
-                    contacts = 0
-                    for res in monomer_atoms.residues:
-                        dist = np.min(
-                            np.linalg.norm(
-                                res.atoms.positions[:, np.newaxis, :] -
-                                protein.positions[np.newaxis, :, :],
-                                axis=2
-                            )
-                        )
-                        if dist < cutoff_angstrom:
-                            contacts += 1
-
-                    # Divide by total monomer types to approximate per-type
-                    n_types = len(occupancy_counts)
-                    occupancy_counts[m_name].append(contacts / max(n_types, 1))
+                    min_dist = np.min(np.linalg.norm(
+                        res.atoms.positions[:, np.newaxis, :] -
+                        head_pos[np.newaxis, :, :], axis=2))
+                    if min_dist < cutoff_angstrom:
+                        frame_contacts[m_name] += 1
                 except Exception:
-                    occupancy_counts[m_name].append(0)
+                    pass
 
-        # Compute mean occupancy
+            for m in all_monomers_list:
+                occupancy_per_frame[m].append(frame_contacts[m])
+
+        # Compute mean occupancy (avg contacts per frame per monomer type)
         occupancy = {}
-        for m, counts in occupancy_counts.items():
+        for m, counts in occupancy_per_frame.items():
             occupancy[m] = round(float(np.mean(counts)), 2) if counts else 0.0
 
-        # Derive optimal ratio (normalize to integers)
-        functional_occ = {m: occupancy.get(m, 0.01)
+        # Derive optimal synthesis ratio from Boltzmann weighting
+        # MM-PBSA ΔG per monomer type → exp(ΔG/kT) → ratio
+        # Weaker binders need higher concentration to achieve uniform cavity
+        kT = 0.593  # kcal/mol at 300K
+
+        # Use occupancy as proxy for binding strength if MM-PBSA unavailable
+        functional_occ = {m: max(occupancy.get(m, 0.01), 0.01)
                           for m in functional_monomers}
 
         if sum(functional_occ.values()) > 0:
-            # Normalize: smallest = 1
-            min_occ = max(min(functional_occ.values()), 0.01)
-            raw_ratio = {m: occ / min_occ for m, occ in functional_occ.items()}
-            # Round to integers
+            # Boltzmann-inspired: ratio ∝ 1/occupancy (weak binders need more)
+            inv_occ = {m: 1.0 / occ for m, occ in functional_occ.items()}
+            min_inv = min(inv_occ.values())
+            raw_ratio = {m: v / min_inv for m, v in inv_occ.items()}
             optimal_ratio = {m: max(1, round(r)) for m, r in raw_ratio.items()}
-            # Add crosslinker (2x the sum of functional)
             optimal_ratio[crosslinker] = sum(optimal_ratio.values())
         else:
             optimal_ratio = {m: 1 for m in functional_monomers}

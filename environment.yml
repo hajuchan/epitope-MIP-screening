@@ -7,85 +7,119 @@ channels:
 
 dependencies:
   # ── Core ──
-  - python>=3.10
+  - python>=3.10,<3.14
   - pip
+  - setuptools
 
   # ── Cheminformatics ──
-  - rdkit>=2025.03         # molecular structure generation, fingerprints
-  - ambertools             # GAFF2 parameters, antechamber
-  - openbabel              # PDBQT conversion, format conversion
-
-  # ── Molecular Dynamics ──
-  # GROMACS: system package or conda install
-  # - gromacs               # conda install -c conda-forge gromacs
+  - rdkit>=2025.03         # molecular structure, fingerprints, 3D embedding
+  - ambertools             # GAFF2 parameters (antechamber, tleap, sqm)
+  - openbabel>=3.1         # PDBQT/mol2 format conversion
 
   # ── Docking (CPU) ──
   - autodock>=4.2.6        # AutoDock4 LGA docking (bioconda)
   - autogrid>=4.2.6        # AutoGrid4 grid map generation (bioconda)
   - adfr-suite             # prepare_receptor4, prepare_ligand4 (hcc)
 
+  # ── Structure Preparation ──
+  - openmm>=8.0            # pdbfixer dependency
+  - pdbfixer               # fix missing atoms/residues in PDB
+
   # ── Bioinformatics ──
-  - biopython              # PDB download, sequence analysis
+  - biopython>=1.86        # PDB download, sequence analysis, BLAST
 
   # ── Numerical / Visualization ──
-  - numpy
-  - scipy
-  - pandas
-  - matplotlib
+  - numpy>=1.24
+  - scipy>=1.10
+  - pandas>=2.0
+  - matplotlib>=3.7
 
   # ── pip packages ──
   - pip:
     # Docking
-    - meeko                # PDBQT conversion (AutoDock4 compatible)
-    - gemmi                # meeko dependency (crystal structure handling)
+    - meeko>=0.7            # PDBQT conversion (AutoDock4 compatible)
+    - gemmi>=0.7            # meeko dependency (crystal structure handling)
 
     # MD parameterization & analysis
-    - acpype               # GAFF2 parameterization (GROMACS topology)
-    - gmx_MMPBSA           # MM-PBSA/GBSA binding free energy
-    - mdanalysis           # trajectory analysis, contact frequency
+    - acpype>=2023.10       # GAFF2 parameterization (GROMACS topology)
+    - mdanalysis>=2.5       # trajectory analysis, contact frequency
+    - tqdm                  # progress bars (gmx_MMPBSA dependency)
 
     # Structure preparation
-    - propka               # pH 7.4 protonation state (PROPKA 3.5)
+    - propka>=3.5           # pH 7.4 protonation state prediction
 
 # ══════════════════════════════════════════════════════════════
-# Installation
+# Post-install steps (not automated by conda)
 # ══════════════════════════════════════════════════════════════
 #
 # 1. Create environment:
 #    conda env create -f environment.yml
 #    conda activate GROMACS
 #
-# 2. Install AutoDock-GPU (recommended, requires CUDA):
-#    conda install -c hcc autodock-gpu
-#    # or build from source: https://github.com/ccsb-scripps/AutoDock-GPU
-#    # Same AD4 force field, ~100-350x faster on GPU
-#    # Pipeline auto-detects and falls back to AD4 CPU if unavailable
+# 2. GROMACS GPU (required, build from source for GPU support):
+#    # Download: https://manual.gromacs.org/current/download.html
+#    # Build with CUDA:
+#    mkdir build && cd build
+#    cmake .. -DGMX_GPU=CUDA -DCMAKE_INSTALL_PREFIX=/usr/local/gromacs-gpu
+#    make -j$(nproc) && sudo make install
+#    # Verify: /usr/local/gromacs-gpu/bin/gmx --version
+#    #
+#    # Alternative (CPU only, not recommended):
+#    #   sudo apt install gromacs
+#    #   conda install -c conda-forge gromacs
+#    #
+#    # config.py GMX_BIN must point to the correct gmx binary.
 #
-# 3. GROMACS (if not system-installed):
-#    sudo apt install gromacs   # Ubuntu
-#    conda install -c conda-forge gromacs
+# 3. AutoDock-GPU (required for Phase 2/3, ~100-350x faster):
+#    # Build from source (requires CUDA toolkit):
+#    git clone https://github.com/ccsb-scripps/AutoDock-GPU.git
+#    cd AutoDock-GPU && make DEVICE=GPU
+#    # Add to PATH: export PATH=$PWD/bin:$PATH
+#    # Verify: autodock_gpu_128wi --version
+#    #
+#    # Pipeline auto-detects GPU binary; falls back to AD4 CPU if unavailable.
 #
-# 4. Verify installation:
-#    autodock4 --version                       # AutoDock4 CPU
-#    autogrid4 --version                       # AutoGrid4
-#    autodock_gpu_128wi --version               # AutoDock-GPU (optional)
-#    gmx --version                             # GROMACS
-#    python -c "import meeko; print('OK')"     # meeko
-#    python -c "import propka; print('OK')"    # PROPKA
-#    python -c "import MDAnalysis; print('OK')"# MDAnalysis
+# 4. gmx_MMPBSA (optional, for binding free energy):
+#    # Requires system Python (not conda) due to AmberTools dependency:
+#    pip install gmx_MMPBSA
+#    # Note: gmx_MMPBSA runs via system python shebang, not conda python.
+#
+# 5. Verify installation:
+#    autodock4 --version
+#    autogrid4 --version
+#    autodock_gpu_128wi --version
+#    /usr/local/gromacs-gpu/bin/gmx --version
+#    python -c "from rdkit import Chem; print('RDKit OK')"
+#    python -c "import MDAnalysis; print('MDAnalysis OK')"
+#    python -c "import propka; print('PROPKA OK')"
+#    python -c "import acpype; print('acpype OK')"
+#    python -c "import pdbfixer; print('pdbfixer OK')"
+#    python -c "import meeko; print('meeko OK')"
 #
 # ══════════════════════════════════════════════════════════════
-# Notes
+# Architecture Notes
 # ══════════════════════════════════════════════════════════════
 #
-# CUDA: AutoDock-GPU and GROMACS GPU require CUDA drivers.
-#   nvidia-smi    # verify CUDA availability
+# GPU Requirements:
+#   - NVIDIA GPU with CUDA support (tested: RTX 4070 Ti, 12GB VRAM)
+#   - CUDA toolkit >= 11.0
+#   - GROMACS GPU: Phase 1/4 MD (~5-10x speedup)
+#   - AutoDock-GPU: Phase 2/3 docking (~100-350x speedup)
 #
-# ADFR Suite: installs Python 2.7 internally for prepare_receptor4.py.
-#   This does NOT affect the main Python 3 environment.
-#   The pipeline calls prepare_receptor4.py via python2.7 explicitly.
+# Si/B Atom Handling:
+#   - Silane monomers (Si): PolCA force field (Jorge et al. 2021)
+#   - Boronic acid (B, APBA): UFF-based custom AD4 parameters
+#   - acpype/GAFF2 cannot handle Si/B → automatic PolCA fallback
+#   - AutoDock4: Si→S, B→C proxy substitution for PDBQT generation
 #
-# Si atoms: Silane monomers contain Si which is not in AutoDock4's
-#   default force field. The pipeline automatically generates
-#   AD4_parameters_Si.dat (UFF-based) and handles Si→S PDBQT proxy.
-#   AutoDock-GPU uses --derivtype Si=S with the same parameter file.
+# ADFR Suite:
+#   - Installs internal Python 2.7 for prepare_receptor4.py
+#   - Does NOT affect conda Python 3 environment
+#   - Pipeline calls via explicit python2.7 path
+#
+# Tested Configuration:
+#   - OS: Ubuntu 22.04 (WSL2) / Linux 6.6
+#   - Python: 3.13.5
+#   - GROMACS: 2025.2 (GPU build)
+#   - AutoDock-GPU: v1.6
+#   - GPU: NVIDIA RTX 4070 Ti (12GB)
