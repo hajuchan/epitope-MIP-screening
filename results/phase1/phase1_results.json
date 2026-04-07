@@ -1,0 +1,294 @@
+{
+  "CD63": {
+    "target": "CD63",
+    "full_pdb": "results/phase1/CD63/AF_P08962.pdb",
+    "plddt": {
+      "mean_plddt": 94.2,
+      "min_plddt": 82.2,
+      "n_low_confidence": 0,
+      "pass": true,
+      "message": "OK"
+    },
+    "ecl2_pdb": "results/phase1/CD63/CD63_ecl2_pH74.pdb",
+    "head_pdb": "results/phase1/CD63/CD63_head.pdb",
+    "epitope_pdb": "results/phase1/CD63/CD63_ecl2_pH74.pdb",
+    "ecl2_sequence": "AGYVFRDKVMSEFNNNFRQQMENYPKNNHTASILDRMQADFKCCGAANYTDWEKIPSMSKNRVPDSCCINVTVGCGINFNEKAIHKEGCVEKIGGWLRKNV",
+    "head_sequence": "EKIPSMSKNRVPDSCC",
+    "sequence": "EKIPSMSKNRVPDSCC",
+    "properties": {
+      "sequence": "EKIPSMSKNRVPDSCC",
+      "length": 16,
+      "molecular_weight": 1794.1,
+      "isoelectric_point": 8.14,
+      "gravy": -0.8,
+      "aromaticity": 0.0,
+      "charge_at_pH7": 0.82,
+      "hbond_donors": 7,
+      "hbond_acceptors": 6,
+      "aromatic_residues": 0,
+      "charged_residues": 5,
+      "n_glycan_sites_known": 3,
+      "n_glyco_sequons_detected": 0,
+      "glyco_sequon_positions": []
+    },
+    "blast_uniqueness": {
+      "sequence": "EKIPSMSKNRVPDSCC",
+      "target": "CD63",
+      "length": 16,
+      "status": "PASS",
+      "n_hits": 1,
+      "hits": [
+        {
+          "protein": "RecName: Full=CD63 antigen; AltName: Full=Granulophysin; AltName: Full=Lysosomal",
+          "accession": "P08962",
+          "pct_identity": 100.0,
+          "evalue": "2.60388e-06"
+        }
+      ],
+      "is_unique": true,
+      "cross_reactive": []
+    },
+    "grid_center": [
+      18.872,
+      7.002,
+      -17.879
+    ],
+    "grid_npts": [
+      128,
+      148,
+      154
+    ],
+    "receptor_pdbqt": "results/phase1/CD63/CD63_receptor.pdbqt",
+    "stability_md": {
+      "rmsd_mean_nm": 0.17986453363318342,
+      "rmsd_last50ns_mean_nm": 0.18532980710000002,
+      "rmsf_mean_nm": 0.09838910891089107,
+      "rmsf_max_nm": 0.397,
+      "rg_mean_nm": 1.4052000164917542,
+      "dssp": {
+        "initial": {
+          "helix": 0.0056179775280898875,
+          "sheet": 0.0007022471910112359,
+          "coil": 0.9936797752808989
+        },
+        "final": {
+          "helix": 0.003394194756554307,
+          "sheet": 0.00046816479400749064,
+          "coil": 0.9961376404494382
+        },
+        "average": {
+          "helix": 0.004560512346822843,
+          "sheet": 0.0004722591887576811,
+          "coil": 0.9949672284644194
+        },
+        "helix_change": -0.002,
+        "structure_preserved": true
+      },
+      "stable": true
+    },
+    "ensemble_conformers": [
+      "results/phase1/CD63/conformers/conf_0.pdb",
+      "results/phase1/CD63/conformers/conf_1.pdb",
+      "results/phase1/CD63/conformers/conf_2.pdb",
+      "results/phase1/CD63/conformers/conf_3.pdb",
+      "results/phase1/CD63/conformers/conf_4.pdb"
+    ],
+    "ensemble_receptor_pdbqts": [
+      "results/phase1/CD63/conformers/conf_0.pdbqt",
+      "results/phase1/CD63/conformers/conf_1.pdbqt",
+      "results/phase1/CD63/conformers/conf_2.pdbqt",
+      "results/phase1/CD63/conformers/conf_3.pdbqt",
+      "results/phase1/CD63/conformers/conf_4.pdbqt"
+    ]
+  },
+  "CD81": {
+    "target": "CD81",
+    "full_pdb": "results/phase1/CD81/5TCX.pdb",
+    "ecl2_pdb": "results/phase1/CD81/CD81_ecl2_pH74.pdb",
+    "head_pdb": "results/phase1/CD81/CD81_head.pdb",
+    "epitope_pdb": "results/phase1/CD81/CD81_ecl2_pH74.pdb",
+    "ecl2_sequence": "FVNKDQIAKDVKQFYDQALQQAVVDDDANNAKAVVKTFHETLDCCGSSTLTALTTSVLKNNLCPSGSNIISNLFKEDCHQKIDDLFSGK",
+    "head_sequence": "SVLKNNLCPSGSNIIS",
+    "sequence": "SVLKNNLCPSGSNIIS",
+    "properties": {
+      "sequence": "SVLKNNLCPSGSNIIS",
+      "length": 16,
+      "molecular_weight": 1645.9,
+      "isoelectric_point": 7.94,
+      "gravy": 0.231,
+      "aromaticity": 0.0,
+      "charge_at_pH7": 0.45,
+      "hbond_donors": 8,
+      "hbond_acceptors": 7,
+      "aromatic_residues": 0,
+      "charged_residues": 1,
+      "n_glycan_sites_known": 0,
+      "n_glyco_sequons_detected": 0,
+      "glyco_sequon_positions": []
+    },
+    "blast_uniqueness": {
+      "sequence": "SVLKNNLCPSGSNIIS",
+      "target": "CD81",
+      "length": 16,
+      "status": "PASS",
+      "n_hits": 1,
+      "hits": [
+        {
+          "protein": "RecName: Full=CD81 antigen; AltName: Full=26 kDa cell surface protein TAPA-1; Al",
+          "accession": "P60033",
+          "pct_identity": 100.0,
+          "evalue": "6.34667e-05"
+        }
+      ],
+      "is_unique": true,
+      "cross_reactive": []
+    },
+    "grid_center": [
+      14.842,
+      19.26,
+      -6.854
+    ],
+    "grid_npts": [
+      116,
+      154,
+      116
+    ],
+    "receptor_pdbqt": "results/phase1/CD81/CD81_receptor.pdbqt",
+    "stability_md": {
+      "rmsd_mean_nm": 0.22398958655672163,
+      "rmsd_last50ns_mean_nm": 0.2191933683,
+      "rmsf_mean_nm": 0.14774719101123598,
+      "rmsf_max_nm": 0.7799,
+      "rg_mean_nm": 1.3560305707146427,
+      "dssp": {
+        "initial": {
+          "helix": 0.008426966292134831,
+          "sheet": 0.0,
+          "coil": 0.9915730337078652
+        },
+        "final": {
+          "helix": 0.0056179775280898875,
+          "sheet": 0.0,
+          "coil": 0.9943820224719101
+        },
+        "average": {
+          "helix": 0.006242524805013224,
+          "sheet": 9.833566362885972e-05,
+          "coil": 0.9936591395313579
+        },
+        "helix_change": -0.003,
+        "structure_preserved": true
+      },
+      "stable": true
+    },
+    "ensemble_conformers": [
+      "results/phase1/CD81/conformers/conf_0.pdb",
+      "results/phase1/CD81/conformers/conf_1.pdb",
+      "results/phase1/CD81/conformers/conf_2.pdb",
+      "results/phase1/CD81/conformers/conf_3.pdb",
+      "results/phase1/CD81/conformers/conf_4.pdb"
+    ],
+    "ensemble_receptor_pdbqts": [
+      "results/phase1/CD81/conformers/conf_0.pdbqt",
+      "results/phase1/CD81/conformers/conf_1.pdbqt",
+      "results/phase1/CD81/conformers/conf_2.pdbqt",
+      "results/phase1/CD81/conformers/conf_3.pdbqt",
+      "results/phase1/CD81/conformers/conf_4.pdbqt"
+    ]
+  },
+  "CD9": {
+    "target": "CD9",
+    "full_pdb": "results/phase1/CD9/6K4J.pdb",
+    "ecl2_pdb": "results/phase1/CD9/CD9_ecl2_pH74.pdb",
+    "head_pdb": "results/phase1/CD9/CD9_head.pdb",
+    "epitope_pdb": "results/phase1/CD9/CD9_ecl2_pH74.pdb",
+    "ecl2_sequence": "SHKDEVIKEVQEFYKDTYNKLKTKDEPQRETLKAIHYALNCCGLAGGVEQFISDICPKKDVLESCPDAIKEVFDNKFHI",
+    "head_sequence": "AGGVEQFISDICPKKD",
+    "sequence": "AGGVEQFISDICPKKD",
+    "properties": {
+      "sequence": "AGGVEQFISDICPKKD",
+      "length": 16,
+      "molecular_weight": 1706.9,
+      "isoelectric_point": 4.78,
+      "gravy": -0.294,
+      "aromaticity": 0.062,
+      "charge_at_pH7": -1.21,
+      "hbond_donors": 4,
+      "hbond_acceptors": 5,
+      "aromatic_residues": 1,
+      "charged_residues": 5,
+      "n_glycan_sites_known": 1,
+      "n_glyco_sequons_detected": 0,
+      "glyco_sequon_positions": []
+    },
+    "blast_uniqueness": {
+      "sequence": "AGGVEQFISDICPKKD",
+      "target": "CD9",
+      "length": 16,
+      "status": "PASS",
+      "n_hits": 1,
+      "hits": [
+        {
+          "protein": "RecName: Full=CD9 antigen; AltName: Full=5H9 antigen; AltName: Full=Cell growth-",
+          "accession": "P21926",
+          "pct_identity": 100.0,
+          "evalue": "1.5694e-05"
+        }
+      ],
+      "is_unique": true,
+      "cross_reactive": []
+    },
+    "grid_center": [
+      38.951,
+      15.599,
+      47.038
+    ],
+    "grid_npts": [
+      124,
+      134,
+      148
+    ],
+    "receptor_pdbqt": "results/phase1/CD9/CD9_receptor.pdbqt",
+    "stability_md": {
+      "rmsd_mean_nm": 0.21057926561719142,
+      "rmsd_last50ns_mean_nm": 0.2385336735,
+      "rmsf_mean_nm": 0.13664303797468352,
+      "rmsf_max_nm": 0.5882,
+      "rg_mean_nm": 1.32105208045977,
+      "dssp": {
+        "initial": {
+          "helix": 0.0063199473337722184,
+          "sheet": 0.0,
+          "coil": 0.9936800526662278
+        },
+        "final": {
+          "helix": 0.0027649769585253456,
+          "sheet": 0.0006583278472679394,
+          "coil": 0.9965766951942067
+        },
+        "average": {
+          "helix": 0.0051698311476256606,
+          "sheet": 0.00029616528141459224,
+          "coil": 0.9945340035709598
+        },
+        "helix_change": -0.004,
+        "structure_preserved": true
+      },
+      "stable": true
+    },
+    "ensemble_conformers": [
+      "results/phase1/CD9/conformers/conf_0.pdb",
+      "results/phase1/CD9/conformers/conf_1.pdb",
+      "results/phase1/CD9/conformers/conf_2.pdb",
+      "results/phase1/CD9/conformers/conf_3.pdb",
+      "results/phase1/CD9/conformers/conf_4.pdb"
+    ],
+    "ensemble_receptor_pdbqts": [
+      "results/phase1/CD9/conformers/conf_0.pdbqt",
+      "results/phase1/CD9/conformers/conf_1.pdbqt",
+      "results/phase1/CD9/conformers/conf_2.pdbqt",
+      "results/phase1/CD9/conformers/conf_3.pdbqt",
+      "results/phase1/CD9/conformers/conf_4.pdbqt"
+    ]
+  }
+}

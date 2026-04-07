@@ -34,9 +34,8 @@ def parse_args():
         description="Epitope-MIP Screening Pipeline for Exosome Tetraspanins"
     )
     parser.add_argument(
-        "--target", type=str, default="all",
-        choices=list(TARGETS.keys()) + ["all"],
-        help="Which target to screen (default: all)"
+        "--target", type=str, nargs="+", default=["all"],
+        help="Which target(s) to screen (default: all). E.g. --target CD63 CD81"
     )
     parser.add_argument(
         "--phase", type=str, default="all",
@@ -240,10 +239,10 @@ def main():
         return
 
     # Determine targets
-    if args.target == "all":
+    if "all" in args.target:
         target_names = list(TARGETS.keys())
     else:
-        target_names = [args.target]
+        target_names = args.target
 
     logger.info(f"Targets: {target_names}")
     logger.info(f"Output: {out_dir}")

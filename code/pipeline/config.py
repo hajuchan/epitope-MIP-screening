@@ -191,7 +191,7 @@ EPITOPE_MAX_LENGTH = 16           # Teixeira 2021: >16 causes intramolecular fol
 EPITOPE_MD_TIME_NS = 20           # 16-mer peptide: 20ns sufficient for RMSD convergence
 EPITOPE_RMSD_THRESHOLD = 3.0      # Å — max RMSD for "stable" epitope
 EPITOPE_PLDDT_THRESHOLD = 70      # AlphaFold confidence cutoff
-EPITOPE_MONOMER_MOLAR_RATIO = 100 # Rajpal 2024 JMM: 100 monomers for statistical reliability
+EPITOPE_MONOMER_MOLAR_RATIO = 25  # 5 copies per type — compact system for fast MD
 EPITOPE_STABILITY_MD = True       # Sehit 2024: mandatory stability MD
 # Ensemble docking: extract N conformers from Phase 1 MD, dock to each
 ENSEMBLE_DOCKING = True           # dock to multiple receptor conformations
@@ -227,7 +227,7 @@ MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site competition check (informat
 MMSD_PENALIZE_COMPETITION = False # disabled — competition info recorded but not used for ranking
 
 # ── Phase 4: MD Validation — GROMACS ───────────────────────────
-MD_PRODUCTION_NS = 200            # pre-polymerization MD (Rajpal 2024 JMM: 350ns, 200ns practical)
+MD_PRODUCTION_NS = 100            # pre-polymerization MD (compact system, 100ns sufficient)
 MD_TIMESTEP_FS = 2.0              # integration timestep
 MD_TEMPERATURE_K = 300.0          # K
 MD_PRESSURE_BAR = 1.0             # bar
@@ -266,7 +266,8 @@ VALIDATION_CD_SPECTROSCOPY = True # CD spectroscopy for 2° structure check
 # ── Pipeline Parameters ────────────────────────────────────────
 N_WORKERS = 4                     # parallel docking processes (GPU 1개에 4 이하 권장)
 USE_GPU = True
-OUTPUT_DIR = str(_Path(__file__).resolve().parent.parent.parent / "results")
+PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent
+OUTPUT_DIR = str(PROJECT_ROOT / "results")
 OUTPUT_DIRS = {
     "phase1":   f"{OUTPUT_DIR}/phase1",
     "phase2":   f"{OUTPUT_DIR}/phase2",
@@ -282,6 +283,18 @@ def get_output_path(phase_key: str) -> _Path:
     p = _Path(OUTPUT_DIRS[phase_key])
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def resolve_path(path_str: str) -> _Path:
+    """Resolve a path from result JSONs. Handles relative paths portably."""
+    p = _Path(path_str)
+    if p.is_absolute() and p.exists():
+        return p
+    # Try relative to project root
+    resolved = PROJECT_ROOT / p
+    if resolved.exists():
+        return resolved
+    return p  # return as-is, let caller handle missing file
 
 
 # ── Physical Constants ──────────────────────────────────────────

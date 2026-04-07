@@ -74,7 +74,8 @@ def run_phase4(phase1_results: dict = None,
             continue
 
         top_pcs = p3_data.get("top_pcs", [])
-        epitope_pdb = Path(phase1_results[target]["epitope_pdb"])
+        from .config import resolve_path
+        epitope_pdb = resolve_path(phase1_results[target]["epitope_pdb"])
 
         logger.info(f"\n{'='*20} Phase 4: {target} "
                     f"({len(top_pcs)} PCs, {time_ns}ns, "
@@ -430,7 +431,7 @@ def _run_cross_reactivity(md_results: dict, phase1_results: dict,
             key = f"{source_target}_PC_on_{test_target}"
             logger.info(f"  {key}")
 
-            test_epitope = Path(phase1_results[test_target]["epitope_pdb"])
+            test_epitope = resolve_path(phase1_results[test_target]["epitope_pdb"])
 
             try:
                 xr_result = _run_prepolymerization_md(

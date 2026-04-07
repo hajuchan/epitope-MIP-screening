@@ -83,8 +83,9 @@ def run_phase3(phase1_results: dict = None,
             continue
 
         p1 = phase1_results[target]
-        receptor_pdbqt = Path(p1["receptor_pdbqt"])
-        epitope_pdb = Path(p1["epitope_pdb"])
+        from .config import resolve_path
+        receptor_pdbqt = resolve_path(p1["receptor_pdbqt"])
+        epitope_pdb = resolve_path(p1["epitope_pdb"])
         center = tuple(p1["grid_center"])
         npts = tuple(p1["grid_npts"])
 

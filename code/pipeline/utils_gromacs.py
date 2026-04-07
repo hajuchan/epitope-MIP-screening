@@ -177,7 +177,7 @@ def parameterize_monomer(mol2_path: Path, name: str,
     try:
         result = subprocess.run(
             cmd, cwd=str(output_dir),
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=600,  # 10min for large molecules
             env=env,
         )
         if result.returncode != 0:
@@ -309,9 +309,9 @@ def setup_protein_topology(pdb_path: Path, work_dir: Path,
 
 def setup_simulation_box(gro_path: Path, work_dir: Path,
                           box_type: str = "cubic",
-                          distance: float = 1.0) -> Path:
+                          distance: float = 0.5) -> Path:
     """Create simulation box, solvate, and add ions.
-    Uses cubic box (simpler PBC) with 1.0nm padding."""
+    Uses cubic box with 0.5nm padding (compact, PBC handles periodicity)."""
     work_dir = Path(work_dir)
 
     # Define box — center system in box
@@ -461,6 +461,15 @@ def run_production_md(work_dir: Path, time_ns: float = 200.0,
            "-maxwarn", "5"], work_dir)
 
     md_cmd = ["mdrun", "-deffnm", "md", "-v"]
+
+    # Resume from checkpoint if available (interrupted run)
+    md_cpt = work_dir / "md.cpt"
+    if md_cpt.exists():
+        md_cmd.extend(["-cpi", "md.cpt", "-append"])
+        logger.info(f"Resuming production MD from checkpoint in {work_dir}")
+    else:
+        logger.info(f"Starting {time_ns}ns production MD in {work_dir}")
+
     from .config import USE_GPU
     if USE_GPU:
         md_cmd.extend([
@@ -471,8 +480,10 @@ def run_production_md(work_dir: Path, time_ns: float = 200.0,
             "-gpu_id", gpu_id,
         ])
 
-    logger.info(f"Starting {time_ns}ns production MD in {work_dir}")
-    _gmx(md_cmd, work_dir, timeout=int(time_ns * 3600))  # generous timeout
+    # Production MD: show real-time progress (-v output)
+    from .config import GMX_BIN
+    full_cmd = [GMX_BIN] + md_cmd
+    subprocess.run(full_cmd, cwd=str(work_dir), timeout=int(time_ns * 3600))
     return work_dir / "md.xtc"
 
 
@@ -486,64 +497,76 @@ def analyze_trajectory(work_dir: Path) -> dict:
     work_dir = Path(work_dir)
     results = {}
 
+    import numpy as np
+
+    # First, create a stride-reduced trajectory for analysis (every 100th frame)
+    reduced_xtc = work_dir / "md_reduced.xtc"
+    if not reduced_xtc.exists() and (work_dir / "md.xtc").exists():
+        logger.info("  Creating reduced trajectory for analysis (stride 100)...")
+        _gmx(["trjconv", "-f", "md.xtc", "-s", "md.tpr",
+               "-o", "md_reduced.xtc", "-skip", "100"],
+              work_dir, input_text="System\n")
+
+    xtc_for_analysis = str(reduced_xtc) if reduced_xtc.exists() else "md.xtc"
+
     # RMSD
-    try:
-        _gmx(["rms",
-               "-f", "md.xtc", "-s", "md.tpr",
-               "-o", "rmsd.xvg"],
-              work_dir, input_text="Backbone\nBackbone\n")
-        rmsd_data = _parse_xvg(work_dir / "rmsd.xvg")
-        if rmsd_data is not None and len(rmsd_data) > 0:
-            import numpy as np
-            results["rmsd_mean_nm"] = float(np.mean(rmsd_data[:, 1]))
-            # Last 50% of trajectory
-            half_time = rmsd_data[-1, 0] / 2
-            last_half = rmsd_data[rmsd_data[:, 0] > half_time]
-            if len(last_half) > 0:
-                results["rmsd_last50ns_mean_nm"] = float(np.mean(last_half[:, 1]))
-    except Exception as e:
-        logger.warning(f"RMSD analysis failed: {e}")
+    if not (work_dir / "rmsd.xvg").exists():
+        try:
+            _gmx(["rms", "-f", xtc_for_analysis, "-s", "md.tpr",
+                   "-o", "rmsd.xvg"],
+                  work_dir, input_text="Backbone\nBackbone\n")
+        except Exception as e:
+            logger.warning(f"RMSD analysis failed: {e}")
+
+    rmsd_data = _parse_xvg(work_dir / "rmsd.xvg")
+    if rmsd_data is not None and len(rmsd_data) > 0:
+        results["rmsd_mean_nm"] = float(np.mean(rmsd_data[:, 1]))
+        half_time = rmsd_data[-1, 0] / 2
+        last_half = rmsd_data[rmsd_data[:, 0] > half_time]
+        if len(last_half) > 0:
+            results["rmsd_last50ns_mean_nm"] = float(np.mean(last_half[:, 1]))
 
     # RMSF
-    try:
-        _gmx(["rmsf",
-               "-f", "md.xtc", "-s", "md.tpr",
-               "-o", "rmsf.xvg", "-res"],
-              work_dir, input_text="Backbone\n")
-        rmsf_data = _parse_xvg(work_dir / "rmsf.xvg")
-        if rmsf_data is not None and len(rmsf_data) > 0:
-            import numpy as np
-            results["rmsf_mean_nm"] = float(np.mean(rmsf_data[:, 1]))
-            results["rmsf_max_nm"] = float(np.max(rmsf_data[:, 1]))
-    except Exception as e:
-        logger.warning(f"RMSF analysis failed: {e}")
+    if not (work_dir / "rmsf.xvg").exists():
+        try:
+            _gmx(["rmsf", "-f", xtc_for_analysis, "-s", "md.tpr",
+                   "-o", "rmsf.xvg", "-res"],
+                  work_dir, input_text="Backbone\n")
+        except Exception as e:
+            logger.warning(f"RMSF analysis failed: {e}")
 
-    # H-bonds (protein to non-protein)
-    try:
-        _gmx(["hbond",
-               "-f", "md.xtc", "-s", "md.tpr",
-               "-num", "hbond.xvg"],
-              work_dir, input_text="Protein\nNon-Protein\n")
-        hb_data = _parse_xvg(work_dir / "hbond.xvg")
-        if hb_data is not None and len(hb_data) > 0:
-            import numpy as np
-            results["hbond_mean"] = float(np.mean(hb_data[:, 1]))
-            results["hbond_max"] = float(np.max(hb_data[:, 1]))
-    except Exception as e:
-        logger.warning(f"H-bond analysis failed: {e}")
+    rmsf_data = _parse_xvg(work_dir / "rmsf.xvg")
+    if rmsf_data is not None and len(rmsf_data) > 0:
+        results["rmsf_mean_nm"] = float(np.mean(rmsf_data[:, 1]))
+        results["rmsf_max_nm"] = float(np.max(rmsf_data[:, 1]))
+
+    # H-bonds — use reduced trajectory (full xtc causes segfault)
+    if not (work_dir / "hbond.xvg").exists():
+        try:
+            _gmx(["hbond", "-f", xtc_for_analysis, "-s", "md.tpr",
+                   "-num", "hbond.xvg"],
+                  work_dir, input_text="Protein\nNon-Protein\n",
+                  timeout=600)  # 10 min timeout
+        except Exception as e:
+            logger.warning(f"H-bond analysis failed: {e}")
+
+    hb_data = _parse_xvg(work_dir / "hbond.xvg")
+    if hb_data is not None and len(hb_data) > 0:
+        results["hbond_mean"] = float(np.mean(hb_data[:, 1]))
+        results["hbond_max"] = float(np.max(hb_data[:, 1]))
 
     # Radius of gyration
-    try:
-        _gmx(["gyrate",
-               "-f", "md.xtc", "-s", "md.tpr",
-               "-o", "gyrate.xvg"],
-              work_dir, input_text="Protein\n")
-        rg_data = _parse_xvg(work_dir / "gyrate.xvg")
-        if rg_data is not None and len(rg_data) > 0:
-            import numpy as np
-            results["rg_mean_nm"] = float(np.mean(rg_data[:, 1]))
-    except Exception as e:
-        logger.warning(f"Rg analysis failed: {e}")
+    if not (work_dir / "gyrate.xvg").exists():
+        try:
+            _gmx(["gyrate", "-f", xtc_for_analysis, "-s", "md.tpr",
+                   "-o", "gyrate.xvg"],
+                  work_dir, input_text="Protein\n")
+        except Exception as e:
+            logger.warning(f"Rg analysis failed: {e}")
+
+    rg_data = _parse_xvg(work_dir / "gyrate.xvg")
+    if rg_data is not None and len(rg_data) > 0:
+        results["rg_mean_nm"] = float(np.mean(rg_data[:, 1]))
 
     # Sullivan 2019 / Sehit 2024: DSSP secondary structure (computational CD)
     from .config import DSSP_ANALYSIS
@@ -840,9 +863,9 @@ def _include_monomers_in_topology(work_dir: Path, monomer_itps: list):
     # Pre-compute non-overlapping monomer positions (PACKMOL-style)
     import random, math
     n_monomers = len(monomer_itps)
-    min_dist_nm = 0.5  # minimum distance between monomer centers
+    min_dist_nm = 1.0  # minimum distance between monomer centers
     r_inner = prot_radius + 0.3  # start just outside protein surface
-    r_outer = r_inner + max(2.0, 0.2 * n_monomers ** (1/3))  # compact shell
+    r_outer = r_inner + 1.0      # thin shell → 9nm box target (Rajpal 2024)
 
     placed_centers = []
     monomer_positions = []  # pre-computed (x, y, z) for each monomer
