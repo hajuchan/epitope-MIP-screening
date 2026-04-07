@@ -502,21 +502,26 @@ def analyze_trajectory(work_dir: Path) -> dict:
     # First, create a stride-reduced trajectory for analysis (every 100th frame)
     reduced_xtc = work_dir / "md_reduced.xtc"
     if not reduced_xtc.exists() and (work_dir / "md.xtc").exists():
-        logger.info("  Creating reduced trajectory for analysis (stride 100)...")
+        logger.info("  [1/5] Creating reduced trajectory (stride 100)...")
         _gmx(["trjconv", "-f", "md.xtc", "-s", "md.tpr",
                "-o", "md_reduced.xtc", "-skip", "100"],
               work_dir, input_text="0\n", timeout=300)
+    else:
+        logger.info("  [1/5] Reduced trajectory: FOUND")
 
     xtc_for_analysis = str(reduced_xtc) if reduced_xtc.exists() else "md.xtc"
 
     # RMSD
     if not (work_dir / "rmsd.xvg").exists():
+        logger.info("  [2/5] RMSD analysis...")
         try:
             _gmx(["rms", "-f", xtc_for_analysis, "-s", "md.tpr",
                    "-o", "rmsd.xvg"],
                   work_dir, input_text="Backbone\nBackbone\n")
         except Exception as e:
-            logger.warning(f"RMSD analysis failed: {e}")
+            logger.warning(f"  [2/5] RMSD failed: {e}")
+    else:
+        logger.info("  [2/5] RMSD: FOUND")
 
     rmsd_data = _parse_xvg(work_dir / "rmsd.xvg")
     if rmsd_data is not None and len(rmsd_data) > 0:
@@ -528,28 +533,33 @@ def analyze_trajectory(work_dir: Path) -> dict:
 
     # RMSF
     if not (work_dir / "rmsf.xvg").exists():
+        logger.info("  [3/5] RMSF analysis...")
         try:
             _gmx(["rmsf", "-f", xtc_for_analysis, "-s", "md.tpr",
                    "-o", "rmsf.xvg", "-res"],
                   work_dir, input_text="Backbone\n")
         except Exception as e:
-            logger.warning(f"RMSF analysis failed: {e}")
+            logger.warning(f"  [3/5] RMSF failed: {e}")
+    else:
+        logger.info("  [3/5] RMSF: FOUND")
 
     rmsf_data = _parse_xvg(work_dir / "rmsf.xvg")
     if rmsf_data is not None and len(rmsf_data) > 0:
         results["rmsf_mean_nm"] = float(np.mean(rmsf_data[:, 1]))
         results["rmsf_max_nm"] = float(np.max(rmsf_data[:, 1]))
 
-    # H-bonds — use reduced trajectory (full xtc causes segfault)
+    # H-bonds
     if not (work_dir / "hbond.xvg").exists():
+        logger.info("  [4/5] H-bond analysis...")
         try:
-            # GROMACS 2025: selection syntax with -r and -t
             _gmx(["hbond", "-f", xtc_for_analysis, "-s", "md.tpr",
                    "-r", "group 1", "-t", "not group 1",
                    "-num", "hbond.xvg"],
                   work_dir, timeout=600)
         except Exception as e:
-            logger.warning(f"H-bond analysis failed: {e}")
+            logger.warning(f"  [4/5] H-bond failed: {e}")
+    else:
+        logger.info("  [4/5] H-bond: FOUND")
 
     hb_data = _parse_xvg(work_dir / "hbond.xvg")
     if hb_data is not None and len(hb_data) > 0:
@@ -558,37 +568,47 @@ def analyze_trajectory(work_dir: Path) -> dict:
 
     # Radius of gyration
     if not (work_dir / "gyrate.xvg").exists():
+        logger.info("  [5/5] Radius of gyration...")
         try:
             _gmx(["gyrate", "-f", xtc_for_analysis, "-s", "md.tpr",
                    "-o", "gyrate.xvg"],
                   work_dir, input_text="Protein\n")
         except Exception as e:
-            logger.warning(f"Rg analysis failed: {e}")
+            logger.warning(f"  [5/5] Rg failed: {e}")
+    else:
+        logger.info("  [5/5] Rg: FOUND")
 
     rg_data = _parse_xvg(work_dir / "gyrate.xvg")
     if rg_data is not None and len(rg_data) > 0:
         results["rg_mean_nm"] = float(np.mean(rg_data[:, 1]))
 
-    # Sullivan 2019 / Sehit 2024: DSSP secondary structure (computational CD)
+    # Sullivan 2019 / Sehit 2024: DSSP secondary structure
     from .config import DSSP_ANALYSIS
     if DSSP_ANALYSIS:
         try:
+            logger.info("  DSSP secondary structure analysis...")
             from .utils_analysis import analyze_dssp_changes
-            xtc = work_dir / "md.xtc"
-            tpr = work_dir / "md.tpr"
-            # Convert tpr to pdb for mdtraj topology
-            gro = work_dir / "md_start.gro"
-            _gmx(["editconf", "-f", str(tpr), "-o", str(gro)], work_dir)
-            if xtc.exists() and gro.exists():
-                dssp = analyze_dssp_changes(xtc, gro)
+            # Use npt.gro as topology (avoid editconf hang on large tpr)
+            gro = work_dir / "npt.gro"
+            if not gro.exists():
+                gro = work_dir / "em.gro"
+            if gro.exists() and reduced_xtc.exists():
+                dssp = analyze_dssp_changes(reduced_xtc, gro)
                 results["dssp"] = dssp
                 if dssp.get("structure_preserved") is False:
                     logger.warning(
-                        f"2° structure NOT preserved during MD "
-                        f"(helix change: {dssp.get('helix_change', 'N/A')})"
-                    )
+                        f"  2° structure NOT preserved "
+                        f"(helix change: {dssp.get('helix_change', 'N/A')})")
+                else:
+                    logger.info("  DSSP: structure preserved")
+            else:
+                logger.info("  DSSP: skipped (missing files)")
+        except ImportError:
+            logger.info("  DSSP: mdtraj not available, skipped")
         except Exception as e:
-            logger.warning(f"DSSP analysis failed: {e}")
+            logger.warning(f"  DSSP failed: {e}")
+
+    logger.info("  Trajectory analysis complete")
 
     return results
 
@@ -1298,25 +1318,29 @@ def _generate_silane_itp(name: str, smiles: str, output_dir: Path) -> dict:
 
 def _parse_mmpbsa_results(dat_path: Path) -> dict:
     """Parse gmx_MMPBSA FINAL_RESULTS file."""
-    import re
     text = Path(dat_path).read_text()
     results = {}
 
-    # Look for DELTA TOTAL line
+    # gmx_MMPBSA uses Δ (unicode delta) prefix
     for line in text.split("\n"):
-        if "DELTA TOTAL" in line:
+        if "TOTAL" in line and ("DELTA" in line or "Δ" in line):
             parts = line.split()
             try:
-                results["delta_total_kcal"] = float(parts[-2])
-                results["delta_total_std"] = float(parts[-1])
+                # ΔTOTAL  -0.71  41.65  2.63  4.17  0.26
+                for i, p in enumerate(parts):
+                    if "TOTAL" in p:
+                        results["delta_total_kcal"] = float(parts[i+1])
+                        if len(parts) > i + 2:
+                            results["delta_total_std"] = float(parts[i+4])
+                        break
             except (IndexError, ValueError):
                 pass
-        elif "DELTA" in line and "TOTAL" not in line:
+        elif ("Δ" in line or "DELTA" in line) and "---" not in line:
             parts = line.split()
-            if len(parts) >= 3:
-                key = parts[0] + "_" + parts[1]
+            if len(parts) >= 2:
+                key = parts[0].replace("Δ", "delta_")
                 try:
-                    results[key.lower()] = float(parts[-2])
+                    results[key.lower()] = float(parts[1])
                 except (IndexError, ValueError):
                     pass
 
