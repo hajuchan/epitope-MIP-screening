@@ -505,7 +505,7 @@ def analyze_trajectory(work_dir: Path) -> dict:
         logger.info("  Creating reduced trajectory for analysis (stride 100)...")
         _gmx(["trjconv", "-f", "md.xtc", "-s", "md.tpr",
                "-o", "md_reduced.xtc", "-skip", "100"],
-              work_dir, input_text="System\n")
+              work_dir, input_text="0\n", timeout=300)
 
     xtc_for_analysis = str(reduced_xtc) if reduced_xtc.exists() else "md.xtc"
 
@@ -543,10 +543,11 @@ def analyze_trajectory(work_dir: Path) -> dict:
     # H-bonds — use reduced trajectory (full xtc causes segfault)
     if not (work_dir / "hbond.xvg").exists():
         try:
+            # GROMACS 2025: selection syntax with -r and -t
             _gmx(["hbond", "-f", xtc_for_analysis, "-s", "md.tpr",
+                   "-r", "group 1", "-t", "not group 1",
                    "-num", "hbond.xvg"],
-                  work_dir, input_text="Protein\nNon-Protein\n",
-                  timeout=600)  # 10 min timeout
+                  work_dir, timeout=600)
         except Exception as e:
             logger.warning(f"H-bond analysis failed: {e}")
 
@@ -632,6 +633,12 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
             /
         """))
 
+    # Generate index file with non-protein group if not exists
+    ndx_path = work_dir / "index.ndx"
+    if not ndx_path.exists():
+        _gmx(["make_ndx", "-f", "md.tpr", "-o", "index.ndx"],
+              work_dir, input_text="! 1\nq\n")  # group 10 = !Protein
+
     # gmx_MMPBSA command (uses system python via shebang)
     cmd = [
         "gmx_MMPBSA",
@@ -639,8 +646,8 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
         "-i", str(mmpbsa_in),
         "-cs", str(work_dir / "md.tpr"),
         "-ct", str(work_dir / "md.xtc"),
-        "-ci", str(work_dir / "index.ndx"),
-        "-cg", "1", "13",  # receptor and ligand groups (adjust per system)
+        "-ci", str(ndx_path),
+        "-cg", "1", "13",
         "-cp", str(work_dir / "topol.top"),
         "-eo", str(work_dir / "FINAL_RESULTS_MMPBSA.csv"),
     ]
