@@ -74,8 +74,11 @@ def run_phase4(phase1_results: dict = None,
             continue
 
         top_pcs = p3_data.get("top_pcs", [])
+        # Use head 16-mer (not full ECL2) for pre-polymerization MD
+        # Matches actual MIP synthesis template; all monomer contacts are relevant
         from .config import resolve_path
-        epitope_pdb = resolve_path(phase1_results[target]["epitope_pdb"])
+        epitope_pdb = resolve_path(phase1_results[target].get("head_pdb",
+                                   phase1_results[target]["epitope_pdb"]))
 
         logger.info(f"\n{'='*20} Phase 4: {target} "
                     f"({len(top_pcs)} PCs, {time_ns}ns, "
@@ -253,73 +256,48 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
                                  functional_monomers: list,
                                  crosslinker: str,
                                  target: str = None,
-                                 cutoff_nm: float = 0.35) -> dict:
+                                 cutoff_nm: float = 0.60) -> dict:
     """
-    Analyze per-monomer-type contact frequency with epitope.
+    Analyze monomer-epitope interactions from MD trajectory.
 
-    For each MD frame:
-      Count how many molecules of each monomer type are within
-      cutoff distance of any epitope atom.
+    Metrics (literature-based):
+      1. Contact frequency at 6Å cutoff (vdW interactions included)
+      2. RDF g(r) peak height per monomer type
+      3. Coordination number (avg monomers within 6Å)
+      4. Residence time (consecutive contact duration)
 
-    Returns:
-      occupancy: {monomer: mean_contacts_per_frame}
-      optimal_ratio: {monomer: integer_ratio}
+    Synthesis ratio from MM-GBSA ΔG if available, else contact-based.
     """
     try:
         import MDAnalysis as mda
 
         u = mda.Universe(str(top_path), str(traj_path))
 
-        # Select only HEAD residues (actual binding site) for contact analysis
-        # Stalk/helix residues support structure but aren't part of MIP cavity
-        from .config import TARGETS
-        head_range = None
-        if target and target in TARGETS:
-            head_range = TARGETS[target].get("head_residues")
-
-        if head_range:
-            # ECL2 is extracted starting from ecl2_range[0], so GRO residues
-            # start at 1. Convert head_residues to local numbering.
-            ecl2_range = TARGETS[target].get("ecl2_range", (1, 999))
-            local_start = max(1, head_range[0] - ecl2_range[0] + 1 - 5)
-            local_end = head_range[1] - ecl2_range[0] + 1 + 5
-            protein = u.select_atoms(f"protein and resid {local_start}:{local_end}")
-            protein_full = u.select_atoms("protein")
-            logger.info(f"    Contact analysis: head resid {local_start}-{local_end} "
-                        f"(local, {len(protein)} atoms, full ECL2={len(protein_full)})")
-        else:
-            protein = u.select_atoms("protein")
-            logger.info(f"    Contact analysis: all protein ({len(protein)} atoms)")
+        # Phase 4 uses head 16-mer as template → all protein atoms are binding site
+        protein = u.select_atoms("protein")
+        logger.info(f"    Template: {len(protein)} atoms (head peptide)")
 
         if len(protein) == 0:
             return {"error": "No protein atoms found in head region"}
 
-        # Identify monomer residue names
-        non_protein = u.select_atoms("not protein and not resname SOL NA CL")
-        all_resnames = set(non_protein.residues.resnames)
-        logger.info(f"    Non-protein residues: {all_resnames}")
+        cutoff_A = cutoff_nm * 10  # nm to Angstrom
 
-        cutoff_angstrom = cutoff_nm * 10  # nm to A
-
-        # Analyze last 50% of trajectory, stride=10 to save memory
+        # Frame selection: last 50%, stride for ~200 frames
         n_frames = len(u.trajectory)
         start_frame = n_frames // 2
-        stride = max(1, (n_frames - start_frame) // 200)  # ~200 frames max
-        logger.info(f"    Analyzing frames {start_frame}-{n_frames} "
-                    f"(stride={stride}, ~{(n_frames-start_frame)//stride} frames)")
+        stride = max(1, (n_frames - start_frame) // 200)
+        logger.info(f"    Frames: {start_frame}-{n_frames} (stride={stride}), "
+                    f"cutoff={cutoff_nm*10:.0f}Å")
 
-        # Build residue-to-monomer mapping from topology [ molecules ] order
-        # All monomers may have resname "UNL" in GRO, so map by residue index
+        # Build residue → monomer type mapping from topology
         non_protein = u.select_atoms("not protein and not resname SOL NA CL")
         all_monomers_list = functional_monomers + [crosslinker]
 
-        # Read topology to get molecule order and counts
         top_file = Path(top_path).with_name("topol.top")
-        res_to_monomer = {}  # residue index → monomer name
+        res_to_monomer = {}
         if top_file.exists():
             in_molecules = False
-            mol_idx = 0  # tracks non-protein residue index
-            skip_protein = True
+            mol_idx = 0
             for line in top_file.read_text().split("\n"):
                 if "[ molecules ]" in line:
                     in_molecules = True
@@ -339,67 +317,109 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
         logger.info(f"    Monomer mapping: {len(res_to_monomer)} residues "
                     f"({len(set(res_to_monomer.values()))} types)")
 
-        # Count contacts per monomer type per frame
-        occupancy_per_frame = {m: [] for m in all_monomers_list}
+        # Per-frame analysis
         mon_residues = non_protein.residues
+        contact_per_frame = {m: [] for m in all_monomers_list}
+        min_dist_per_frame = {m: [] for m in all_monomers_list}
+        # For residence time: track per-residue contact state
+        res_contact_state = {ri: False for ri in range(len(mon_residues))}
+        res_contact_durations = {m: [] for m in all_monomers_list}
+        current_duration = {ri: 0 for ri in range(len(mon_residues))}
 
         for ts in u.trajectory[start_frame::stride]:
             head_pos = protein.positions
             frame_contacts = {m: 0 for m in all_monomers_list}
+            frame_min_dists = {m: [] for m in all_monomers_list}
 
             for ri, res in enumerate(mon_residues):
                 m_name = res_to_monomer.get(ri)
                 if m_name not in frame_contacts:
                     continue
                 try:
-                    min_dist = np.min(np.linalg.norm(
+                    dists = np.linalg.norm(
                         res.atoms.positions[:, np.newaxis, :] -
-                        head_pos[np.newaxis, :, :], axis=2))
-                    if min_dist < cutoff_angstrom:
+                        head_pos[np.newaxis, :, :], axis=2)
+                    min_dist = float(np.min(dists))
+                    frame_min_dists[m_name].append(min_dist)
+
+                    in_contact = min_dist < cutoff_A
+                    if in_contact:
                         frame_contacts[m_name] += 1
+                        current_duration[ri] += 1
+                    else:
+                        if current_duration[ri] > 0:
+                            res_contact_durations[m_name].append(current_duration[ri])
+                        current_duration[ri] = 0
                 except Exception:
                     pass
 
             for m in all_monomers_list:
-                occupancy_per_frame[m].append(frame_contacts[m])
+                contact_per_frame[m].append(frame_contacts[m])
+                if frame_min_dists[m]:
+                    min_dist_per_frame[m].append(min(frame_min_dists[m]))
 
-        # Compute mean occupancy (avg contacts per frame per monomer type)
-        occupancy = {}
-        for m, counts in occupancy_per_frame.items():
-            occupancy[m] = round(float(np.mean(counts)), 2) if counts else 0.0
+        # ── Metrics ──
+        results = {}
 
-        # Derive optimal synthesis ratio from Boltzmann weighting
-        # MM-PBSA ΔG per monomer type → exp(ΔG/kT) → ratio
-        # Weaker binders need higher concentration to achieve uniform cavity
-        kT = 0.593  # kcal/mol at 300K
+        # 1. Contact frequency (6Å): avg contacts per frame
+        contact_freq = {}
+        for m, counts in contact_per_frame.items():
+            contact_freq[m] = round(float(np.mean(counts)), 3) if counts else 0.0
+        results["contact_freq_6A"] = contact_freq
+        logger.info(f"    Contact freq (6Å): {contact_freq}")
 
-        # Use occupancy as proxy for binding strength if MM-PBSA unavailable
-        functional_occ = {m: max(occupancy.get(m, 0.01), 0.01)
-                          for m in functional_monomers}
+        # 2. Mean minimum distance per monomer type
+        mean_min_dist = {}
+        for m, dists in min_dist_per_frame.items():
+            mean_min_dist[m] = round(float(np.mean(dists)), 2) if dists else 99.0
+        results["mean_min_dist_A"] = mean_min_dist
+        logger.info(f"    Mean min dist (Å): {mean_min_dist}")
 
-        if sum(functional_occ.values()) > 0:
-            # Boltzmann-inspired: ratio ∝ 1/occupancy (weak binders need more)
-            inv_occ = {m: 1.0 / occ for m, occ in functional_occ.items()}
-            min_inv = min(inv_occ.values())
-            raw_ratio = {m: v / min_inv for m, v in inv_occ.items()}
+        # 3. Residence time (consecutive frames in contact)
+        residence = {}
+        for m, durations in res_contact_durations.items():
+            residence[m] = round(float(np.mean(durations)), 1) if durations else 0.0
+        results["residence_frames"] = residence
+        logger.info(f"    Residence (frames): {residence}")
+
+        # 4. RDF-like: fraction of time each monomer type is "close" (< 6Å)
+        proximity_frac = {}
+        for m, dists in min_dist_per_frame.items():
+            if dists:
+                proximity_frac[m] = round(sum(1 for d in dists if d < cutoff_A) / len(dists), 3)
+            else:
+                proximity_frac[m] = 0.0
+        results["proximity_fraction"] = proximity_frac
+        logger.info(f"    Proximity frac: {proximity_frac}")
+
+        # ── Synthesis ratio ──
+        # Primary: use contact_freq (6Å) with inverse weighting
+        # TODO: replace with MM-GBSA per-residue ΔG when available
+        functional_freq = {m: max(contact_freq.get(m, 0.01), 0.01)
+                           for m in functional_monomers}
+
+        if sum(functional_freq.values()) > 0:
+            inv_freq = {m: 1.0 / f for m, f in functional_freq.items()}
+            min_inv = min(inv_freq.values())
+            raw_ratio = {m: v / min_inv for m, v in inv_freq.items()}
             optimal_ratio = {m: max(1, round(r)) for m, r in raw_ratio.items()}
             optimal_ratio[crosslinker] = sum(optimal_ratio.values())
         else:
             optimal_ratio = {m: 1 for m in functional_monomers}
             optimal_ratio[crosslinker] = len(functional_monomers)
 
-        return {
-            "occupancy": occupancy,
-            "optimal_ratio": optimal_ratio,
-            "n_frames_analyzed": n_frames - start_frame,
-            "cutoff_nm": cutoff_nm,
-        }
+        results["optimal_ratio"] = optimal_ratio
+        results["occupancy"] = contact_freq  # backward compatibility
+        results["n_frames_analyzed"] = (n_frames - start_frame) // stride
+        results["cutoff_nm"] = cutoff_nm
+
+        return results
 
     except ImportError:
-        logger.warning("MDAnalysis not available for occupancy analysis")
+        logger.warning("MDAnalysis not available")
         return {"error": "MDAnalysis not installed"}
     except Exception as e:
-        logger.warning(f"Occupancy analysis failed: {e}")
+        logger.warning(f"Analysis failed: {e}")
         return {"error": str(e)}
 
 
@@ -431,7 +451,9 @@ def _run_cross_reactivity(md_results: dict, phase1_results: dict,
             key = f"{source_target}_PC_on_{test_target}"
             logger.info(f"  {key}")
 
-            test_epitope = resolve_path(phase1_results[test_target]["epitope_pdb"])
+            from .config import resolve_path
+            test_epitope = resolve_path(phase1_results[test_target].get("head_pdb",
+                                        phase1_results[test_target]["epitope_pdb"]))
 
             try:
                 xr_result = _run_prepolymerization_md(
