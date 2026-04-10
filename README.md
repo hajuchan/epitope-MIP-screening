@@ -83,62 +83,134 @@ Phase 6: 합성 레시피 (Phase 5 통과한 target만)
 
 ## 3. 각 Phase 상세
 
-### Phase 1: 에피토프 추출
+### Phase 1: 에피토프 추출 및 구조 준비
 
 **파일**: `code/pipeline/phase1_epitope_prep.py`
 
-- 도킹에는 **ECL2 전체**(~90 잔기) 사용 — disulfide bond 유지
-- MD/합성에는 **Head 16-mer** 사용 — 실제 합성 template과 동일
-- Ensemble conformer: MD 궤적에서 5개 대표 구조 추출 → receptor 유연성 반영
+구조 소스: CD63은 AlphaFold DB API (UniProt P08962, pLDDT > 70 검증), CD81/CD9는 RCSB PDB (5TCX, 6K4J). pdbfixer [OpenMM]로 missing side chain 자동 수정.
 
-### Phase 2: Single Monomer Docking
+**도킹 receptor (Phase 2-3용)**: ECL2 전체 (~90 잔기) 추출. Head만 사용하면 CCG 모티프의 disulfide bond가 끊어져 구조 불안정. ECL2 전체를 사용하되, grid center를 head 16-mer에 맞춤으로써 도킹이 head 부위를 향하도록 유도.
+
+**합성 template (Phase 4-5용)**: Head 16-mer 추출. 실제 MIP 합성에서 주문하는 펩타이드와 동일. 에피토프 길이는 Teixeira et al. [1] 권장 범위(9-16 잔기) 내.
+
+**Protonation**: PROPKA 3.5 [4]로 pH 7.4 (PBS 조건) protonation 상태 결정. His/Cys 양성자화 상태 자동 할당.
+
+**고유성 검증**: NCBI BLAST로 16-mer가 인간 프로테옴에서 고유한지 확인 [2]. >70% identity 타 단백질 발견 시 경고.
+
+**MD 안정성**: GROMACS 20ns MD (amber99sb-ildn, TIP3P, 0.15M NaCl, 300K, NPT) → RMSD < 3.0 Å 확인 [3].
+
+**Ensemble conformer**: 20ns MD 궤적에서 RMSD 기반 clustering → 5개 대표 구조 추출. 각각 OpenBabel/ADFR로 receptor PDBQT 생성. Phase 2에서 6개 receptor (원본 + 5 conformer)에 도킹하여 receptor 유연성 반영.
+
+### Phase 2: Single Monomer Docking (SMD)
 
 **파일**: `code/pipeline/phase2_smd.py`
 
-- AutoDock4 LGA 도킹 [5] + AutoDock-GPU 가속 [6]
-- Si/B 비표준 원자: UFF 기반 커스텀 파라미터 [8]
-- Ensemble docking: 6개 receptor에 도킹 → best BE 선택
-- 필터: BE ≤ -2.0, 상위 12개 → Phase 3 전달
+**도킹 엔진**: AutoDock4 [5] Lamarckian Genetic Algorithm (LGA). GPU 가속 시 AutoDock-GPU [6] 사용 (동일 force field + scoring function, ~100-350× 가속).
 
-### Phase 3: Multi-Monomer Optimization
+**도킹 파라미터**: GA runs = 50, population = 150, max evaluations = 2,500,000, grid spacing = 0.375 Å, grid points = 60×60×60. RMSD 기반 클러스터링 후 rank-1 클러스터 mean BE 추출.
+
+**비표준 원자 처리 (Si, B)**: AutoDock4 기본 force field에 Si/B 미포함. (1) PDBQT 생성: Si→S, B→C proxy 치환 → meeko로 PDBQT 생성 → 원래 원자 타입 복원. (2) 커스텀 파라미터 파일 `AD4_parameters_custom.dat`: UFF [8] 기반 Si_3 (Rii=4.295Å, ε=0.402 kcal/mol), B_3 (Rii=4.083Å, ε=0.180 kcal/mol). (3) AutoDock-GPU: `--derivtype Si=S/B=C` + parameter_file.
+
+**Ensemble docking**: 24 monomer × 3 target × 6 conformer = 최대 432 도킹. 모노머별로 6개 receptor 중 best BE 선택.
+
+**필터링**: BE ≤ -2.0 kcal/mol (유의미한 결합), 상위 12개를 Phase 3으로 전달. ΔΔG 선택도는 계산하되 필터에 사용하지 않음 — SMD는 개별 상호작용만 평가하므로 multi-monomer selectivity는 Phase 3 이후에 판단.
+
+### Phase 3: Multi-Monomer Simultaneous Docking (MMSD)
 
 **파일**: `code/pipeline/phase3_mmsd.py`
 
-- **Greedy forward selection**: 모노머 순차 추가, avg BE 악화 시 중단 → 최적 크기 자동 결정 (2-6종)
-- **MMSD sequential docking** [9]: 이전 결과를 receptor에 병합하여 다중 모노머 시너지/간섭 평가
-- **가교제 자동 선택**: 6종 (TEOS, TMOS, MBAAm, EGDMA, DVB, TRIM) 중 호환 XL 전부 도킹 → best 선택
-- 목적함수: `mmsd_per_monomer + 0.3 × max(0, delta_sum)` — 크기 정규화 + 간섭 페널티
+**MMSD 프로토콜** [9,10]: Sequential docking — Step k에서 monomer k를 (에피토프 + 이전 k-1 모노머 pose 병합체)에 도킹. 이전 모노머가 차지한 공간을 피해 새로운 위치에 도킹되므로, multi-monomer synergy/interference를 평가 가능.
+
+**Greedy forward selection**: (1) Phase 2 SMD BE 순으로 12개 모노머 정렬. (2) Round 1: 12개 각각 단독 MMSD → best 1종 선택 (12회). (3) Round 2: 나머지 11개를 각각 추가 → 모노머당 평균 BE (`mmsd_per_monomer = mmsd_sum / n_monomers`) 최소인 2종 선택 (11회). (4) 반복... avg BE 악화 시 중단 → 최적 크기 자동 결정 (2-6종). (5) Swap refinement: 선택된 각 위치에서 나머지 모노머로 교체 시도 → bo_objective 개선 시 교체. 총 ~70-90회 MMSD 평가.
+
+**목적함수**:
+```
+bo_objective = mmsd_per_monomer + w_interfere × max(0, delta_sum)
+```
+- `mmsd_per_monomer = mmsd_sum / n_monomers`: 크기 정규화. 조합 크기가 다른 PC를 공정 비교 (Rajpal 2024 [9]는 4종 고정이라 정규화 불필요했으나, 본 파이프라인은 2-6종 가변).
+- `delta_sum = mmsd_sum - smd_sum`: < 0이면 시너지 (cooperative binding), > 0이면 간섭 (steric clash) [9, Table 2].
+- `w_interfere = 0.3`: 간섭 페널티 가중치. 시너지(delta < 0)는 페널티 없음 — MMSD에서 BE 증가로 자연 반영.
+
+**가교제 자동 선택**: MMSD 마지막 step에서 호환 가교제 전부 도킹 → BE 최소 선택. 실란 조합: TEOS/TMOS (2종), 비닐 조합: MBAAm/EGDMA/DVB/TRIM (4종). 추가 비용: 비닐 조합당 +3 도킹.
 
 ### Phase 4: Pre-polymerization MD
 
 **파일**: `code/pipeline/phase4_md_validation.py`
 
-- **Head 16-mer를 template으로 사용** (문헌 표준, Rajpal 2024 [12])
-- 25개 모노머 × 랜덤 배치 → 100ns all-atom MD (GROMACS GPU)
-- 분석: contact frequency (6Å), mean min distance, residence time, RMSD, RMSF, H-bond, Rg, MM-GBSA
-- **합성 비율**: contact freq 역비례 — 약한 결합 모노머를 더 많이 넣어 균등한 cavity 형성
+**시스템 구축**: Head 16-mer를 template으로 사용 (ECL2가 아닌 실제 합성 template) [12]. Phase 3 최적 조합의 functional monomer k종 × 5 copy + crosslinker × 5 copy = 25개 모노머. Protein 중심에서 반경 3.1-4.1 nm 구 껍질에 랜덤 배치 (min separation 1.0 nm, 겹침 방지). 문헌 표준 PACKMOL 방식 [12].
+
+**Force field**: protein — amber99sb-ildn; vinyl monomers — GAFF2 (acpype [Wang 2004]); Si-containing monomers — PolCA [13] (GAFF2 + Si LJ 파라미터). Si 원자의 bond equilibrium distances는 표준 공유결합 길이 사용 (Si-C: 0.186 nm, Si-O: 0.164 nm).
+
+**MD 프로토콜**: 
+
+| 단계 | 조건 |
+|------|------|
+| Solvation | Cubic box, 0.5 nm padding, TIP3P, 0.15M NaCl (PBS) |
+| Energy minimization | Steepest descent, 50,000 steps, Fmax < 1000 kJ/mol/nm |
+| NVT equilibration | 100 ps, V-rescale 300K, dt=2fs, LINCS h-bonds |
+| NPT equilibration | 100 ps, Parrinello-Rahman 1 bar, 300K |
+| Production | 100 ns, dt=2fs, PME (rcoulomb=1.0 nm, rvdw=1.0 nm), GPU 가속 |
+
+**분석 (trajectory 후반 50%, stride 100)**:
+
+| 지표 | 방법 | 근거 |
+|------|------|------|
+| Contact frequency | 각 모노머 type의 head 6Å 이내 접촉 프레임 비율 | 문헌 표준 cutoff [12] |
+| Mean min distance | 모노머-head 최소 원자 간 거리 평균 | 접촉 품질 |
+| Residence time | 연속 접촉 프레임 수 (안정적 결합 vs 스침) | 결합 안정성 |
+| Monomer pair distance | 모노머 간 최소 원자 거리 | Cavity compactness |
+| RMSD/RMSF/H-bond/Rg | GROMACS gmx rms/rmsf/hbond/gyrate | 구조 안정성 |
+| MM-GBSA | gmx_MMPBSA (igb=5, saltcon=0.15) [7] | 결합 자유 에너지 |
+
+**합성 비율 결정**: contact frequency 역비례.
+```
+ratio_i = (1 / contact_freq_i) / min(1 / contact_freq_j for all j)
+```
+약한 결합 모노머를 더 많이 넣어 cavity에 균등한 결합점 형성. 강한 결합 모노머는 적게 넣어도 자발적으로 binding site에 위치.
 
 ### Phase 5: VIP Cavity Rebinding
 
 **파일**: `code/pipeline/phase5_rebinding.py`
 
-VIP (Virtually Imprinted Polymer) 방식 [11]:
-1. Phase 4 trajectory 후반 50%에서 **균등 간격 5개 snapshot** 선택
-2. 모노머 position restraint (1000 kJ/mol/nm²) → 중합 근사
-3. **Template removal test** (10ns): template이 이탈하면 제거 가능 (moderate binding = good MIP)
-4. **Rebinding MD** (20ns): template RMSD < 5Å → cavity 인식 성공
-5. **Selectivity**: 다른 target head로 rebinding → own만 성공이면 selective
-6. **5/5 성공률 ≥ 3** → 재현 가능
+VIP (Virtually Imprinted Polymer) [11] 방식으로 중합을 근사하여 cavity 형성 및 rebinding 검증.
+
+**Snapshot 선택**: Phase 4 trajectory 후반 50%에서 균등 간격 5개 frame 추출. Cherry-picking 방지 — 실제 중합은 UV/열 조사에 의해 랜덤 시점에 발생하므로, 특정 "최적 프레임"을 선택하면 과적합.
+
+**중합 근사**: 모노머 heavy atoms에 harmonic position restraint (k = 1000 kJ mol⁻¹ nm⁻², GROMACS standard) 적용. "모노머가 현재 위치에서 cross-linking되어 polymer network에 잠긴" 상태를 근사.
+
+**Template removal test** (10ns MD): 모노머 restrained + template(head) + 물 자유. Template이 cavity에서 이탈하면 (RMSD > 5Å) "removable" = template 세척 가능 = 적정 결합 강도. Template이 이탈 못 하면 "stuck" = 결합 너무 강함 = 실제 합성 시 template 제거 어려움 → IF 저하.
+
+**Rebinding MD** (20ns): 동일 시스템에서 template이 cavity에 안정적으로 머무르는지 확인. Template backbone RMSD (후반 50% 평균) < 5Å → rebinding 성공. 5Å threshold: head 16-mer 크기(~1.5 nm = 15Å 직경)의 1/3 이내 변위.
+
+**Selectivity**: 같은 cavity에 다른 target head를 넣어 rebinding MD. 다른 head는 pdb2gmx로 새 topology 생성 → cavity의 restrained 모노머 + 물과 병합 → 20ns MD. Own target만 RMSD < 5Å이면 selective cavity.
+
+**재현성**: 5개 snapshot 중 ≥ 3개 성공 → 재현 가능한 cavity.
 
 ### Phase 6: 합성 레시피
 
 **파일**: `code/pipeline/phase6_recipe.py`
 
-- Phase 5 rebinding 실패(0/5) target은 **레시피 생성 제외**
-- Phase 4 optimal ratio 적용 (MD 기반 비율)
-- 합성 프로토콜: sol-gel (실란) / free-radical (비닐) / solid-phase
-- CD63 이중 에피토프 전략: 펩타이드 + glycan [1]
-- 실험 검증 계획: SPR, QCM-D [14]
+Phase 5 rebinding 검증을 통과한 target에 대해서만 합성 레시피 생성. Rebinding 실패 (0/5) target은 제외.
+
+**비율**: Phase 4 MD contact frequency 기반 optimal ratio 적용.
+
+**합성 프로토콜**: 실란 모노머 → sol-gel (TEOS/TMOS 가교, RT 16h) [9]; 비닐 모노머 → free-radical (APS/TEMED 또는 AIBN 개시제); 혼합 → solid-phase (glass bead) [3].
+
+**CD63 이중 에피토프 전략** [1]: CD63의 3개 N-glycan을 활용한 펩타이드 + glycan 이중 각인. Layer 1: 펩타이드 에피토프 (기능성 모노머), Layer 2: N-acetylneuraminic acid (APBA 보론산).
+
+**실험 검증 계획** [14]: SPR two-state reaction model fitting, QCM-D (6.1×10⁴ ~ 6.1×10⁷ particles/mL), 교차 반응성 (3개 에피토프 + HSA, BSA, lysozyme). 목표: IF > 3, KD < 50 nM [1].
+
+### 검증 (Rajpal 2024 벤치마크)
+
+SARS-CoV-2 spike protein 에피토프 (PDB 7JMO, 잔기 473-497)에 대해 Rajpal et al. [9] Table 1-2 재현:
+
+| 검증 항목 | 결과 |
+|----------|------|
+| SMD 개별 BE 정확도 | 10/10 모노머 ±2.0 kcal/mol 이내 |
+| PTES top-ranked | PASS |
+| MMSD 시너지 방향 | 4/4 (APTMS/APTES/MPTMS/UPTMS) |
+| MMSD sum vs IF Spearman ρ | 0.632 (기준 ≥ 0.6) |
+| 비경쟁 결합 | 3/3 top PC uniform |
 
 ---
 
@@ -264,7 +336,7 @@ Monomer_screening_in_Bio/
 
 [11] Zink S et al. "Virtually imprinted polymers (VIPs)." *Phys. Chem. Chem. Phys.* 2018;20:13145-13152.
 
-[12] Rajpal S et al. "MD in pre-polymerization mixtures." *J. Mol. Model.* 2024;30:247.
+[12] Polania LC, Jiménez VA. "Molecular dynamics simulations in pre-polymerization mixtures for peptide recognition." *J. Mol. Model.* 2024;30:266.
 
 [13] Jorge M et al. "PolCA force field for organosilicon." *ACS Phys. Chem. Au* 2021;1:34-49.
 
