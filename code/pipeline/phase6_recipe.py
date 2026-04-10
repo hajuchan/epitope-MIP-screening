@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 def run_phase5(phase3_results: dict = None,
                phase4_results: dict = None,
+               phase5_results: dict = None,
                target_names: list = None,
                output_dir: str = None) -> dict:
     """
@@ -32,7 +33,7 @@ def run_phase5(phase3_results: dict = None,
                          get_output_path)
 
     if output_dir is None:
-        output_dir = str(get_output_path("phase5"))
+        output_dir = str(get_output_path("phase6"))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -50,6 +51,14 @@ def run_phase5(phase3_results: dict = None,
         else:
             phase4_results = {}
 
+    if phase5_results is None:
+        p5_path = get_output_path("phase5") / "phase5_rebinding_results.json"
+        if p5_path.exists():
+            with open(p5_path) as f:
+                phase5_results = json.load(f)
+        else:
+            phase5_results = {}
+
     if target_names is None:
         target_names = list(phase3_results.keys())
 
@@ -61,6 +70,17 @@ def run_phase5(phase3_results: dict = None,
 
         if "error" in p3:
             continue
+
+        # Check Phase 5 rebinding results (if available)
+        rebinding = {}
+        if phase5_results and target in phase5_results:
+            rebinding = phase5_results[target]
+            n_rebound = rebinding.get("n_rebound", 0)
+            n_snap = rebinding.get("n_snapshots", 0)
+            if n_snap > 0 and n_rebound == 0:
+                logger.warning(f"[{target}] Rebinding FAILED (0/{n_snap}) — skipping recipe")
+                continue
+            logger.info(f"[{target}] Rebinding: {rebinding.get('success_rate', 'N/A')}")
 
         logger.info(f"\n{'='*20} Recipe: {target} {'='*20}")
 
@@ -78,10 +98,17 @@ def run_phase5(phase3_results: dict = None,
         poly_type = POLYMERIZATION_SILANE if silane_count >= vinyl_count \
             else POLYMERIZATION_VINYL
 
+        # Get Phase 4 optimal ratio if available
+        p4_ratio = {}
+        best_pc_id = best_pc.get("pc_id", "")
+        if best_pc_id in p4:
+            p4_ratio = p4[best_pc_id].get("optimal_ratio", {})
+
         # Generate recipe
         recipe = _generate_recipe(
             target, monomers, best_pc, poly_type,
             ALL_MONOMERS, TARGETS[target],
+            md_ratio=p4_ratio,
         )
         recipes[target] = recipe
 
@@ -89,7 +116,7 @@ def run_phase5(phase3_results: dict = None,
         _log_recipe(target, recipe)
 
     # Save recipes
-    with open(output_dir / "phase5_recipes.json", "w") as f:
+    with open(output_dir / "phase6_recipes.json", "w") as f:
         json.dump(recipes, f, indent=2)
 
     # Generate human-readable protocol
@@ -129,20 +156,31 @@ def _select_best_pc(p3_data: dict, p4_data: dict) -> dict:
 
 def _generate_recipe(target: str, monomers: list,
                       pc_data: dict, poly_type: str,
-                      monomer_lib: dict, target_cfg: dict) -> dict:
-    """Generate a complete synthesis recipe."""
+                      monomer_lib: dict, target_cfg: dict,
+                      md_ratio: dict = None) -> dict:
+    """Generate a complete synthesis recipe.
+    Uses Phase 4 MD optimal ratio if available, else default equal molar."""
     from .config import CROSSLINKERS
 
     # Categorize monomers
     functional = [m for m in monomers if m not in CROSSLINKERS]
     crosslinker = [m for m in monomers if m in CROSSLINKERS]
 
-    # Molar ratios (Rajpal 2024: equal molar for functional, 10x for TEOS)
+    # Molar ratios: from Phase 4 MD contact analysis, or default
     ratios = {}
-    for m in functional:
-        ratios[m] = 1.0
-    for m in crosslinker:
-        ratios[m] = 10.0  # cross-linker excess
+    if md_ratio:
+        # Use Phase 4 optimal ratio (inverse contact frequency)
+        for m in functional:
+            ratios[m] = float(md_ratio.get(m, 1))
+        for m in crosslinker:
+            ratios[m] = float(md_ratio.get(m, sum(ratios.values()) or 10))
+        logger.info(f"  Using Phase 4 MD ratio: {ratios}")
+    else:
+        # Default: equal molar functional, 10x crosslinker
+        for m in functional:
+            ratios[m] = 1.0
+        for m in crosslinker:
+            ratios[m] = 10.0
 
     # Interaction profile
     interactions = {}

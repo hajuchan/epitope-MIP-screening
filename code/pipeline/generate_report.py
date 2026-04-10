@@ -52,7 +52,9 @@ def generate_report(output_dir: str) -> str:
         _build_phase2(out),
         _build_phase3(out),
         _build_phase4(out),
-        _build_phase5(out),
+        _build_phase5_rebinding(out),     # Phase 5: cavity rebinding
+        _build_selectivity_matrix(out),
+        _build_phase6_recipe(out),        # Phase 6: synthesis recipe
         _build_references(),
         _build_footer(),
     ]
@@ -161,7 +163,7 @@ def _build_phase3(out: Path) -> str:
             continue
 
         plot_html = _embed_image(
-            out / "phase3" / f"phase3_{target}_comparison.png"
+            out / "phase3" / f"phase3_{target}_bo.png"
         )
 
         rows = ""
@@ -198,36 +200,270 @@ def _build_phase3(out: Path) -> str:
 def _build_phase4(out: Path) -> str:
     data = _load_json(out / "phase4" / "phase4_md_results.json")
     if not data:
-        return "<h2>Phase 4: MD Validation</h2><p>No results.</p>"
+        return "<h2>Phase 4: Pre-polymerization MD</h2><p>No results.</p>"
 
-    rows = ""
+    sections = ""
     for target, pcs in data.items():
         if target == "cross_reactivity" or not isinstance(pcs, dict):
             continue
+
         for pc_id, md in pcs.items():
-            rows += f"""<tr>
-                <td>{target}</td>
-                <td>{pc_id}</td>
-                <td>{md.get('rmsd_mean_nm', 'N/A')}</td>
-                <td>{md.get('hbond_mean', 'N/A')}</td>
-                <td>{md.get('mmpbsa', {}).get('delta_total_kcal', 'N/A')}</td>
-                <td>{'OK' if md.get('success') else 'FAIL'}</td>
+            # Summary table
+            rmsd = md.get('rmsd_mean_nm', 'N/A')
+            rmsd_str = f"{rmsd:.3f}" if isinstance(rmsd, (int, float)) else rmsd
+            rmsf = md.get('rmsf_mean_nm', 'N/A')
+            rmsf_str = f"{rmsf:.3f}" if isinstance(rmsf, (int, float)) else rmsf
+            hbond = md.get('hbond_mean', 'N/A')
+            hbond_str = f"{hbond:.1f}" if isinstance(hbond, (int, float)) else hbond
+            rg = md.get('rg_mean_nm', 'N/A')
+            rg_str = f"{rg:.3f}" if isinstance(rg, (int, float)) else rg
+            dg = md.get('mmpbsa', {}).get('delta_total_kcal', 'N/A')
+            dg_str = f"{dg:.2f}" if isinstance(dg, (int, float)) else dg
+            dssp = md.get('dssp', {})
+            dssp_str = "Preserved" if dssp.get('structure_preserved') else \
+                       "Not preserved" if dssp.get('structure_preserved') is False else "N/A"
+
+            # Contact frequency
+            occ = md.get('occupancy_analysis', {})
+            contact_freq = occ.get('contact_freq_6A', occ.get('occupancy', {}))
+            min_dist = occ.get('mean_min_dist_A', {})
+            residence = occ.get('residence_frames', {})
+            ratio = md.get('optimal_ratio', {})
+
+            contact_rows = ""
+            for m in sorted(contact_freq.keys()):
+                cf = contact_freq.get(m, 0)
+                md_dist = min_dist.get(m, 'N/A')
+                res = residence.get(m, 'N/A')
+                r = ratio.get(m, 'N/A')
+                md_dist_str = f"{md_dist:.1f}" if isinstance(md_dist, (int, float)) else md_dist
+                res_str = f"{res:.1f}" if isinstance(res, (int, float)) else res
+                contact_rows += f"""<tr>
+                    <td>{m}</td><td>{cf:.3f}</td><td>{md_dist_str} Å</td>
+                    <td>{res_str}</td><td>{r}</td></tr>"""
+
+            # Embed RMSD/RMSF/H-bond/Rg plots
+            md_dir = out / "phase4" / target / pc_id / "md"
+            rmsd_img = _embed_image(md_dir / "rmsd.xvg.png") if (md_dir / "rmsd.xvg.png").exists() \
+                else _xvg_to_inline_plot(md_dir / "rmsd.xvg", "RMSD", "Time (ps)", "RMSD (nm)")
+            rmsf_img = _xvg_to_inline_plot(md_dir / "rmsf.xvg", "RMSF", "Residue", "RMSF (nm)")
+            hbond_img = _xvg_to_inline_plot(md_dir / "hbond.xvg", "H-bonds", "Time (ps)", "H-bonds")
+            rg_img = _xvg_to_inline_plot(md_dir / "gyrate.xvg", "Radius of Gyration", "Time (ps)", "Rg (nm)")
+
+            sections += f"""
+            <div class="card">
+                <h3>{target} / {pc_id}</h3>
+                <table>
+                    <tr><th>RMSD (nm)</th><th>RMSF (nm)</th><th>H-bonds</th>
+                        <th>Rg (nm)</th><th>ΔG (kcal/mol)</th><th>DSSP</th><th>Status</th></tr>
+                    <tr><td>{rmsd_str}</td><td>{rmsf_str}</td><td>{hbond_str}</td>
+                        <td>{rg_str}</td><td>{dg_str}</td><td>{dssp_str}</td>
+                        <td>{'✓' if md.get('success') else '✗'}</td></tr>
+                </table>
+
+                <h4>Stability Plots</h4>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    {rmsd_img}{rmsf_img}{hbond_img}{rg_img}
+                </div>
+
+                <h4>Monomer-Epitope Contact Analysis (6Å cutoff)</h4>
+                <table>
+                    <tr><th>Monomer</th><th>Contact Freq</th><th>Mean Min Dist</th>
+                        <th>Residence (frames)</th><th>Synthesis Ratio</th></tr>
+                    {contact_rows}
+                </table>
+"""
+            # Monomer pair distances (cavity shape)
+            md_pairs = occ.get("pair_distances_md_A", {})
+            if md_pairs:
+                pair_rows = ""
+                for pair_key in sorted(md_pairs.keys()):
+                    m_val = md_pairs[pair_key]
+                    m_str = f"{m_val:.1f}" if isinstance(m_val, (int, float)) else m_val
+                    # Color: green if compact (<8Å), orange if moderate, red if dispersed
+                    color = "green" if isinstance(m_val, (int,float)) and m_val < 8 else \
+                            ("orange" if isinstance(m_val, (int,float)) and m_val < 15 else "red")
+                    pair_rows += f'<tr><td>{pair_key}</td><td style="color:{color};">{m_str} Å</td></tr>'
+
+                mean_dist = sum(md_pairs.values()) / len(md_pairs) if md_pairs else 0
+                compact_str = "Compact" if mean_dist < 10 else "Dispersed"
+                compact_color = "green" if mean_dist < 10 else "red"
+
+                sections += f"""
+                <h4>Monomer Arrangement (Cavity Shape)</h4>
+                <p>Mean pair distance: <span style="color:{compact_color};font-weight:bold;">
+                    {mean_dist:.1f} Å — {compact_str}</span>
+                    (compact = cavity forming, compare with cross-reactivity below)</p>
+                <table>
+                    <tr><th>Monomer Pair</th><th>Min Distance</th></tr>
+                    {pair_rows}
+                </table>
+"""
+            sections += "</div>"
+
+    # Cross-reactivity & Selectivity comparison
+    xr = data.get("cross_reactivity", {})
+    if xr:
+        # Collect self-binding contact frequencies per target
+        self_contacts = {}
+        for target, pcs in data.items():
+            if target == "cross_reactivity" or not isinstance(pcs, dict):
+                continue
+            for pc_id, md in pcs.items():
+                occ = md.get('occupancy_analysis', {})
+                cf = occ.get('contact_freq_6A', occ.get('occupancy', {}))
+                if cf:
+                    self_contacts[target] = cf
+                break  # top PC only
+
+        # Build MIP-level selectivity table
+        selectivity_html = ""
+        for key, xr_data in xr.items():
+            if not isinstance(xr_data, dict):
+                continue
+            parts = key.split("_PC_on_")
+            if len(parts) != 2:
+                continue
+            source, test_target = parts
+
+            xr_occ = xr_data.get("occupancy_analysis", {}).get("contact_freq_6A",
+                     xr_data.get("occupancy_analysis", {}).get("occupancy", {}))
+            self_occ = self_contacts.get(source, {})
+
+            if not xr_occ or not self_occ:
+                continue
+
+            # MIP-level: total contact of entire monomer combination
+            total_self = sum(self_occ.values())
+            total_cross = sum(xr_occ.values())
+            mip_sel = total_self / total_cross if total_cross > 0.01 else float('inf')
+            mip_sel_str = f"{mip_sel:.1f}x" if mip_sel < 100 else ">100x"
+            sel_color = "green" if mip_sel > 2 else ("orange" if mip_sel > 1 else "red")
+
+            selectivity_html += f"""<tr>
+                <td>{source}-MIP</td>
+                <td>{source}</td><td>{total_self:.2f}</td>
+                <td>{test_target}</td><td>{total_cross:.2f}</td>
+                <td style="color:{sel_color};font-weight:bold;font-size:1.1em;">{mip_sel_str}</td>
             </tr>"""
 
-    return f"""
-    <h2>Phase 4: MD Validation (GROMACS + MM-PBSA)</h2>
-    <div class="card">
-    <table>
-        <tr><th>Target</th><th>PC</th><th>RMSD (nm)</th><th>H-bonds</th>
-        <th>DG (kcal/mol)</th><th>Status</th></tr>
-        {rows}
-    </table>
-    </div>
-    """
+        if selectivity_html:
+            # Also collect pair distances for cavity compactness comparison
+            self_pair_dists = {}
+            for target_t, pcs in data.items():
+                if target_t == "cross_reactivity" or not isinstance(pcs, dict):
+                    continue
+                for pc_id, md in pcs.items():
+                    pd = md.get('occupancy_analysis', {}).get('pair_distances_md_A', {})
+                    if pd:
+                        self_pair_dists[target_t] = pd
+                    break
+
+            cavity_html = ""
+            for key, xr_data in xr.items():
+                if not isinstance(xr_data, dict):
+                    continue
+                parts = key.split("_PC_on_")
+                if len(parts) != 2:
+                    continue
+                source, test_target = parts
+
+                xr_pairs = xr_data.get("occupancy_analysis", {}).get("pair_distances_md_A", {})
+                self_pairs = self_pair_dists.get(source, {})
+                if not xr_pairs or not self_pairs:
+                    continue
+
+                self_mean = sum(self_pairs.values()) / len(self_pairs)
+                xr_mean = sum(xr_pairs.values()) / len(xr_pairs)
+                ratio = xr_mean / self_mean if self_mean > 0.1 else 0
+                # >1.5 = monomers more dispersed on other target = selective
+                cav_color = "green" if ratio > 1.5 else ("orange" if ratio > 1 else "red")
+
+                cavity_html += f"""<tr>
+                    <td>{source}-MIP</td>
+                    <td>{source}</td><td>{self_mean:.1f} Å</td>
+                    <td>{test_target}</td><td>{xr_mean:.1f} Å</td>
+                    <td style="color:{cav_color};font-weight:bold;">{ratio:.1f}x</td>
+                </tr>"""
+
+            sections += f"""
+            <div class="card">
+                <h3>MIP Selectivity (Cross-Reactivity)</h3>
+
+                <h4>Contact-Based Selectivity</h4>
+                <p>Total contact on own target / other target. <strong>>2x = selective</strong>.</p>
+                <table>
+                    <tr><th>MIP</th>
+                        <th>Own Target</th><th>Total Contact</th>
+                        <th>Other Target</th><th>Total Contact</th>
+                        <th>Selectivity</th></tr>
+                    {selectivity_html}
+                </table>"""
+
+            if cavity_html:
+                sections += f"""
+                <h4>Cavity Compactness (Pair Distance)</h4>
+                <p>Mean monomer-monomer distance on own vs other target.
+                   Compact on own + dispersed on other = <strong>selective cavity</strong>.
+                   Ratio >1.5x = selective.</p>
+                <table>
+                    <tr><th>MIP</th>
+                        <th>Own Target</th><th>Mean Pair Dist</th>
+                        <th>Other Target</th><th>Mean Pair Dist</th>
+                        <th>Dispersal Ratio</th></tr>
+                    {cavity_html}
+                </table>"""
+
+            sections += "</div>"
+
+    return f"<h2>Phase 4: Pre-polymerization MD + Selectivity</h2>{sections}"
 
 
-def _build_phase5(out: Path) -> str:
-    data = _load_json(out / "phase5" / "phase5_recipes.json")
+def _xvg_to_inline_plot(xvg_path: Path, title: str, xlabel: str, ylabel: str) -> str:
+    """Convert XVG file to inline base64 plot."""
+    xvg_path = Path(xvg_path)
+    if not xvg_path.exists():
+        return f"<p><em>{title}: data not available</em></p>"
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import io
+
+        data = []
+        for line in xvg_path.read_text().split("\n"):
+            if line.startswith(("#", "@")) or not line.strip():
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    data.append([float(parts[0]), float(parts[1])])
+                except ValueError:
+                    pass
+        if not data:
+            return f"<p><em>{title}: no data</em></p>"
+
+        arr = np.array(data)
+        fig, ax = plt.subplots(figsize=(4, 2.5))
+        ax.plot(arr[:, 0], arr[:, 1], linewidth=0.8, color='#2196F3')
+        ax.set_title(title, fontsize=10, fontweight='bold')
+        ax.set_xlabel(xlabel, fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.tick_params(labelsize=7)
+        fig.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=100)
+        plt.close(fig)
+        img_data = base64.b64encode(buf.getvalue()).decode()
+        return f'<img src="data:image/png;base64,{img_data}" style="max-width:100%;" />'
+    except Exception as e:
+        return f"<p><em>{title}: plot error ({e})</em></p>"
+
+
+def _build_phase6_recipe(out: Path) -> str:
+    data = _load_json(out / "phase6" / "phase6_recipes.json")
     if not data:
         return "<h2>Phase 5: Synthesis Recipes</h2><p>No results.</p>"
 
@@ -254,7 +490,178 @@ def _build_phase5(out: Path) -> str:
         </div>
         """
 
-    return f"<h2>Phase 5: Recommended Synthesis Recipes</h2>{cards}"
+    return f"<h2>Phase 6: Recommended Synthesis Recipes</h2>{cards}"
+
+
+def _build_selectivity_matrix(out: Path) -> str:
+    """Build ΔG selectivity matrix from Phase 4 cross-reactivity results."""
+    data = _load_json(out / "phase4" / "phase4_md_results.json")
+    if not data:
+        return ""
+
+    xr = data.get("cross_reactivity", {})
+    if not xr:
+        return ""
+
+    # Collect self ΔG per target
+    self_dg = {}
+    for target, pcs in data.items():
+        if target == "cross_reactivity" or not isinstance(pcs, dict):
+            continue
+        for pc_id, md in pcs.items():
+            dg = md.get("mmpbsa", {}).get("delta_total_kcal")
+            if dg is not None:
+                self_dg[target] = dg
+            break
+
+    # Collect cross ΔG
+    cross_dg = {}
+    for key, xr_data in xr.items():
+        if not isinstance(xr_data, dict):
+            continue
+        parts = key.split("_PC_on_")
+        if len(parts) != 2:
+            continue
+        source, test = parts
+        dg = xr_data.get("mmpbsa", {}).get("delta_total_kcal")
+        cross_dg[(source, test)] = dg
+
+    targets = sorted(self_dg.keys())
+    if not targets:
+        return ""
+
+    # Build matrix
+    header = "<th>MIP \\ Head</th>" + "".join(f"<th>{t}</th>" for t in targets)
+    rows = ""
+    for source in targets:
+        cells = ""
+        for test in targets:
+            if source == test:
+                dg = self_dg.get(source)
+                style = "font-weight:bold; background:#e8f5e9;"
+            else:
+                dg = cross_dg.get((source, test))
+                style = ""
+
+            if dg is not None:
+                color = "green" if source == test else \
+                    ("red" if dg < self_dg.get(source, 0) else "gray")
+                cells += f'<td style="{style}color:{color};">{dg:.2f}</td>'
+            else:
+                cells += "<td>N/A</td>"
+        rows += f"<tr><td><strong>{source}-MIP</strong></td>{cells}</tr>"
+
+    return f"""
+    <h2>Selectivity Matrix (ΔG kcal/mol)</h2>
+    <div class="card">
+        <p>Diagonal = own target binding. Off-diagonal = cross-reactivity.
+           <strong>Selective</strong> = diagonal is most negative in its row.</p>
+        <table>
+            <tr>{header}</tr>
+            {rows}
+        </table>
+    </div>
+    """
+
+
+def _build_phase5_rebinding(out: Path) -> str:
+    """Build Phase 6 VIP Cavity Rebinding section."""
+    data = _load_json(out / "phase5" / "phase5_rebinding_results.json")
+    if not data:
+        return "<h2>Phase 6: VIP Cavity Rebinding</h2><p>Not yet executed.</p>"
+
+    sections = ""
+    for target, result in data.items():
+        n_snap = result.get("n_snapshots", 0)
+        n_rebound = result.get("n_rebound", 0)
+        success_rate = result.get("success_rate", "N/A")
+        own_rmsd = result.get("own_rmsd_mean")
+        own_rmsd_str = f"{own_rmsd:.2f} Å" if own_rmsd else "N/A"
+
+        rate_color = "green" if n_rebound >= 3 else ("orange" if n_rebound >= 1 else "red")
+
+        # Per-snapshot details
+        snap_rows = ""
+        for i, snap in enumerate(result.get("snapshots", [])):
+            if not snap.get("success"):
+                snap_rows += f"<tr><td>{i+1}</td><td colspan='3'>Failed</td></tr>"
+                continue
+            own = snap.get("rebind_own", {})
+            own_r = own.get("rmsd_mean_A")
+            own_str = f"{own_r:.2f} Å" if own_r else "N/A"
+            rebound = "✓" if own_r and own_r < 5.0 else "✗" if own_r else "—"
+
+            other_cells = ""
+            for key, val in snap.items():
+                if key.startswith("rebind_") and key != "rebind_own":
+                    other_t = key.replace("rebind_", "")
+                    other_r = val.get("rmsd_mean_A") if isinstance(val, dict) else None
+                    other_str = f"{other_r:.2f}" if other_r else "—"
+                    other_cells += f" | {other_t}={other_str}"
+
+            # Removal test result
+            removal = snap.get("removal_test", {})
+            if isinstance(removal, dict) and removal.get("escaped") is not None:
+                rm_color = "green" if removal["escaped"] else "red"
+                rm_str = f'{removal.get("rmsd_start_A","?")}→{removal.get("rmsd_end_A","?")} Å'
+                rm_status = "Removable" if removal["escaped"] else "Stuck"
+            else:
+                rm_color = "gray"
+                rm_str = "—"
+                rm_status = "N/A"
+
+            snap_rows += f"""<tr>
+                <td>{i+1} (frame {snap.get('frame_idx', '?')})</td>
+                <td>{snap.get('total_contacts', '?')}</td>
+                <td style="color:{rm_color};">{rm_str} ({rm_status})</td>
+                <td>{own_str}</td>
+                <td>{rebound}{other_cells}</td>
+            </tr>"""
+
+        # Selectivity vs other targets
+        sel_rows = ""
+        for key, val in result.items():
+            if key.startswith("other_") and key.endswith("_rmsd_mean"):
+                other_t = key.replace("other_", "").replace("_rmsd_mean", "")
+                other_rmsd = val
+                if own_rmsd and other_rmsd:
+                    selective = own_rmsd < other_rmsd
+                    sel_color = "green" if selective else "red"
+                    sel_str = "Selective" if selective else "Non-selective"
+                else:
+                    sel_color = "gray"
+                    sel_str = "N/A"
+                sel_rows += f"""<tr>
+                    <td>{target} head</td><td>{own_rmsd_str}</td>
+                    <td>{other_t} head</td><td>{other_rmsd:.2f} Å</td>
+                    <td style="color:{sel_color};font-weight:bold;">{sel_str}</td>
+                </tr>"""
+
+        sections += f"""
+        <div class="card">
+            <h3>{target} — Cavity Rebinding</h3>
+            <p>Success rate: <span style="color:{rate_color};font-weight:bold;font-size:1.2em;">
+                {success_rate}</span> (≥3/5 = reliable)</p>
+            <p>Own template RMSD: {own_rmsd_str}</p>
+
+            <h4>Per-Snapshot Results</h4>
+            <table>
+                <tr><th>Snapshot</th><th>Contacts</th><th>Removal Test</th><th>Rebind RMSD</th><th>Result</th></tr>
+                {snap_rows}
+            </table>
+"""
+        if sel_rows:
+            sections += f"""
+            <h4>Rebinding Selectivity</h4>
+            <table>
+                <tr><th>Own Head</th><th>RMSD</th>
+                    <th>Other Head</th><th>RMSD</th><th>Selectivity</th></tr>
+                {sel_rows}
+            </table>
+"""
+        sections += "</div>"
+
+    return f"<h2>Phase 5: VIP Cavity Rebinding (Zink 2018)</h2>{sections}"
 
 
 def _build_references() -> str:

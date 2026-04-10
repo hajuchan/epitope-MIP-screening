@@ -116,15 +116,7 @@ def run_phase4(phase1_results: dict = None,
 
         results[target] = target_results
 
-    # Cross-reactivity
-    if cross_reactivity and len(target_names) > 1:
-        logger.info(f"\n{'='*20} Cross-Reactivity {'='*20}")
-        xr = _run_cross_reactivity(
-            results, phase1_results, target_names,
-            output_dir / "cross_reactivity",
-            time_ns=min(time_ns, MD_QUICK_NS),
-        )
-        results["cross_reactivity"] = xr
+    # Cross-reactivity removed — Phase 6 cavity rebinding handles selectivity
 
     # Save
     with open(output_dir / "phase4_md_results.json", "w") as f:
@@ -392,9 +384,57 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
         results["proximity_fraction"] = proximity_frac
         logger.info(f"    Proximity frac: {proximity_frac}")
 
+        # 5. Monomer-monomer min distance (cavity shape analysis)
+        # Min distance between closest atoms of each monomer type pair
+        logger.info("    Cavity analysis: monomer-monomer min distances...")
+        pair_mindists_md = {}
+
+        # Collect all atom positions per monomer type per frame
+        type_atoms_per_frame = {m: [] for m in all_monomers_list}
+        for ts in u.trajectory[start_frame::stride]:
+            for ri, res in enumerate(mon_residues):
+                m_name = res_to_monomer.get(ri)
+                if m_name is None:
+                    continue
+                if m_name not in type_atoms_per_frame:
+                    type_atoms_per_frame[m_name] = []
+            # For each pair, compute min distance across all copies
+            for i, m1 in enumerate(all_monomers_list):
+                for m2 in all_monomers_list[i+1:]:
+                    key = f"{m1}-{m2}"
+                    # Get all atoms of m1 and m2 in this frame
+                    atoms1 = []
+                    atoms2 = []
+                    for ri, res in enumerate(mon_residues):
+                        mn = res_to_monomer.get(ri)
+                        if mn == m1:
+                            atoms1.append(res.atoms.positions)
+                        elif mn == m2:
+                            atoms2.append(res.atoms.positions)
+                    if atoms1 and atoms2:
+                        pos1 = np.vstack(atoms1)
+                        pos2 = np.vstack(atoms2)
+                        dists = np.linalg.norm(
+                            pos1[:, np.newaxis, :] - pos2[np.newaxis, :, :], axis=2)
+                        md = float(np.min(dists))
+                        if key not in pair_mindists_md:
+                            pair_mindists_md[key] = []
+                        pair_mindists_md[key].append(md)
+
+        # Average min distance over frames
+        pair_dists_md = {}
+        for key, dists in pair_mindists_md.items():
+            pair_dists_md[key] = round(float(np.mean(dists)), 2) if dists else 99.0
+        results["pair_distances_md_A"] = pair_dists_md
+        logger.info(f"    MD pair min-dists (Å): {pair_dists_md}")
+
+        # Cavity selectivity: pair distances are compared in cross-reactivity
+        # Same monomer set on own target → compact (small pair dists)
+        # Same monomer set on other target → dispersed (large pair dists)
+        # This comparison happens in _run_cross_reactivity using pair_distances_md_A
+
         # ── Synthesis ratio ──
         # Primary: use contact_freq (6Å) with inverse weighting
-        # TODO: replace with MM-GBSA per-residue ΔG when available
         functional_freq = {m: max(contact_freq.get(m, 0.01), 0.01)
                            for m in functional_monomers}
 

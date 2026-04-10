@@ -248,6 +248,12 @@ MMPBSA_METHOD = "GBSA"            # "PBSA" or "GBSA" — Sullivan used GBSA
 # Sullivan 2019 / Sehit 2024: DSSP 2° structure analysis (computational CD)
 DSSP_ANALYSIS = True              # track helix/sheet/coil changes during MD
 
+# ── Phase 6: VIP Cavity Rebinding (Zink 2018) ─────────────────
+REBINDING_MD_NS = 20              # rebinding simulation time per snapshot
+REBINDING_N_SNAPSHOTS = 5         # top contact frames to test
+REBINDING_RMSD_THRESHOLD = 5.0    # Å — template stays in cavity if RMSD < this
+REBINDING_RESTRAINT_K = 1000      # kJ/mol/nm² — position restraint on monomer heavy atoms
+
 # ── Phase 5: Recipe ────────────────────────────────────────────
 POLYMERIZATION_SILANE = "sol-gel"
 POLYMERIZATION_VINYL = "free-radical"
@@ -273,7 +279,8 @@ OUTPUT_DIRS = {
     "phase2":   f"{OUTPUT_DIR}/phase2",
     "phase3":   f"{OUTPUT_DIR}/phase3",
     "phase4":   f"{OUTPUT_DIR}/phase4",
-    "phase5":   f"{OUTPUT_DIR}/phase5",
+    "phase5":   f"{OUTPUT_DIR}/phase5",   # rebinding
+    "phase6":   f"{OUTPUT_DIR}/phase6",   # recipe
     "reports":  f"{OUTPUT_DIR}/reports",
 }
 

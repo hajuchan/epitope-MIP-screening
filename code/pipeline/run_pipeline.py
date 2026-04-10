@@ -39,7 +39,7 @@ def parse_args():
     )
     parser.add_argument(
         "--phase", type=str, default="all",
-        choices=["1", "2", "3", "4", "5", "all"],
+        choices=["1", "2", "3", "4", "5", "6", "all"],
         help="Which phase to run (default: all)"
     )
     parser.add_argument(
@@ -88,7 +88,8 @@ _PHASE_RESULT_FILES = {
     2: "phase2/phase2_smd_results.json",
     3: "phase3/phase3_mmsd_results.json",
     4: "phase4/phase4_md_results.json",
-    5: "phase5/phase5_recipes.json",
+    5: "phase5/phase5_rebinding_results.json",
+    6: "phase6/phase6_recipes.json",
 }
 
 
@@ -155,12 +156,22 @@ def run_phase(phase_num: int, target_names: list, output_dir: str,
         )
 
     elif phase_num == 5:
-        from .phase5_recipe import run_phase5
-        result = run_phase5(
-            phase3_results=prev_results.get("phase3"),
+        from .phase5_rebinding import run_phase6 as run_phase5_rebinding
+        result = run_phase5_rebinding(
             phase4_results=prev_results.get("phase4"),
+            phase1_results=prev_results.get("phase1"),
             target_names=target_names,
             output_dir=_phase_dir(output_dir, "phase5"),
+        )
+
+    elif phase_num == 6:
+        from .phase6_recipe import run_phase5 as run_phase6_recipe
+        result = run_phase6_recipe(
+            phase3_results=prev_results.get("phase3"),
+            phase4_results=prev_results.get("phase4"),
+            phase5_results=prev_results.get("phase5"),
+            target_names=target_names,
+            output_dir=_phase_dir(output_dir, "phase6"),
         )
 
     elapsed = time.time() - t0
@@ -249,7 +260,7 @@ def main():
 
     # Determine phases
     if args.phase == "all":
-        phases = [1, 2, 3, 4, 5]
+        phases = [1, 2, 3, 4, 5, 6]
     else:
         phases = [int(args.phase)]
 
