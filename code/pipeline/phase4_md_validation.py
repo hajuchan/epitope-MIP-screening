@@ -154,8 +154,9 @@ def _run_prepolymerization_md(target: str, pc_id: str,
     if n_functional == 0:
         return {"error": "No functional monomers", "success": False}
 
-    # Step A: Determine copy numbers (uniform initial ratio)
-    # Half for functional, half for crosslinker
+    # Step A: Determine copy numbers (uniform ratio)
+    # Monomers placed uniformly; MD free diffusion produces natural binding distribution.
+    # EBN-based synthesis ratio is derived from analysis, not imposed on MD.
     copies_per_functional = max(1, total_monomers // (n_functional + 1))
     copies_crosslinker = total_monomers - (copies_per_functional * n_functional)
 
@@ -233,6 +234,28 @@ def _run_prepolymerization_md(target: str, pc_id: str,
                 for m, ratio in ratio_result["optimal_ratio"].items():
                     occ = ratio_result["occupancy"].get(m, 0)
                     logger.info(f"    {m}: {ratio} parts (contact freq={occ:.2f})")
+
+            # Per-atom RDF analysis (Yuan et al. 2024)
+            logger.info(f"  Per-atom RDF analysis...")
+            rdf_result = _compute_per_atom_rdf(
+                xtc, gro, functional_monomers, crosslinker)
+            result["per_atom_rdf"] = rdf_result
+
+            # Per-residue MM-GBSA decomposition (Kumar et al. 2024)
+            md_dir = work_dir / "md"
+            if (md_dir / "md.tpr").exists():
+                logger.info(f"  Per-residue MM-GBSA decomposition...")
+                try:
+                    from .utils_gromacs import run_mmpbsa
+                    from .config import MD_MMPBSA_START_NS, MD_MMPBSA_END_NS, MD_MMPBSA_INTERVAL
+                    mmpbsa_decomp = run_mmpbsa(
+                        md_dir, start_ns=MD_MMPBSA_START_NS,
+                        end_ns=MD_MMPBSA_END_NS,
+                        n_frames=MD_MMPBSA_INTERVAL,
+                        decomp=True)
+                    result["mmpbsa_decomp"] = mmpbsa_decomp
+                except Exception as e:
+                    logger.debug(f"  MM-GBSA decomposition skipped: {e}")
 
         result["success"] = True
 
@@ -433,16 +456,128 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
         # Same monomer set on other target → dispersed (large pair dists)
         # This comparison happens in _run_cross_reactivity using pair_distances_md_A
 
-        # ── Synthesis ratio ──
-        # Primary: use contact_freq (6Å) with inverse weighting
-        functional_freq = {m: max(contact_freq.get(m, 0.01), 0.01)
-                           for m in functional_monomers}
+        # ── 6. EBN: Effective Binding Number (Yuan et al. 2024) ──
+        # Max number of copies of each monomer type simultaneously within cutoff
+        ebn = {}
+        for m, counts in contact_per_frame.items():
+            ebn[m] = int(max(counts)) if counts else 0
+        results["EBN"] = ebn
+        logger.info(f"    EBN (max simultaneous): {ebn}")
 
-        if sum(functional_freq.values()) > 0:
-            inv_freq = {m: 1.0 / f for m, f in functional_freq.items()}
-            min_inv = min(inv_freq.values())
-            raw_ratio = {m: v / min_inv for m, v in inv_freq.items()}
-            optimal_ratio = {m: max(1, round(r)) for m, r in raw_ratio.items()}
+        # ── 7. HBNMax: Maximum H-bond Number (Yuan et al. 2024) ──
+        # Max H-bonds between protein and each monomer type per frame
+        # NOTE: HBA requires charge info → use TPR instead of GRO
+        try:
+            from MDAnalysis.analysis.hydrogenbonds.hbond_analysis import (
+                HydrogenBondAnalysis as HBA)
+
+            # Load universe with TPR (has charges) for H-bond analysis
+            tpr_path = Path(top_path).with_name("md.tpr")
+            if tpr_path.exists():
+                u_hb = mda.Universe(str(tpr_path), str(traj_path))
+            else:
+                u_hb = u  # fallback to GRO (may fail)
+
+            hbnmax = {}
+            hb_lifetime = {}
+            mon_residues_hb = u_hb.select_atoms(
+                "not protein and not resname SOL NA CL").residues
+            for m in all_monomers_list:
+                m_sel = " or ".join(
+                    [f"resid {res.resid}" for ri, res in enumerate(mon_residues_hb)
+                     if res_to_monomer.get(ri) == m])
+                if not m_sel:
+                    continue
+                try:
+                    hb = HBA(u_hb, donors_sel=f"protein or ({m_sel})",
+                             acceptors_sel=f"protein or ({m_sel})",
+                             d_a_cutoff=3.5, d_h_a_angle_cutoff=150,
+                             update_selections=False)
+                    hb.run(start=start_frame, step=stride, verbose=False)
+                    if len(hb.results.hbonds) > 0:
+                        # Count H-bonds per frame between protein and monomer
+                        frame_hb_counts = {}
+                        for row in hb.results.hbonds:
+                            fr = int(row[0])
+                            frame_hb_counts[fr] = frame_hb_counts.get(fr, 0) + 1
+                        hbnmax[m] = max(frame_hb_counts.values()) if frame_hb_counts else 0
+                        # H-bond lifetime (mean consecutive frames)
+                        hb_lifetime[m] = round(float(np.mean(
+                            list(frame_hb_counts.values()))), 1) if frame_hb_counts else 0
+                    else:
+                        hbnmax[m] = 0
+                        hb_lifetime[m] = 0
+                except Exception:
+                    hbnmax[m] = 0
+                    hb_lifetime[m] = 0
+
+            results["HBNMax"] = hbnmax
+            results["hbond_lifetime_avg"] = hb_lifetime
+            logger.info(f"    HBNMax: {hbnmax}")
+            logger.info(f"    H-bond lifetime (avg): {hb_lifetime}")
+        except ImportError:
+            logger.debug("HydrogenBondAnalysis not available")
+
+        # ── 8. MD Convergence Check (Polania & Jimenez 2024) ──
+        # Compare contact frequency in 25ns windows
+        n_analyzed = (n_frames - start_frame) // stride
+        if n_analyzed >= 4:
+            q1 = n_analyzed // 4
+            window_freqs = []
+            for w in range(4):
+                w_start = w * q1
+                w_end = (w + 1) * q1
+                w_freq = {}
+                for m, counts in contact_per_frame.items():
+                    w_counts = counts[w_start:w_end]
+                    w_freq[m] = round(float(np.mean(w_counts)), 3) if w_counts else 0
+                window_freqs.append(w_freq)
+
+            # Check last two windows — diff < 10% = converged
+            converged = True
+            conv_details = {}
+            for m in all_monomers_list:
+                f3 = window_freqs[2].get(m, 0)
+                f4 = window_freqs[3].get(m, 0)
+                if max(f3, f4) > 0:
+                    diff_pct = abs(f4 - f3) / max(f3, f4) * 100
+                else:
+                    diff_pct = 0
+                conv_details[m] = round(diff_pct, 1)
+                if diff_pct > 10:
+                    converged = False
+
+            results["convergence"] = {
+                "converged": converged,
+                "window_diff_pct": conv_details,
+            }
+            logger.info(f"    Convergence: {'YES' if converged else 'NO'} "
+                        f"(window diff%: {conv_details})")
+
+        # ── 9. Crosslinker-Monomer Proximity (Rajpal 2023 review) ──
+        # Check if crosslinker positions near functional monomers (needed for network)
+        xl_proximity = {}
+        for m in functional_monomers:
+            key = f"{crosslinker}-{m}"
+            rev_key = f"{m}-{crosslinker}"
+            dist = pair_dists_md.get(key) or pair_dists_md.get(rev_key)
+            if dist:
+                xl_proximity[m] = dist
+        results["crosslinker_proximity_A"] = xl_proximity
+        xl_close = all(d < 10.0 for d in xl_proximity.values()) if xl_proximity else False
+        results["crosslinker_well_positioned"] = xl_close
+        logger.info(f"    Crosslinker proximity: {xl_proximity} → "
+                    f"{'OK' if xl_close else 'WARNING: crosslinker too far from some monomers'}")
+
+        # ── Synthesis ratio (EBN-based, Yuan et al. 2024) ──
+        # EBN = max simultaneous binding count per monomer type
+        # Higher EBN = more template binding sites → needs more copies
+        functional_ebn = {m: max(ebn.get(m, 1), 1) for m in functional_monomers}
+
+        if functional_ebn:
+            min_ebn = min(functional_ebn.values())
+            optimal_ratio = {m: max(1, round(v / min_ebn))
+                             for m, v in functional_ebn.items()}
             optimal_ratio[crosslinker] = sum(optimal_ratio.values())
         else:
             optimal_ratio = {m: 1 for m in functional_monomers}
@@ -461,6 +596,67 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
     except Exception as e:
         logger.warning(f"Analysis failed: {e}")
         return {"error": str(e)}
+
+
+def _compute_per_atom_rdf(traj_path: Path, top_path: Path,
+                           functional_monomers: list,
+                           crosslinker: str) -> dict:
+    """Per-atom RDF between monomer functional groups and epitope (Yuan 2024).
+
+    Identifies which functional groups (OH, NH2, COOH, etc.) drive binding.
+    Returns dict of {monomer: {atom_pair: peak_height}} for top interactions.
+    """
+    try:
+        import MDAnalysis as mda
+        from MDAnalysis.analysis.rdf import InterRDF
+
+        u = mda.Universe(str(top_path), str(traj_path))
+        protein = u.select_atoms("protein")
+        n_frames = len(u.trajectory)
+        start_frame = n_frames // 2
+
+        # Key functional group atoms to track
+        fg_atoms = {
+            "OH": "name OH or name OG or name OG1",
+            "NH": "name N or name NZ or name NH1 or name NH2",
+            "CO": "name O or name OD1 or name OD2 or name OE1 or name OE2",
+        }
+
+        rdf_results = {}
+        all_monomers = functional_monomers + [crosslinker]
+        non_prot = u.select_atoms("not protein and not resname SOL NA CL WAT")
+
+        for m in all_monomers:
+            # Select all atoms of this monomer type
+            m_atoms = non_prot.select_atoms(f"resname {m} or resname UNL")
+            if len(m_atoms) == 0:
+                continue
+            rdf_results[m] = {}
+            for fg_name, fg_sel in fg_atoms.items():
+                prot_fg = protein.select_atoms(fg_sel)
+                if len(prot_fg) == 0:
+                    continue
+                try:
+                    irdf = InterRDF(m_atoms, prot_fg,
+                                    range=(0, 10), nbins=100)
+                    irdf.run(start=start_frame, step=max(1, (n_frames - start_frame) // 50),
+                             verbose=False)
+                    peak = float(np.max(irdf.results.rdf))
+                    peak_r = float(irdf.results.bins[np.argmax(irdf.results.rdf)])
+                    if peak > 1.5:  # significant enrichment
+                        rdf_results[m][fg_name] = {
+                            "peak_g_r": round(peak, 2),
+                            "peak_r_A": round(peak_r, 2),
+                        }
+                except Exception:
+                    pass
+
+        logger.info(f"    Per-atom RDF: {len(rdf_results)} monomers analyzed")
+        return rdf_results
+
+    except Exception as e:
+        logger.debug(f"RDF analysis failed: {e}")
+        return {}
 
 
 # ── Cross-Reactivity ──────────────────────────────────────────

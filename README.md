@@ -61,7 +61,11 @@ Phase 3: Greedy Forward Selection + MMSD — Rajpal 2024
 Phase 4: Pre-polymerization MD — Head 16-mer template
   ├── 25개 모노머 랜덤 배치 (PACKMOL 방식) + 100ns MD
   ├── Contact frequency (6Å) + residence time + pair distance
-  ├── MM-GBSA 결합 자유 에너지
+  ├── EBN / HBNMax / H-bond lifetime (Yuan 2024)
+  ├── Per-atom RDF (기능기별 결합 메커니즘)
+  ├── Crosslinker proximity check (< 10Å)
+  ├── MD convergence check (25ns 윈도우 비교)
+  ├── MM-GBSA + per-residue decomposition (hotspot 분석)
   └── → 합성 비율 (contact freq 역비례: 약한 결합 → 많이 넣기)
 
 Phase 5: VIP Cavity Rebinding — Zink 2018
@@ -69,9 +73,9 @@ Phase 5: VIP Cavity Rebinding — Zink 2018
   ├── 모노머 position restraint → 중합 근사
   ├── Template removal test: 결합 강도 적정성 확인
   │   (너무 강하면 template 제거 불가 → MIP 성능 저하)
-  ├── Rebinding MD: RMSD < 5Å → 성공
-  ├── Selectivity: 다른 target head로 rebinding → own만 성공이면 selective
-  └── → Cavity 검증 + selectivity + 재현성 (≥3/5)
+  ├── Rebinding MD: RMSD + H-bond + contact + MM-GBSA
+  ├── Selectivity Index (SI = RMSD_other/RMSD_own) + t-test
+  └── → Cavity 검증 + 정량적 selectivity + 재현성 (≥3/5)
 
 Phase 6: 합성 레시피 (Phase 5 통과한 target만)
   ├── Phase 4 optimal ratio + Phase 5 rebinding 검증 반영
@@ -87,7 +91,7 @@ Phase 6: 합성 레시피 (Phase 5 통과한 target만)
 
 **파일**: `code/pipeline/phase1_epitope_prep.py`
 
-구조 소스: CD63은 AlphaFold DB API (UniProt P08962, pLDDT > 70 검증), CD81/CD9는 RCSB PDB (5TCX, 6K4J). pdbfixer [OpenMM]로 missing side chain 자동 수정.
+구조 소스: CD63은 AlphaFold [25] DB API (UniProt P08962, pLDDT > 70 검증), CD81/CD9는 RCSB PDB (5TCX, 6K4J). pdbfixer [31]로 missing side chain 자동 수정.
 
 **도킹 receptor (Phase 2-3용)**: ECL2 전체 (~90 잔기) 추출. Head만 사용하면 CCG 모티프의 disulfide bond가 끊어져 구조 불안정. ECL2 전체를 사용하되, grid center를 head 16-mer에 맞춤으로써 도킹이 head 부위를 향하도록 유도.
 
@@ -97,9 +101,9 @@ Phase 6: 합성 레시피 (Phase 5 통과한 target만)
 
 **고유성 검증**: NCBI BLAST로 16-mer가 인간 프로테옴에서 고유한지 확인 [2]. >70% identity 타 단백질 발견 시 경고.
 
-**MD 안정성**: GROMACS 20ns MD (amber99sb-ildn, TIP3P, 0.15M NaCl, 300K, NPT) → RMSD < 3.0 Å 확인 [3].
+**MD 안정성**: GROMACS [18] 20ns MD (amber99sb-ildn [20], TIP3P [19], 0.15M NaCl, 300K, NPT) → RMSD < 3.0 Å 확인 [3].
 
-**Ensemble conformer**: 20ns MD 궤적에서 RMSD 기반 clustering → 5개 대표 구조 추출. 각각 OpenBabel/ADFR로 receptor PDBQT 생성. Phase 2에서 6개 receptor (원본 + 5 conformer)에 도킹하여 receptor 유연성 반영.
+**Ensemble conformer**: 20ns MD 궤적에서 RMSD 기반 clustering → 5개 대표 구조 추출. 각각 OpenBabel [29]/ADFR로 receptor PDBQT 생성. Phase 2에서 6개 receptor (원본 + 5 conformer)에 도킹하여 receptor 유연성 반영.
 
 ### Phase 2: Single Monomer Docking (SMD)
 
@@ -123,13 +127,18 @@ Phase 6: 합성 레시피 (Phase 5 통과한 target만)
 
 **Greedy forward selection**: (1) Phase 2 SMD BE 순으로 12개 모노머 정렬. (2) Round 1: 12개 각각 단독 MMSD → best 1종 선택 (12회). (3) Round 2: 나머지 11개를 각각 추가 → 모노머당 평균 BE (`mmsd_per_monomer = mmsd_sum / n_monomers`) 최소인 2종 선택 (11회). (4) 반복... avg BE 악화 시 중단 → 최적 크기 자동 결정 (2-6종). (5) Swap refinement: 선택된 각 위치에서 나머지 모노머로 교체 시도 → bo_objective 개선 시 교체. 총 ~70-90회 MMSD 평가.
 
-**목적함수**:
+**목적함수 (selectivity-aware)**:
 ```
-bo_objective = mmsd_per_monomer + w_interfere × max(0, delta_sum)
+bo_objective = mmsd_per_monomer + w_interfere × max(0, delta_sum) + w_sel × selectivity_penalty
+
+selectivity_penalty = max(0, ΔΔG - threshold)
+ΔΔG = BE_own - mean(BE_off_targets)    # negative = selective
 ```
 - `mmsd_per_monomer = mmsd_sum / n_monomers`: 크기 정규화. 조합 크기가 다른 PC를 공정 비교 (Rajpal 2024 [9]는 4종 고정이라 정규화 불필요했으나, 본 파이프라인은 2-6종 가변).
 - `delta_sum = mmsd_sum - smd_sum`: < 0이면 시너지 (cooperative binding), > 0이면 간섭 (steric clash) [9, Table 2].
 - `w_interfere = 0.3`: 간섭 페널티 가중치. 시너지(delta < 0)는 페널티 없음 — MMSD에서 BE 증가로 자연 반영.
+- **`selectivity_penalty`**: 각 모노머 조합을 own target뿐 아니라 **다른 target의 receptor에도 cross-docking**하여, ΔΔG가 threshold(-1.0 kcal/mol)보다 크면 (비선택적) 페널티 부과 [32,33]. `w_sel = 0.5`: selectivity와 affinity를 동등 가중.
+- Rajpal 2024 [9]는 selectivity를 목적함수에 미포함 — 본 파이프라인의 contribution.
 
 **가교제 자동 선택**: MMSD 마지막 step에서 호환 가교제 전부 도킹 → BE 최소 선택. 실란 조합: TEOS/TMOS (2종), 비닐 조합: MBAAm/EGDMA/DVB/TRIM (4종). 추가 비용: 비닐 조합당 +3 도킹.
 
@@ -137,36 +146,50 @@ bo_objective = mmsd_per_monomer + w_interfere × max(0, delta_sum)
 
 **파일**: `code/pipeline/phase4_md_validation.py`
 
-**시스템 구축**: Head 16-mer를 template으로 사용 (ECL2가 아닌 실제 합성 template) [12]. Phase 3 최적 조합의 functional monomer k종 × 5 copy + crosslinker × 5 copy = 25개 모노머. Protein 중심에서 반경 3.1-4.1 nm 구 껍질에 랜덤 배치 (min separation 1.0 nm, 겹침 방지). 문헌 표준 PACKMOL 방식 [12].
+**시스템 구축**: Head 16-mer를 template으로 사용 (ECL2가 아닌 실제 합성 template) [12]. Phase 3 최적 조합의 functional monomer k종 × 5 copy + crosslinker × 5 copy = 25개 모노머. Protein 중심에서 반경 3.1-4.1 nm 구 껍질에 랜덤 배치 (min separation 1.0 nm, 겹침 방지). 문헌 표준 PACKMOL [27] 방식 [12].
 
-**Force field**: protein — amber99sb-ildn; vinyl monomers — GAFF2 (acpype [Wang 2004]); Si-containing monomers — PolCA [13] (GAFF2 + Si LJ 파라미터). Si 원자의 bond equilibrium distances는 표준 공유결합 길이 사용 (Si-C: 0.186 nm, Si-O: 0.164 nm).
+**Force field**: protein — amber99sb-ildn [20]; vinyl monomers — GAFF2 (acpype [28]); Si-containing monomers — PolCA [13] (GAFF2 + Si LJ 파라미터). Si 원자의 bond equilibrium distances는 표준 공유결합 길이 사용 (Si-C: 0.186 nm, Si-O: 0.164 nm).
 
 **MD 프로토콜**: 
 
 | 단계 | 조건 |
 |------|------|
-| Solvation | Cubic box, 0.5 nm padding, TIP3P, 0.15M NaCl (PBS) |
+| Solvation | Cubic box, 0.5 nm padding, TIP3P [19], 0.15M NaCl (PBS) |
 | Energy minimization | Steepest descent, 50,000 steps, Fmax < 1000 kJ/mol/nm |
-| NVT equilibration | 100 ps, V-rescale 300K, dt=2fs, LINCS h-bonds |
-| NPT equilibration | 100 ps, Parrinello-Rahman 1 bar, 300K |
-| Production | 100 ns, dt=2fs, PME (rcoulomb=1.0 nm, rvdw=1.0 nm), GPU 가속 |
+| NVT equilibration | 100 ps, V-rescale [21] 300K, dt=2fs, LINCS [24] h-bonds |
+| NPT equilibration | 100 ps, Parrinello-Rahman [22] 1 bar, 300K |
+| Production | 100 ns, dt=2fs, PME [23] (rcoulomb=1.0 nm, rvdw=1.0 nm), GPU 가속 |
 
 **분석 (trajectory 후반 50%, stride 100)**:
 
 | 지표 | 방법 | 근거 |
 |------|------|------|
-| Contact frequency | 각 모노머 type의 head 6Å 이내 접촉 프레임 비율 | 문헌 표준 cutoff [12] |
+| Contact frequency | 각 모노머 type의 head 6Å 이내 접촉 프레임 비율 (MDAnalysis [26]) | 문헌 표준 cutoff [12] |
 | Mean min distance | 모노머-head 최소 원자 간 거리 평균 | 접촉 품질 |
 | Residence time | 연속 접촉 프레임 수 (안정적 결합 vs 스침) | 결합 안정성 |
+| EBN (Effective Binding Number) | 프레임당 동시 접촉 모노머 최대 수 | Yuan et al. 2024 [14] |
+| HBNMax | MDAnalysis HydrogenBondAnalysis (d-a 3.5Å, angle 150°) | Yuan et al. 2024 [14] |
+| H-bond lifetime | 프레임당 평균 H-bond 수 (H-bond 안정성) | Yuan et al. 2024 [14] |
+| Per-atom RDF | InterRDF — OH/NH/CO 기능기별 g(r) peak | Yuan et al. 2024 [14] |
 | Monomer pair distance | 모노머 간 최소 원자 거리 | Cavity compactness |
+| Crosslinker proximity | 가교제-모노머 min distance < 10Å 확인 | Rajpal 2023 [10] |
 | RMSD/RMSF/H-bond/Rg | GROMACS gmx rms/rmsf/hbond/gyrate | 구조 안정성 |
-| MM-GBSA | gmx_MMPBSA (igb=5, saltcon=0.15) [7] | 결합 자유 에너지 |
+| MM-GBSA + per-residue decomposition | gmx_MMPBSA (igb=5, saltcon=0.15, idecomp=2) [7,15,17] | 결합 자유 에너지 + hotspot |
+| MD convergence | 25ns 윈도우 간 contact freq 차이 < 10% | Polania & Jiménez 2024 [12] |
 
-**합성 비율 결정**: contact frequency 역비례.
+**EBN** (Effective Binding Number): 프레임당 동시에 6Å 이내에 있는 동일 모노머 분자 수의 최대값. EBN > 1이면 해당 모노머가 에피토프의 여러 부위에 동시 결합 가능 → 합성 시 비율 조정 근거 [14].
+
+**HBNMax** (Maximum H-bond Number): 에피토프-모노머 간 최대 H-bond 수. H-bond이 모노머-에피토프 결합의 주요 구동력이므로, HBNMax가 높은 모노머가 cavity 형성에 더 효과적 [14].
+
+**Per-atom RDF**: 모노머 원자와 에피토프 기능기 (OH, NH, CO) 간 radial distribution function. g(r) peak > 1.5이면 해당 기능기 쌍이 특이적 상호작용을 형성함. 결합 *메커니즘*을 해석하는 데 핵심.
+
+**Crosslinker proximity**: 가교제가 기능성 모노머와 10Å 이내에 배치되지 않으면, 실제 중합 시 가교 네트워크가 모노머를 포획하지 못함. 가교제-모노머 근접성이 모두 < 10Å이면 "well-positioned".
+
+**합성 비율 결정**: EBN (Effective Binding Number) 기반 직접 비례 [14].
 ```
-ratio_i = (1 / contact_freq_i) / min(1 / contact_freq_j for all j)
+ratio_i = EBN_i / min(EBN_j for all j)
 ```
-약한 결합 모노머를 더 많이 넣어 cavity에 균등한 결합점 형성. 강한 결합 모노머는 적게 넣어도 자발적으로 binding site에 위치.
+EBN = template에 동시 결합 가능한 최대 모노머 분자 수. EBN이 높은 모노머는 template 표면의 결합 site가 많으므로 더 많이 넣어 모든 site를 포화시킨다. Crosslinker는 functional monomer ratio 합과 동량.
 
 ### Phase 5: VIP Cavity Rebinding
 
@@ -180,9 +203,26 @@ VIP (Virtually Imprinted Polymer) [11] 방식으로 중합을 근사하여 cavit
 
 **Template removal test** (10ns MD): 모노머 restrained + template(head) + 물 자유. Template이 cavity에서 이탈하면 (RMSD > 5Å) "removable" = template 세척 가능 = 적정 결합 강도. Template이 이탈 못 하면 "stuck" = 결합 너무 강함 = 실제 합성 시 template 제거 어려움 → IF 저하.
 
-**Rebinding MD** (20ns): 동일 시스템에서 template이 cavity에 안정적으로 머무르는지 확인. Template backbone RMSD (후반 50% 평균) < 5Å → rebinding 성공. 5Å threshold: head 16-mer 크기(~1.5 nm = 15Å 직경)의 1/3 이내 변위.
+**Rebinding MD** (20ns): 동일 시스템에서 template이 cavity에 안정적으로 머무르는지 확인. Template backbone RMSD (후반 50% 평균, `gmx rms`로 PBC 보정) < 5Å → rebinding 성공. 5Å threshold: head 16-mer 크기(~1.5 nm = 15Å 직경)의 1/3 이내 변위.
 
-**Selectivity**: 같은 cavity에 다른 target head를 넣어 rebinding MD. 다른 head는 pdb2gmx로 새 topology 생성 → cavity의 restrained 모노머 + 물과 병합 → 20ns MD. Own target만 RMSD < 5Å이면 selective cavity.
+**Rebinding 분석 지표**:
+
+| 지표 | 방법 | 근거 |
+|------|------|------|
+| RMSD | `gmx rms` (PBC 보정) | Zink 2018 [11] |
+| H-bond count | `gmx hbond` template-monomer 간 | Yuan 2024 [14] |
+| Contact count | MDAnalysis 6Å cutoff | 문헌 표준 [12] |
+| MM-GBSA ΔG | gmx_MMPBSA (후반 50% trajectory) | Kumar 2024 [15] |
+
+**Selectivity 평가**: 같은 cavity에 다른 target head를 넣어 rebinding MD. 다른 head는 pdb2gmx로 새 topology 생성 → cavity의 restrained 모노머 + 물과 병합 → 20ns MD. 정량적 selectivity 지표:
+
+```
+Selectivity Index (SI) = RMSD_other / RMSD_own
+  SI > 1.5 → selective
+  SI 1.0-1.5 → weak selectivity  
+  SI < 1.0 → cross-reactive
+```
+Welch's t-test로 own vs other RMSD 차이의 통계적 유의성 확인 (p < 0.05). H-bond count 및 MM-GBSA ΔG도 비교하여 selectivity의 물리적 근거 제시 [15,16].
 
 **재현성**: 5개 snapshot 중 ≥ 3개 성공 → 재현 가능한 cavity.
 
@@ -194,11 +234,11 @@ Phase 5 rebinding 검증을 통과한 target에 대해서만 합성 레시피 �
 
 **비율**: Phase 4 MD contact frequency 기반 optimal ratio 적용.
 
-**합성 프로토콜**: 실란 모노머 → sol-gel (TEOS/TMOS 가교, RT 16h) [9]; 비닐 모노머 → free-radical (APS/TEMED 또는 AIBN 개시제); 혼합 → solid-phase (glass bead) [3].
+**합성 프로토콜**: 실란 모노머 → sol-gel (TEOS/TMOS 가교, RT 16h) [9]; 비닐 모노머 → free-radical (APS/TEMED 또는 AIBN 개시제); 혼합 → solid-phase (glass bead) [3,30].
 
 **CD63 이중 에피토프 전략** [1]: CD63의 3개 N-glycan을 활용한 펩타이드 + glycan 이중 각인. Layer 1: 펩타이드 에피토프 (기능성 모노머), Layer 2: N-acetylneuraminic acid (APBA 보론산).
 
-**실험 검증 계획** [14]: SPR two-state reaction model fitting, QCM-D (6.1×10⁴ ~ 6.1×10⁷ particles/mL), 교차 반응성 (3개 에피토프 + HSA, BSA, lysozyme). 목표: IF > 3, KD < 50 nM [1].
+**실험 검증 계획** [34]: SPR two-state reaction model fitting, QCM-D (6.1×10⁴ ~ 6.1×10⁷ particles/mL), 교차 반응성 (3개 에피토프 + HSA, BSA, lysozyme). 목표: IF > 3, KD < 50 nM [1].
 
 ### 검증 (Rajpal 2024 벤치마크)
 
@@ -299,9 +339,15 @@ Monomer_screening_in_Bio/
 | 4 | 모노머 수 | 25개 (각 type 5개) | 통계 + 계산 효율 |
 | 4 | MD 시간 | 100 ns | 평형 도달 |
 | 4 | Contact cutoff | 6.0 Å | vdW 포함 (문헌 표준) |
+| 4 | H-bond cutoff | d-a 3.5Å, angle 150° | Yuan 2024 [14] |
+| 4 | Convergence threshold | 윈도우 diff < 10% | Polania 2024 [12] |
+| 4 | Crosslinker proximity | < 10 Å | Rajpal 2023 [10] |
+| 4 | MM-GBSA decomposition | idecomp=2, within 6Å | Kumar 2024 [15] |
 | 5 | Snapshot 선택 | 균등 간격 5개 | Cherry-picking 방지 |
 | 5 | Restraint 강도 | 1000 kJ/mol/nm² | Zink 2018 [11] |
 | 5 | Rebinding 기준 | RMSD < 5 Å | Cavity 안정 |
+| 5 | Selectivity Index | SI > 1.5 = selective | Mohsenzadeh 2024 [16] |
+| 5 | 통계 검정 | Welch's t-test, p < 0.05 | 표준 통계 |
 | 5 | 성공률 기준 | ≥ 3/5 | 재현성 |
 
 ---
@@ -340,9 +386,55 @@ Monomer_screening_in_Bio/
 
 [13] Jorge M et al. "PolCA force field for organosilicon." *ACS Phys. Chem. Au* 2021;1:34-49.
 
+**정량적 ��석**
+
+[14] Yuan J et al. "Computational and Experimental Comparison of MIPs — Quantitative Parameters (EBN, HBNMax)." *Molecules* 2024;29:4236.
+
+[15] Kumar MD et al. "Computational modelling and optimization studies of electropentamer for molecular imprinting — per-residue MMPBSA decomposition." *J. Mol. Graph. Model.* 2024;128:108715.
+
+[16] Mohsenzadeh E et al. "Design of MIPs using computational methods: strategies and approaches." *WIREs Comput. Mol. Sci.* 2024;14:e1713.
+
+[17] MIP-PhAC Dataset. "MD/MM-PBSA and DFT Resources for MIP Design." *Data* 2025;10:205.
+
+**소프트웨어 + 방법론**
+
+[18] Abraham MJ et al. "GROMACS: High performance molecular simulations." *SoftwareX* 2015;1-2:19-25.
+
+[19] Jorgensen WL et al. "Comparison of simple potential functions for simulating liquid water (TIP3P)." *J. Chem. Phys.* 1983;79:926-935.
+
+[20] Lindorff-Larsen K et al. "Improved side-chain torsion potentials for the Amber ff99SB-ILDN protein force field." *Proteins* 2010;78:1950-1958.
+
+[21] Bussi G et al. "Canonical sampling through velocity rescaling (V-rescale thermostat)." *J. Chem. Phys.* 2007;127:014102.
+
+[22] Parrinello M, Rahman A. "Polymorphic transitions in single crystals: A new molecular dynamics method." *J. Appl. Phys.* 1981;52:7182-7190.
+
+[23] Darden T et al. "Particle mesh Ewald (PME)." *J. Chem. Phys.* 1993;98:10089-10092.
+
+[24] Hess B et al. "LINCS: A linear constraint solver for molecular simulations." *J. Comput. Chem.* 1997;18:1463-1472.
+
+[25] Jumper J et al. "Highly accurate protein structure prediction with AlphaFold." *Nature* 2021;596:583-589.
+
+[26] Michaud-Agrawal N et al. "MDAnalysis: A toolkit for the analysis of molecular dynamics simulations." *J. Comput. Chem.* 2011;32:2319-2327.
+
+[27] Martínez L et al. "PACKMOL: A package for building initial configurations for molecular dynamics simulations." *J. Comput. Chem.* 2009;30:2157-2164.
+
+[28] Sousa da Silva AW, Vranken WF. "ACPYPE — AnteChamber PYthon Parser interfacE." *BMC Res. Notes* 2012;5:367.
+
+[29] O'Boyle NM et al. "Open Babel: An open chemical toolbox." *J. Cheminform.* 2011;3:33.
+
+[30] Poma A et al. "Solid-phase synthesis of molecularly imprinted polymer nanoparticles (nanoMIPs)." *Adv. Funct. Mater.* 2013;23:5537-5543.
+
+[31] Eastman P et al. "OpenMM 7: Rapid development of high performance algorithms for molecular dynamics." *PLOS Comput. Biol.* 2017;13:e1005659.
+
+**Selectivity 방법론**
+
+[32] Garcia-Ortegon M et al. "DOCKSTRING: Easy Molecular Docking Yields Better Benchmarks for Ligand Design — selectivity scoring." *J. Chem. Inf. Model.* 2022;62:3486-3502.
+
+[33] Mestres J et al. "The selectivity entropy as a single value to express inhibitor selectivity." *BMC Bioinformatics* 2011;12:94.
+
 **검증**
 
-[14] Kowalczyk A et al. "SPR and QCM-D for CD9/CD63/CD81." *Anal. Chem.* 2023;95:9520-9530.
+[34] Kowalczyk A et al. "SPR and QCM-D for CD9/CD63/CD81." *Anal. Chem.* 2023;95:9520-9530.
 
 ---
 

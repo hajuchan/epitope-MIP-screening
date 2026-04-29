@@ -222,12 +222,13 @@ MMSD_HIGH_AFFINITY_THRESHOLD = -11.0  # kcal/mol — high-affinity PC threshold 
 MMSD_TOP_PC = 1                   # top PCs to pass to Phase 4 (greedy finds 1 optimal)
 # BO objective weights (size-normalized scoring)
 BO_INTERFERENCE_PENALTY = 0.3     # weight for interference (delta_sum > 0) penalty
+# Selectivity-aware MMSD (Garcia-Ortegon 2022, Mestres 2011)
 # Sullivan 2019: non-competitive binding
 MMSD_COMPETITION_DISTANCE = 5.0   # Å — same-site competition check (informational)
 MMSD_PENALIZE_COMPETITION = False # disabled — competition info recorded but not used for ranking
 
 # ── Phase 4: MD Validation — GROMACS ───────────────────────────
-MD_PRODUCTION_NS = 100            # pre-polymerization MD (compact system, 100ns sufficient)
+MD_PRODUCTION_NS = 350            # pre-polymerization MD (Polania 2024: 350ns for convergence)
 MD_TIMESTEP_FS = 2.0              # integration timestep
 MD_TEMPERATURE_K = 300.0          # K
 MD_PRESSURE_BAR = 1.0             # bar
@@ -249,10 +250,13 @@ MMPBSA_METHOD = "GBSA"            # "PBSA" or "GBSA" — Sullivan used GBSA
 DSSP_ANALYSIS = True              # track helix/sheet/coil changes during MD
 
 # ── Phase 6: VIP Cavity Rebinding (Zink 2018) ─────────────────
-REBINDING_MD_NS = 20              # rebinding simulation time per snapshot
-REBINDING_N_SNAPSHOTS = 5         # top contact frames to test
+REBINDING_MD_NS = 50              # rebinding simulation time per snapshot (extended from 20ns)
+REBINDING_N_SNAPSHOTS = 10        # top contact frames (n=10 for statistical power)
 REBINDING_RMSD_THRESHOLD = 5.0    # Å — template stays in cavity if RMSD < this
 REBINDING_RESTRAINT_K = 1000      # kJ/mol/nm² — position restraint on monomer heavy atoms
+# Crosslinker ratio sweep (Phase 4 supplementary; Phase 6 default 5%)
+CROSSLINKER_RATIO_SWEEP = [0.03, 0.05, 0.08, 0.10]
+CROSSLINKER_SWEEP_MD_NS = 30      # short MD per ratio for cavity stability check (reduced for faster sweep)
 
 # ── Phase 5: Recipe ────────────────────────────────────────────
 POLYMERIZATION_SILANE = "sol-gel"

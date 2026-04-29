@@ -71,6 +71,8 @@ def run_phase3(phase1_results: dict = None,
 
     results = {}
 
+    from .config import resolve_path
+
     for target in target_names:
         logger.info(f"\n{'='*20} Phase 3 Greedy+MMSD: {target} {'='*20}")
 
@@ -83,7 +85,6 @@ def run_phase3(phase1_results: dict = None,
             continue
 
         p1 = phase1_results[target]
-        from .config import resolve_path
         receptor_pdbqt = resolve_path(p1["receptor_pdbqt"])
         epitope_pdb = resolve_path(p1["epitope_pdb"])
         center = tuple(p1["grid_center"])
@@ -176,6 +177,7 @@ def _get_compatible_crosslinkers(monomers: list) -> list:
         return [k for k, v in CROSSLINKER_LIBRARY.items() if v["type"] == "vinyl"]
     else:
         return list(CROSSLINKER_LIBRARY.keys())
+
 
 
 # ── Greedy Forward Selection + Swap Refinement ──────────────
@@ -300,12 +302,12 @@ def _run_greedy_mmsd(target: str, available_monomers: list,
                 compatible_xls = _get_compatible_crosslinkers(trial)
                 pc_id = f"SWAP{swap_round}_{current_mono}to{alt}"
 
-                result = _run_single_mmsd(
+                result = _evaluate_with_selectivity(
                     target, pc_id, trial, compatible_xls,
                     receptor_pdbqt, epitope_pdb,
                     center, npts, be_matrix,
-                    work_dir / pc_id,
-                    ga_runs=ga_runs,
+                    work_dir / pc_id, ga_runs=ga_runs,
+                    off_targets=off_targets,
                 )
                 all_results.append(result)
 

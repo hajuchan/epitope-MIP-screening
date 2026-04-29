@@ -167,9 +167,16 @@ def _build_phase3(out: Path) -> str:
         )
 
         rows = ""
+        has_selectivity = any(pc.get("DDG_selectivity") is not None
+                              for pc in info["top_pcs"][:8])
         for pc in info["top_pcs"][:8]:
             mono_str = " + ".join(pc["monomers"])
             cls = "highlight" if pc.get("synergy") else ""
+            ddg = pc.get("DDG_selectivity")
+            ddg_str = f"{ddg:.2f}" if ddg is not None else "—"
+            ddg_color = "green" if ddg is not None and ddg < -1.0 else (
+                "red" if ddg is not None and ddg > 0 else "")
+            sel_pen = pc.get("selectivity_penalty", 0)
             rows += f"""<tr class="{cls}">
                 <td>{pc['pc_id']}</td>
                 <td>{mono_str}</td>
@@ -177,18 +184,20 @@ def _build_phase3(out: Path) -> str:
                 <td>{pc.get('smd_sum', 0):.2f}</td>
                 <td>{pc.get('delta_sum', 0):.2f}</td>
                 <td>{'Synergy' if pc.get('synergy') else '-'}</td>
+                {'<td style="color:' + ddg_color + ';">' + ddg_str + '</td>' if has_selectivity else ''}
             </tr>"""
 
+        sel_header = "<th>ΔΔG Sel.</th>" if has_selectivity else ""
         sections += f"""
         <div class="card">
             <h3>{target}</h3>
             <p>Fixed: {info.get('fixed_monomers', [])},
-               {info.get('n_combinations', 0)} combinations screened,
+               {info.get('n_combinations', info.get('n_evaluations', 0))} combinations screened,
                {info.get('high_affinity_count', 0)} high-affinity</p>
             {plot_html}
             <table>
                 <tr><th>PC</th><th>Monomers</th><th>MMSD Sum</th>
-                <th>SMD Sum</th><th>Delta</th><th>Synergy</th></tr>
+                <th>SMD Sum</th><th>Delta</th><th>Synergy</th>{sel_header}</tr>
                 {rows}
             </table>
         </div>
@@ -230,17 +239,26 @@ def _build_phase4(out: Path) -> str:
             residence = occ.get('residence_frames', {})
             ratio = md.get('optimal_ratio', {})
 
+            ebn_data = occ.get('EBN', {})
+            hbnmax_data = occ.get('HBNMax', {})
+            hb_life = occ.get('hbond_lifetime_avg', {})
+
             contact_rows = ""
             for m in sorted(contact_freq.keys()):
                 cf = contact_freq.get(m, 0)
                 md_dist = min_dist.get(m, 'N/A')
                 res = residence.get(m, 'N/A')
                 r = ratio.get(m, 'N/A')
+                e = ebn_data.get(m, '—')
+                hbn = hbnmax_data.get(m, '—')
+                hbl = hb_life.get(m, '—')
                 md_dist_str = f"{md_dist:.1f}" if isinstance(md_dist, (int, float)) else md_dist
                 res_str = f"{res:.1f}" if isinstance(res, (int, float)) else res
+                hbl_str = f"{hbl:.1f}" if isinstance(hbl, (int, float)) else hbl
                 contact_rows += f"""<tr>
                     <td>{m}</td><td>{cf:.3f}</td><td>{md_dist_str} Å</td>
-                    <td>{res_str}</td><td>{r}</td></tr>"""
+                    <td>{res_str}</td><td>{e}</td><td>{hbn}</td>
+                    <td>{hbl_str}</td><td>{r}</td></tr>"""
 
             # Embed RMSD/RMSF/H-bond/Rg plots
             md_dir = out / "phase4" / target / pc_id / "md"
@@ -269,7 +287,8 @@ def _build_phase4(out: Path) -> str:
                 <h4>Monomer-Epitope Contact Analysis (6Å cutoff)</h4>
                 <table>
                     <tr><th>Monomer</th><th>Contact Freq</th><th>Mean Min Dist</th>
-                        <th>Residence (frames)</th><th>Synthesis Ratio</th></tr>
+                        <th>Residence</th><th>EBN</th><th>HBNMax</th>
+                        <th>H-bond Life</th><th>Ratio (EBN)</th></tr>
                     {contact_rows}
                 </table>
 """
@@ -299,6 +318,38 @@ def _build_phase4(out: Path) -> str:
                     {pair_rows}
                 </table>
 """
+            # Convergence check
+            conv = occ.get("convergence", {})
+            if conv:
+                conv_ok = conv.get("converged", False)
+                conv_color = "green" if conv_ok else "orange"
+                conv_label = "Converged" if conv_ok else "Not converged"
+                diff_pct = conv.get("window_diff_pct", {})
+                diff_str = ", ".join(f"{m}={v}%" for m, v in diff_pct.items())
+                sections += f"""
+                <h4>MD Convergence</h4>
+                <p>Status: <span style="color:{conv_color};font-weight:bold;">{conv_label}</span>
+                   (window diff: {diff_str}; threshold &lt;10%)</p>
+"""
+
+            # Crosslinker proximity
+            xl_prox = occ.get("crosslinker_proximity_A", {})
+            xl_ok = occ.get("crosslinker_well_positioned", False)
+            if xl_prox:
+                xl_color = "green" if xl_ok else "red"
+                xl_label = "Well-positioned" if xl_ok else "Too far"
+                xl_rows = ""
+                for m, dist in xl_prox.items():
+                    d_color = "green" if dist < 10 else "red"
+                    xl_rows += f'<tr><td>{m}</td><td style="color:{d_color};">{dist:.1f} Å</td></tr>'
+                sections += f"""
+                <h4>Crosslinker Proximity</h4>
+                <p>Status: <span style="color:{xl_color};font-weight:bold;">{xl_label}</span>
+                   (all &lt;10Å = network can form)</p>
+                <table><tr><th>Functional Monomer</th><th>Distance to Crosslinker</th></tr>
+                    {xl_rows}</table>
+"""
+
             sections += "</div>"
 
     # Cross-reactivity & Selectivity comparison
@@ -589,6 +640,8 @@ def _build_phase5_rebinding(out: Path) -> str:
             own = snap.get("rebind_own", {})
             own_r = own.get("rmsd_mean_A")
             own_str = f"{own_r:.2f} Å" if own_r else "N/A"
+            own_dg = own.get("mmpbsa_dG")
+            own_dg_str = f"{own_dg:.1f}" if own_dg is not None else "—"
             rebound = "✓" if own_r and own_r < 5.0 else "✗" if own_r else "—"
 
             other_cells = ""
@@ -596,8 +649,10 @@ def _build_phase5_rebinding(out: Path) -> str:
                 if key.startswith("rebind_") and key != "rebind_own":
                     other_t = key.replace("rebind_", "")
                     other_r = val.get("rmsd_mean_A") if isinstance(val, dict) else None
+                    other_dg = val.get("mmpbsa_dG") if isinstance(val, dict) else None
                     other_str = f"{other_r:.2f}" if other_r else "—"
-                    other_cells += f" | {other_t}={other_str}"
+                    dg_str = f" (ΔG={other_dg:.1f})" if other_dg is not None else ""
+                    other_cells += f" | {other_t}={other_str}{dg_str}"
 
             # Removal test result
             removal = snap.get("removal_test", {})
@@ -615,51 +670,141 @@ def _build_phase5_rebinding(out: Path) -> str:
                 <td>{snap.get('total_contacts', '?')}</td>
                 <td style="color:{rm_color};">{rm_str} ({rm_status})</td>
                 <td>{own_str}</td>
+                <td>{own_dg_str}</td>
                 <td>{rebound}{other_cells}</td>
             </tr>"""
 
-        # Selectivity vs other targets
+        # Selectivity with SI, p-value, H-bond, contacts
+        sel_data = result.get("selectivity", {})
         sel_rows = ""
-        for key, val in result.items():
-            if key.startswith("other_") and key.endswith("_rmsd_mean"):
-                other_t = key.replace("other_", "").replace("_rmsd_mean", "")
-                other_rmsd = val
-                if own_rmsd and other_rmsd:
-                    selective = own_rmsd < other_rmsd
-                    sel_color = "green" if selective else "red"
-                    sel_str = "Selective" if selective else "Non-selective"
-                else:
-                    sel_color = "gray"
-                    sel_str = "N/A"
-                sel_rows += f"""<tr>
-                    <td>{target} head</td><td>{own_rmsd_str}</td>
-                    <td>{other_t} head</td><td>{other_rmsd:.2f} Å</td>
-                    <td style="color:{sel_color};font-weight:bold;">{sel_str}</td>
-                </tr>"""
+        for other_t, s in sel_data.items():
+            si = s.get("selectivity_index")
+            label = s.get("selectivity_label", "N/A")
+            p_val = s.get("p_value")
+            sig = s.get("significant")
+            other_rmsd_val = s.get("other_rmsd_mean")
+            other_std = s.get("other_rmsd_std")
+
+            # SI color
+            if label == "selective":
+                si_color = "green"
+            elif label == "weak":
+                si_color = "orange"
+            else:
+                si_color = "red"
+
+            si_str = f"{si:.2f}" if si else "N/A"
+            p_str = f"{p_val:.4f}" if p_val is not None else "—"
+            sig_str = "Yes" if sig else ("No" if sig is not None else "—")
+            sig_color = "green" if sig else "red"
+
+            other_rmsd_str2 = f"{other_rmsd_val:.2f}" if other_rmsd_val else "—"
+            other_std_str = f" ± {other_std:.2f}" if other_std else ""
+
+            # H-bond and contact info
+            hb_own = s.get("own_hbond_mean", "—")
+            hb_other = s.get("other_hbond_mean", "—")
+            ct_own = s.get("own_contact_mean", "—")
+            ct_other = s.get("other_contact_mean", "—")
+
+            sel_rows += f"""<tr>
+                <td>{other_t}</td>
+                <td>{other_rmsd_str2}{other_std_str} Å</td>
+                <td style="color:{si_color};font-weight:bold;">{si_str} ({label})</td>
+                <td>{p_str}</td>
+                <td style="color:{sig_color};">{sig_str}</td>
+                <td>{hb_own} / {hb_other}</td>
+                <td>{ct_own} / {ct_other}</td>
+            </tr>"""
+
+        # Fallback: old format
+        if not sel_rows:
+            for key, val in result.items():
+                if key.startswith("other_") and key.endswith("_rmsd_mean"):
+                    other_t = key.replace("other_", "").replace("_rmsd_mean", "")
+                    sel_rows += f"""<tr>
+                        <td>{other_t}</td><td>{val:.2f} Å</td>
+                        <td colspan="5">—</td></tr>"""
+
+        own_std = result.get("own_rmsd_std")
+        own_std_str = f" ± {own_std:.2f}" if own_std else ""
+        own_hb = result.get("own_hbond_mean")
+        own_ct = result.get("own_contact_mean")
+        extra_metrics = ""
+        if own_hb is not None:
+            extra_metrics += f"<p>Own H-bonds (avg): {own_hb}</p>"
+        if own_ct is not None:
+            extra_metrics += f"<p>Own contacts (avg): {own_ct}</p>"
 
         sections += f"""
         <div class="card">
             <h3>{target} — Cavity Rebinding</h3>
             <p>Success rate: <span style="color:{rate_color};font-weight:bold;font-size:1.2em;">
                 {success_rate}</span> (≥3/5 = reliable)</p>
-            <p>Own template RMSD: {own_rmsd_str}</p>
+            <p>Own template RMSD: {own_rmsd_str}{own_std_str}</p>
+            {extra_metrics}
 
             <h4>Per-Snapshot Results</h4>
             <table>
-                <tr><th>Snapshot</th><th>Contacts</th><th>Removal Test</th><th>Rebind RMSD</th><th>Result</th></tr>
+                <tr><th>Snapshot</th><th>Contacts</th><th>Removal Test</th><th>Rebind RMSD</th><th>ΔG (kcal/mol)</th><th>Result</th></tr>
                 {snap_rows}
             </table>
 """
         if sel_rows:
             sections += f"""
-            <h4>Rebinding Selectivity</h4>
+            <h4>Selectivity Analysis</h4>
+            <p><small>SI = RMSD<sub>other</sub> / RMSD<sub>own</sub> —
+               SI &gt; 1.5: selective, 1.0–1.5: weak, &lt; 1.0: cross-reactive.
+               H-bonds/Contacts: own / other (higher own = better selectivity)</small></p>
             <table>
-                <tr><th>Own Head</th><th>RMSD</th>
-                    <th>Other Head</th><th>RMSD</th><th>Selectivity</th></tr>
+                <tr><th>Other Target</th><th>RMSD</th><th>SI (label)</th>
+                    <th>p-value</th><th>Significant?</th>
+                    <th>H-bonds (own/other)</th><th>Contacts (own/other)</th></tr>
                 {sel_rows}
             </table>
 """
         sections += "</div>"
+
+        # Dual-imprinting results (if triggered)
+        dual = result.get("dual_imprinting")
+        if dual and isinstance(dual, dict) and "selectivity" in dual:
+            dual_sel = dual.get("selectivity", {})
+            reason = result.get("dual_imprinting_reason", "")
+            n_gly = dual.get("n_glycan_sites", 0)
+            dual_own_rmsd = dual.get("own_rmsd_mean")
+            dual_own_str = f"{dual_own_rmsd:.2f} Å" if dual_own_rmsd else "N/A"
+
+            dual_rows = ""
+            for ot, s in dual_sel.items():
+                si = s.get("selectivity_index")
+                label = s.get("selectivity_label", "?")
+                si_color = "green" if label == "selective" else (
+                    "orange" if label == "weak" else "red")
+                si_str = f"{si:.2f}" if si else "—"
+                other_rmsd = s.get("other_rmsd_mean")
+                or_str = f"{other_rmsd:.2f}" if other_rmsd else "—"
+                dual_rows += f"""<tr>
+                    <td>{ot}</td><td>{or_str} Å</td>
+                    <td style="color:{si_color};font-weight:bold;">{si_str} ({label})</td>
+                </tr>"""
+
+            sections += f"""
+            <div class="card" style="border-left:4px solid #e74c3c;">
+                <h3>{target} — Dual-Imprinting (APBA + Glycan)</h3>
+                <p><strong>Trigger:</strong> {reason}</p>
+                <p>N-glycan sites: {n_gly}, APBA added as glycan recognition layer</p>
+                <p>Own RMSD: {dual_own_str}, Success: {dual.get('success_rate', 'N/A')}</p>
+                <table>
+                    <tr><th>Other Target</th><th>RMSD</th><th>SI (label)</th></tr>
+                    {dual_rows}
+                </table>
+                <p><small>{dual.get('note', '')}</small></p>
+            </div>"""
+        elif result.get("dual_imprinting_reason"):
+            sections += f"""
+            <div class="card" style="border-left:4px solid #95a5a6;">
+                <p><em>{result['dual_imprinting_reason']}</em></p>
+            </div>"""
 
     return f"<h2>Phase 5: VIP Cavity Rebinding (Zink 2018)</h2>{sections}"
 

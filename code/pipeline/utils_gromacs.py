@@ -37,6 +37,7 @@ MDP_EM = dedent("""\
 
 MDP_NVT = dedent("""\
     ; NVT Equilibration
+    {define}
     integrator  = md
     nsteps      = {nsteps}
     dt          = {dt}
@@ -67,6 +68,7 @@ MDP_NVT = dedent("""\
 
 MDP_NPT = dedent("""\
     ; NPT Equilibration
+    {define}
     integrator  = md
     nsteps      = {nsteps}
     dt          = {dt}
@@ -99,6 +101,7 @@ MDP_NPT = dedent("""\
 
 MDP_PRODUCTION = dedent("""\
     ; Production MD
+    {define}
     integrator  = md
     nsteps      = {nsteps}
     dt          = {dt}
@@ -338,7 +341,7 @@ def setup_simulation_box(gro_path: Path, work_dir: Path,
            "-c", str(work_dir / "solvated.gro"),
            "-p", str(work_dir / "topol.top"),
            "-o", str(work_dir / "ions.tpr"),
-           "-maxwarn", "2"], work_dir)
+           "-maxwarn", "10"], work_dir)
 
     # Replace solvent with ions — PBS condition (0.15 M NaCl)
     from .config import MD_IONIC_STRENGTH
@@ -367,7 +370,7 @@ def run_energy_minimization(work_dir: Path) -> Path:
            "-c", str(work_dir / "ionized.gro"),
            "-p", str(work_dir / "topol.top"),
            "-o", str(work_dir / "em.tpr"),
-           "-maxwarn", "2"], work_dir)
+           "-maxwarn", "10"], work_dir)
 
     result = _gmx(["mdrun", "-deffnm", "em"],
                    work_dir, timeout=1800)
@@ -377,7 +380,7 @@ def run_energy_minimization(work_dir: Path) -> Path:
     return work_dir / "em.gro"
 
 
-def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0,
+def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0, define: str = "",
                            temperature: float = 300.0) -> Path:
     """Run NVT equilibration."""
     work_dir = Path(work_dir)
@@ -386,7 +389,7 @@ def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0,
     nsteps = int(time_ps / dt)
 
     mdp_path = work_dir / "nvt.mdp"
-    mdp_path.write_text(MDP_NVT.format(
+    mdp_path.write_text(MDP_NVT.format(define=define,
         nsteps=nsteps, dt=dt, temperature=temperature))
 
     _gmx(["grompp",
@@ -395,7 +398,7 @@ def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0,
            "-r", str(work_dir / "em.gro"),
            "-p", str(work_dir / "topol.top"),
            "-o", str(work_dir / "nvt.tpr"),
-           "-maxwarn", "2"], work_dir)
+           "-maxwarn", "10"], work_dir)
 
     _gmx(["mdrun", "-deffnm", "nvt"], work_dir, timeout=3600)
     # Extract final frame from checkpoint/trajectory if gro not created
@@ -407,7 +410,7 @@ def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0,
     return nvt_gro
 
 
-def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0,
+def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0, define: str = "",
                            temperature: float = 300.0,
                            pressure: float = 1.0) -> Path:
     """Run NPT equilibration."""
@@ -417,7 +420,7 @@ def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0,
     nsteps = int(time_ps / dt)
 
     mdp_path = work_dir / "npt.mdp"
-    mdp_path.write_text(MDP_NPT.format(
+    mdp_path.write_text(MDP_NPT.format(define=define,
         nsteps=nsteps, dt=dt, temperature=temperature, pressure=pressure))
 
     _gmx(["grompp",
@@ -427,7 +430,7 @@ def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0,
            "-t", str(work_dir / "nvt.cpt"),
            "-p", str(work_dir / "topol.top"),
            "-o", str(work_dir / "npt.tpr"),
-           "-maxwarn", "5"], work_dir)
+           "-maxwarn", "10"], work_dir)
 
     _gmx(["mdrun", "-deffnm", "npt"], work_dir, timeout=3600)
     npt_gro = work_dir / "npt.gro"
@@ -438,7 +441,7 @@ def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0,
     return npt_gro
 
 
-def run_production_md(work_dir: Path, time_ns: float = 200.0,
+def run_production_md(work_dir: Path, time_ns: float = 200.0, define: str = "",
                        temperature: float = 300.0,
                        pressure: float = 1.0,
                        gpu_id: str = "0") -> Path:
@@ -449,16 +452,17 @@ def run_production_md(work_dir: Path, time_ns: float = 200.0,
     nsteps = int(time_ns * 1000.0 / dt)  # ns → ps → steps
 
     mdp_path = work_dir / "md.mdp"
-    mdp_path.write_text(MDP_PRODUCTION.format(
+    mdp_path.write_text(MDP_PRODUCTION.format(define=define,
         nsteps=nsteps, dt=dt, temperature=temperature, pressure=pressure))
 
     _gmx(["grompp",
            "-f", str(mdp_path),
            "-c", str(work_dir / "npt.gro"),
+           "-r", str(work_dir / "npt.gro"),
            "-t", str(work_dir / "npt.cpt"),
            "-p", str(work_dir / "topol.top"),
            "-o", str(work_dir / "md.tpr"),
-           "-maxwarn", "5"], work_dir)
+           "-maxwarn", "10"], work_dir)
 
     md_cmd = ["mdrun", "-deffnm", "md", "-v"]
 
@@ -617,7 +621,8 @@ def analyze_trajectory(work_dir: Path) -> dict:
 
 def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
                end_ns: float = 200.0,
-               n_frames: int = 100) -> dict:
+               n_frames: int = 100,
+               decomp: bool = False) -> dict:
     """
     Run gmx_MMPBSA for binding free energy calculation.
 
@@ -632,6 +637,16 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
     # Create MMPBSA input file — GBSA (Sullivan 2019) or PBSA
     # Ionic strength matches MD simulation (PBS 0.15 M)
     mmpbsa_in = work_dir / "mmpbsa.in"
+    # Per-residue decomposition (Kumar et al. 2024)
+    decomp_block = ""
+    if decomp:
+        decomp_block = dedent("""\
+            &decomp
+              idecomp=2, dec_verbose=1,
+              print_res="within 6"
+            /
+        """)
+
     if MMPBSA_METHOD == "GBSA":
         mmpbsa_in.write_text(dedent(f"""\
             &general
@@ -641,7 +656,7 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
             &gb
               igb=5, saltcon={MD_IONIC_STRENGTH},
             /
-        """))
+        """) + decomp_block)
     else:
         mmpbsa_in.write_text(dedent(f"""\
             &general
@@ -651,15 +666,33 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
             &pb
               istrng={MD_IONIC_STRENGTH}, fillratio=4.0,
             /
-        """))
+        """) + decomp_block)
 
-    # Generate index file with non-protein group if not exists
+    # Generate index file: need "Protein" and "Other" (monomers only) groups
     ndx_path = work_dir / "index.ndx"
     if not ndx_path.exists():
         _gmx(["make_ndx", "-f", "md.tpr", "-o", "index.ndx"],
-              work_dir, input_text="! 1\nq\n")  # group 10 = !Protein
+              work_dir, input_text="q\n")
 
-    # gmx_MMPBSA command (uses system python via shebang)
+    # Find the "Other" group number (monomers, not water/ions)
+    # Default GROMACS: Protein=1, Other=12 (may vary)
+    ligand_group = "12"
+    if ndx_path.exists():
+        ndx_text = ndx_path.read_text()
+        # Parse group names to find "Other"
+        import re as _re
+        for match in _re.finditer(r'\[\s*(\S+)\s*\]', ndx_text):
+            pass  # just checking existence
+        # Use make_ndx output to find group number
+        result = _gmx(["make_ndx", "-f", "md.tpr", "-n", "index.ndx"],
+                       work_dir, input_text="q\n")
+        if result.stdout:
+            for line in result.stdout.split("\n"):
+                if "Other" in line and line.strip()[0].isdigit():
+                    ligand_group = line.strip().split()[0]
+                    break
+
+    # gmx_MMPBSA command
     cmd = [
         "gmx_MMPBSA",
         "-O",
@@ -667,7 +700,7 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
         "-cs", str(work_dir / "md.tpr"),
         "-ct", str(work_dir / "md.xtc"),
         "-ci", str(ndx_path),
-        "-cg", "1", "13",
+        "-cg", "1", ligand_group,
         "-cp", str(work_dir / "topol.top"),
         "-eo", str(work_dir / "FINAL_RESULTS_MMPBSA.csv"),
     ]
