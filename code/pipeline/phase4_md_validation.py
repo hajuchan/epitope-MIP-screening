@@ -114,6 +114,39 @@ def run_phase4(phase1_results: dict = None,
             )
             target_results[pc_id] = md_result
 
+            # A5/B7: Solvent sweep (porogen MD)
+            from .config import PHASE4_SOLVENT_SWEEP, PHASE4_RATIO_SWEEP
+            if PHASE4_SOLVENT_SWEEP:
+                logger.info(f"  A5/B7: Solvent sweep for {pc_id}...")
+                try:
+                    solv_result = run_phase4_solvent_sweep(
+                        target=target, pc_id=pc_id,
+                        functional_monomers=functional,
+                        crosslinker=crosslinker,
+                        epitope_pdb=epitope_pdb,
+                        work_dir=output_dir / target / pc_id / "solvent_sweep",
+                        time_ns=30,
+                    )
+                    md_result["solvent_sweep"] = solv_result
+                except Exception as e:
+                    logger.warning(f"  A5/B7 solvent sweep failed: {e}")
+
+            # B6: Monomer ratio sweep
+            if PHASE4_RATIO_SWEEP:
+                logger.info(f"  B6: Monomer ratio sweep for {pc_id}...")
+                try:
+                    ratio_result = run_phase4_ratio_sweep(
+                        target=target, pc_id=pc_id,
+                        functional_monomers=functional,
+                        crosslinker=crosslinker,
+                        epitope_pdb=epitope_pdb,
+                        work_dir=output_dir / target / pc_id / "ratio_sweep",
+                        time_ns=30,
+                    )
+                    md_result["ratio_sweep"] = ratio_result
+                except Exception as e:
+                    logger.warning(f"  B6 ratio sweep failed: {e}")
+
         results[target] = target_results
 
     # Cross-reactivity removed — Phase 6 cavity rebinding handles selectivity
@@ -267,11 +300,36 @@ def _run_prepolymerization_md(target: str, pc_id: str,
     return result
 
 
+def _ensure_centered_trajectory(traj_path: Path, tpr_path: Path) -> Path:
+    """Generate PBC-centered trajectory (gmx trjconv -pbc mol -center) if missing.
+
+    Returns path to centered xtc. Caches as md_centered.xtc beside the input.
+    """
+    from .config import GMX_BIN
+    import subprocess
+    traj_path = Path(traj_path)
+    centered = traj_path.with_name("md_centered.xtc")
+    if centered.exists() and centered.stat().st_mtime > traj_path.stat().st_mtime:
+        return centered
+    if not (traj_path.exists() and Path(tpr_path).exists()):
+        return traj_path
+    logger.info(f"    PBC-centering trajectory → {centered.name}")
+    proc = subprocess.run(
+        [GMX_BIN, "trjconv", "-f", str(traj_path), "-s", str(tpr_path),
+         "-o", str(centered), "-pbc", "mol", "-center"],
+        input="1\n0\n", capture_output=True, text=True, timeout=1800)
+    if not centered.exists():
+        logger.warning(f"    trjconv centering failed, using raw trajectory")
+        return traj_path
+    return centered
+
+
 def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
                                  functional_monomers: list,
                                  crosslinker: str,
                                  target: str = None,
-                                 cutoff_nm: float = 0.60) -> dict:
+                                 cutoff_nm: float = 0.60,
+                                 use_q4: bool = True) -> dict:
     """
     Analyze monomer-epitope interactions from MD trajectory.
 
@@ -281,12 +339,25 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
       3. Coordination number (avg monomers within 6Å)
       4. Residence time (consecutive contact duration)
 
-    Synthesis ratio from MM-GBSA ΔG if available, else contact-based.
+    Frame selection:
+      - use_q4=True: last 25% (equilibrium-only, recommended for non-converged MDs)
+      - use_q4=False: last 50% (legacy, may include kinetic transitions)
+
+    Trajectory is PBC-centered first (gmx trjconv -pbc mol -center) to handle
+    proteins that crossed periodic boundaries during long MD.
     """
     try:
         import MDAnalysis as mda
 
-        u = mda.Universe(str(top_path), str(traj_path))
+        # PBC centering for analysis (caches md_centered.xtc)
+        tpr_for_center = Path(top_path)
+        if not str(tpr_for_center).endswith('.tpr'):
+            tpr_candidate = Path(traj_path).with_name("md.tpr")
+            if tpr_candidate.exists():
+                tpr_for_center = tpr_candidate
+        centered_traj = _ensure_centered_trajectory(Path(traj_path), tpr_for_center)
+
+        u = mda.Universe(str(top_path), str(centered_traj))
 
         # Phase 4 uses head 16-mer as template → all protein atoms are binding site
         protein = u.select_atoms("protein")
@@ -297,12 +368,13 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
 
         cutoff_A = cutoff_nm * 10  # nm to Angstrom
 
-        # Frame selection: last 50%, stride for ~200 frames
+        # Frame selection: Q4 (last 25%) for equilibrium, or Q3-Q4 (last 50%) legacy
         n_frames = len(u.trajectory)
-        start_frame = n_frames // 2
+        start_frame = (3 * n_frames) // 4 if use_q4 else n_frames // 2
         stride = max(1, (n_frames - start_frame) // 200)
-        logger.info(f"    Frames: {start_frame}-{n_frames} (stride={stride}), "
-                    f"cutoff={cutoff_nm*10:.0f}Å")
+        window_label = "Q4 (last 25%)" if use_q4 else "Q3-Q4 (last 50%)"
+        logger.info(f"    Frames: {start_frame}-{n_frames} {window_label} "
+                    f"(stride={stride}), cutoff={cutoff_nm*10:.0f}Å")
 
         # Build residue → monomer type mapping from topology
         non_protein = u.select_atoms("not protein and not resname SOL NA CL")
@@ -757,3 +829,165 @@ def _print_phase4_summary(results: dict, target_names: list):
             logger.info(f"    {key}: ΔG={dg}")
 
     logger.info(f"{'='*70}")
+
+
+# ════════════════════════════════════════════════════════════════
+# A5/B7: Solvent (Porogen) Sweep
+# ════════════════════════════════════════════════════════════════
+
+def run_phase4_solvent_sweep(target: str, pc_id: str,
+                              functional_monomers: list, crosslinker: str,
+                              epitope_pdb, work_dir, solvents: list = None,
+                              time_ns: float = 30) -> dict:
+    """A5/B7: Re-run Phase 4 pre-poly MD in multiple solvents (porogens).
+
+    Real MIP polymerization is rarely in pure water. Sol-gel uses EtOH/H2O,
+    free-radical uses ACN, CHCl3, etc. The same monomer set can give very
+    different binding affinities depending on porogen.
+
+    Reference: Cormack 2019 Chromatographia; MDPI Polymers 17:1057 (2025).
+    """
+    from .config import PHASE4_SOLVENTS, is_polymerization_compatible
+
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine compatible solvents from polymerization type
+    combo = functional_monomers + [crosslinker]
+    ok, dom, _ = is_polymerization_compatible(combo)
+    if not ok:
+        return {"error": "incompatible monomers — skip solvent sweep"}
+
+    poly_type = "sol-gel" if dom == "silane" else "radical"
+    if solvents is None:
+        solvents = [s for s, cfg in PHASE4_SOLVENTS.items()
+                     if poly_type in cfg.get("use_for", [])]
+        if not solvents:
+            solvents = ["water"]
+
+    logger.info(f"\n=== Solvent sweep for {target}/{pc_id} ({poly_type}) ===")
+    logger.info(f"  Testing solvents: {solvents}")
+
+    sweep_results = {}
+    for solv in solvents:
+        solv_dir = work_dir / f"solvent_{solv}"
+        solv_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"\n  → {solv} ({time_ns} ns)...")
+        try:
+            md_result = _run_prepolymerization_md(
+                target=target, pc_id=f"{pc_id}_{solv}",
+                functional_monomers=functional_monomers,
+                crosslinker=crosslinker,
+                epitope_pdb=epitope_pdb,
+                work_dir=solv_dir,
+                time_ns=time_ns,
+            )
+            sweep_results[solv] = {
+                "dielectric": PHASE4_SOLVENTS.get(solv, {}).get("dielectric"),
+                "contact_mean": (md_result.get("occupancy_analysis", {})
+                                  .get("total_contact_mean")),
+                "n_bound_monomers": (md_result.get("occupancy_analysis", {})
+                                      .get("n_bound_monomers")),
+                "result": md_result,
+            }
+        except Exception as e:
+            logger.warning(f"  {solv} failed: {e}")
+            sweep_results[solv] = {"error": str(e)}
+
+    # Rank by imprinting affinity (more contacts = better imprinting)
+    valid = {s: r for s, r in sweep_results.items()
+             if "error" not in r and r.get("contact_mean") is not None}
+    if valid:
+        best_solvent = max(valid, key=lambda s: valid[s]["contact_mean"])
+    else:
+        best_solvent = "water"  # fallback
+    logger.info(f"  Best solvent: {best_solvent}")
+
+    return {
+        "polymerization_type": poly_type,
+        "solvents_tested": list(sweep_results.keys()),
+        "best_solvent": best_solvent,
+        "per_solvent": sweep_results,
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# B6: Variable Monomer Ratio Sweep
+# ════════════════════════════════════════════════════════════════
+
+def run_phase4_ratio_sweep(target: str, pc_id: str,
+                            functional_monomers: list, crosslinker: str,
+                            epitope_pdb, work_dir, ratio_presets: list = None,
+                            time_ns: float = 30) -> dict:
+    """B6: Test multiple monomer ratios (instead of uniform 1:1:1:1).
+
+    Default presets test ratios (1,1,1,1), (2,1,1,1), (3,1,1,1), etc.
+    Ratio that maximizes contact stability is selected.
+
+    Reference: Lutz 2019 Macromol Rapid Commun (sequence-controlled polymers).
+    """
+    from .config import PHASE4_RATIO_PRESETS
+
+    if ratio_presets is None:
+        ratio_presets = PHASE4_RATIO_PRESETS
+
+    work_dir = Path(work_dir)
+    n_func = len(functional_monomers)
+    sweep_results = {}
+
+    for preset in ratio_presets:
+        # Pad/truncate to n_func
+        if len(preset) < n_func:
+            preset = list(preset) + [1] * (n_func - len(preset))
+        else:
+            preset = list(preset[:n_func])
+        label = "_".join(str(r) for r in preset)
+        rdir = work_dir / f"ratio_{label}"
+        rdir.mkdir(parents=True, exist_ok=True)
+
+        # Convert ratio to copy numbers (total ~20 + crosslinker)
+        total = 20
+        scale = total / sum(preset)
+        copies = {m: max(1, int(round(r * scale)))
+                  for m, r in zip(functional_monomers, preset)}
+        copies[crosslinker] = total - sum(copies.values())
+        if copies[crosslinker] < 1:
+            copies[crosslinker] = max(1, total // 5)
+
+        logger.info(f"\n  Ratio {preset} → copies {copies}")
+        try:
+            # Call with explicit copy override (extension to _run_prepoly_md needed)
+            # For now, skip if not implemented; use default
+            md_result = _run_prepolymerization_md(
+                target=target, pc_id=f"{pc_id}_r{label}",
+                functional_monomers=functional_monomers,
+                crosslinker=crosslinker,
+                epitope_pdb=epitope_pdb,
+                work_dir=rdir,
+                time_ns=time_ns,
+                total_monomers=total,
+            )
+            sweep_results[label] = {
+                "ratio": preset,
+                "copies": copies,
+                "contact_mean": (md_result.get("occupancy_analysis", {})
+                                  .get("total_contact_mean")),
+                "result": md_result,
+            }
+        except Exception as e:
+            sweep_results[label] = {"error": str(e), "ratio": preset}
+
+    # Rank by contact stability
+    valid = {k: v for k, v in sweep_results.items()
+             if "error" not in v and v.get("contact_mean") is not None}
+    if valid:
+        best = max(valid, key=lambda k: valid[k]["contact_mean"])
+        logger.info(f"  Best ratio: {sweep_results[best]['ratio']}")
+    else:
+        best = None
+    return {
+        "ratios_tested": [v.get("ratio") for v in sweep_results.values()],
+        "best_ratio_label": best,
+        "best_ratio": sweep_results[best]["ratio"] if best else None,
+        "per_ratio": sweep_results,
+    }

@@ -72,6 +72,31 @@ def parse_args():
         "--fresh", action="store_true",
         help="Force re-run all phases from scratch, ignoring existing results."
     )
+    parser.add_argument(
+        "--extend-drifters", action="store_true",
+        help="Extend Phase 5 rebinding MDs that show RMSD drift Q1→Q4 > 1.5 Å. "
+             "Uses gmx convert-tpr -extend + mdrun -cpi to continue MD by 100 ns. "
+             "Run after standard Phase 5 completes."
+    )
+    parser.add_argument(
+        "--extend-ns", type=int, default=100,
+        help="Extension length in ns for --extend-drifters (default: 100)"
+    )
+    parser.add_argument(
+        "--multirestart", action="store_true",
+        help="Multi-restart ensemble: re-run Phase 5 rebinding with N=3 perturbed "
+             "starting head positions per snapshot. Adds extra reps to existing run."
+    )
+    parser.add_argument(
+        "--n-reps", type=int, default=3,
+        help="Number of replicates for --multirestart (default: 3)"
+    )
+    parser.add_argument(
+        "--reanalyze", action="store_true",
+        help="Re-analyze existing Phase 5 trajectories with PBC centering "
+             "(gmx trjconv -pbc mol -center) and Q4 (last 25%%) RMSD. No new MD. "
+             "Recomputes selectivity matrix from corrected analysis."
+    )
     return parser.parse_args()
 
 
@@ -254,6 +279,37 @@ def main():
         target_names = list(TARGETS.keys())
     else:
         target_names = args.target
+
+    # Convergence-improvement modes (run instead of standard pipeline)
+    if args.extend_drifters:
+        from .phase5_rebinding import extend_drifting_mds
+        logger.info(f"Extension mode: +{args.extend_ns} ns for drifting Phase 5 MDs")
+        # output_dir=None lets the function auto-detect phase5_extended over phase5
+        extend_drifting_mds(
+            target_names=target_names,
+            output_dir=None,
+            extend_ns=args.extend_ns,
+        )
+        return
+
+    if args.multirestart:
+        from .phase5_rebinding import run_multirestart
+        logger.info(f"Multi-restart mode: N={args.n_reps} replicates per snapshot")
+        run_multirestart(
+            target_names=target_names,
+            n_reps=args.n_reps,
+            output_dir=None,
+        )
+        return
+
+    if args.reanalyze:
+        from .phase5_rebinding import reanalyze_phase5
+        logger.info("Re-analysis mode: PBC centering + Q4 RMSD on existing trajectories")
+        reanalyze_phase5(
+            target_names=target_names,
+            output_dir=None,
+        )
+        return
 
     logger.info(f"Targets: {target_names}")
     logger.info(f"Output: {out_dir}")

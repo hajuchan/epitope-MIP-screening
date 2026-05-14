@@ -442,3 +442,486 @@ def _get_receptor_atom_info(structure) -> list:
                 "resid": resid,
             })
     return atoms
+
+# ════════════════════════════════════════════════════════════════
+# Epitope Quality Analysis (A1, B1, B2)
+# ════════════════════════════════════════════════════════════════
+
+KYTE_DOOLITTLE = {
+    'A': 1.8, 'R': -4.5, 'N': -3.5, 'D': -3.5, 'C': 2.5,
+    'E': -3.5, 'Q': -3.5, 'G': -0.4, 'H': -3.2, 'I': 4.5,
+    'L': 3.8, 'K': -3.9, 'M': 1.9, 'F': 2.8, 'P': -1.6,
+    'S': -0.8, 'T': -0.7, 'W': -0.9, 'Y': -1.3, 'V': 4.2,
+}
+
+
+def gravy_index(sequence: str) -> float:
+    """Grand Average of Hydropathy (Kyte & Doolittle 1982 J Mol Biol).
+
+    GRAVY > +2 = too hydrophobic, < -2 = too hydrophilic, in between balanced.
+    """
+    if not sequence:
+        return 0.0
+    return sum(KYTE_DOOLITTLE.get(aa, 0.0) for aa in sequence) / len(sequence)
+
+
+def compute_sasa_per_residue(pdb_path, residue_range: tuple = None) -> dict:
+    """Solvent-Accessible Surface Area per residue using mdtraj (Shrake-Rupley).
+
+    Returns mean SASA, min SASA, list of fully-buried residues (SASA<10 Å²).
+
+    Indexing logic:
+    - mdtraj's `shrake_rupley(mode='residue')` returns a (1, N_residues) array
+      where the index 0..N-1 corresponds to the residues in the PDB file
+      in their order of appearance, NOT to original protein residue numbers.
+    - If `residue_range` provided AND it falls within the array bounds, use it.
+    - If `residue_range` provided BUT exceeds array bounds (e.g., extracted
+      head PDB only has 16 residues but range=(157,172)), use the entire
+      array since the extracted PDB already contains only the residues of
+      interest (offset by start for buried-residue reporting).
+
+    Reference: Lee & Richards 1971 J Mol Biol.
+    """
+    try:
+        import mdtraj as md
+        traj = md.load(str(pdb_path))
+        sasa = md.shrake_rupley(traj, mode='residue')  # nm² per residue
+        n_residues = sasa.shape[1]
+        # Try original numbering first; if out of range, fall back to entire array
+        if residue_range is None:
+            window = sasa[0]
+            start_for_label = 1
+        else:
+            start, end = residue_range
+            # If the requested range fits within the array, use absolute indexing
+            if 0 <= start - 1 < n_residues and end <= n_residues:
+                window = sasa[0, start - 1:end]
+                start_for_label = start
+            else:
+                # PDB likely contains only the head region (renumbered or not)
+                # → use the entire array, treat first residue as `start`
+                window = sasa[0]
+                start_for_label = start
+
+        if len(window) == 0:
+            return {
+                'error': f'empty SASA window (n_residues={n_residues}, '
+                          f'requested={residue_range})',
+                'mean_sasa_A2': None,
+            }
+
+        window_A2 = window * 100  # nm² → Å²
+        return {
+            'mean_sasa_A2': round(float(window_A2.mean()), 2),
+            'min_sasa_A2': round(float(window_A2.min()), 2),
+            'max_sasa_A2': round(float(window_A2.max()), 2),
+            'n_residues_used': int(len(window)),
+            'fully_buried_residues': [
+                int(start_for_label + i) for i, s in enumerate(window_A2) if s < 10
+            ],
+        }
+    except Exception as e:
+        return {'error': str(e), 'mean_sasa_A2': None}
+
+
+def check_epitope_quality(sequence: str, pdb_path=None,
+                          residue_range: tuple = None) -> dict:
+    """A1/B1/B2: Combined epitope quality scoring.
+
+    Returns gravy, SASA, balance category, recommendation.
+    Used by Phase 1 to rank multi-epitope candidates.
+    """
+    from .config import (EPITOPE_SASA_MIN_A2, EPITOPE_GRAVY_MIN, EPITOPE_GRAVY_MAX)
+
+    result = {
+        'sequence': sequence,
+        'length': len(sequence),
+        'gravy': gravy_index(sequence),
+    }
+    # Hydrophilicity balance
+    if result['gravy'] > EPITOPE_GRAVY_MAX:
+        result['balance'] = 'too_hydrophobic'
+    elif result['gravy'] < EPITOPE_GRAVY_MIN:
+        result['balance'] = 'too_hydrophilic'
+    else:
+        result['balance'] = 'balanced'
+
+    # SASA (if PDB given)
+    if pdb_path and residue_range:
+        sasa = compute_sasa_per_residue(pdb_path, residue_range)
+        result['sasa'] = sasa
+        result['surface_accessible'] = (sasa.get('mean_sasa_A2', 0) or 0) >= EPITOPE_SASA_MIN_A2
+
+    # Overall score (higher = better epitope candidate)
+    # +1 for balance, +1 for accessibility, +0.5 for not having buried residues
+    score = 0
+    if result['balance'] == 'balanced':
+        score += 1
+    if result.get('surface_accessible'):
+        score += 1
+    if pdb_path and not result.get('sasa', {}).get('fully_buried_residues'):
+        score += 0.5
+    result['quality_score'] = score
+    return result
+
+
+
+# ════════════════════════════════════════════════════════════════
+# Conformer Clustering (A2) — K-medoids on RMSD matrix
+# ════════════════════════════════════════════════════════════════
+
+def cluster_conformers_kmedoids(traj_path, top_path, n_clusters: int = 5,
+                                  stride: int = 10):
+    """A2: K-medoids clustering of MD frames by pairwise RMSD.
+
+    Returns list of medoid frame indices and per-cluster info.
+    Reference: Shao 2007 JCTC; Daura 1999 Angew Chem.
+    """
+    try:
+        import mdtraj as md
+        from sklearn_extra.cluster import KMedoids
+        import numpy as np
+    except ImportError as e:
+        return {'error': f'Missing dependency: {e}', 'frames': None}
+
+    try:
+        traj = md.load(str(traj_path), top=str(top_path))
+        if traj.n_frames < n_clusters * 2:
+            return {'error': f'Too few frames ({traj.n_frames}) for {n_clusters} clusters',
+                    'frames': list(range(0, traj.n_frames,
+                                          max(1, traj.n_frames // n_clusters)))[:n_clusters]}
+        # Stride to reduce computation
+        traj_stride = traj[::stride]
+        # Compute pairwise RMSD matrix (CA-only for speed)
+        ca_indices = traj_stride.topology.select('name CA')
+        if len(ca_indices) == 0:
+            ca_indices = traj_stride.topology.select('protein and name C')
+        traj_ca = traj_stride.atom_slice(ca_indices)
+        n = traj_ca.n_frames
+        rmsd_matrix = np.zeros((n, n))
+        for i in range(n):
+            rmsd_matrix[i] = md.rmsd(traj_ca, traj_ca, i) * 10  # nm → Å
+
+        # K-medoids
+        km = KMedoids(n_clusters=n_clusters, metric='precomputed',
+                       method='pam', random_state=42).fit(rmsd_matrix)
+        medoid_strided = km.medoid_indices_
+        medoid_frames = [int(i * stride) for i in medoid_strided]
+        # Cluster sizes
+        cluster_sizes = [int(sum(km.labels_ == k)) for k in range(n_clusters)]
+        return {
+            'frames': medoid_frames,
+            'cluster_sizes': cluster_sizes,
+            'method': 'kmedoids_PAM',
+            'n_total_frames': traj.n_frames,
+            'n_stride_frames': n,
+        }
+    except Exception as e:
+        return {'error': str(e), 'frames': None}
+
+
+# ════════════════════════════════════════════════════════════════
+# Pose Clustering (A3) — RMSD-based clustering of AutoDock poses
+# ════════════════════════════════════════════════════════════════
+
+def cluster_docking_poses(pdbqt_lines_list, rmsd_cutoff: float = 2.0,
+                          min_cluster_size: int = 1):
+    """A3: Cluster AutoDock poses by ligand RMSD.
+
+    Input: list of (pose_dict) where each pose has 'binding_energy' and 'coords'.
+    Output: list of (representative pose, cluster_size, binding_energy).
+    Reference: Trott & Olson 2010 (AutoDock Vina).
+    """
+    import numpy as np
+
+    def rmsd(coords_a, coords_b):
+        ca = np.array(coords_a)
+        cb = np.array(coords_b)
+        return float(np.sqrt(np.mean((ca - cb) ** 2)))
+
+    sorted_poses = sorted(pdbqt_lines_list, key=lambda p: p.get('binding_energy', 0))
+    clusters = []  # each: list of poses
+    for pose in sorted_poses:
+        added = False
+        for c in clusters:
+            if rmsd(pose['coords'], c[0]['coords']) < rmsd_cutoff:
+                c.append(pose)
+                added = True
+                break
+        if not added:
+            clusters.append([pose])
+
+    representatives = []
+    for c in clusters:
+        if len(c) < min_cluster_size:
+            continue
+        rep = c[0]
+        representatives.append({
+            'representative_pose': rep,
+            'cluster_size': len(c),
+            'binding_energy': rep.get('binding_energy'),
+            'binding_energies_in_cluster': [p.get('binding_energy') for p in c],
+        })
+    return representatives
+
+
+# ════════════════════════════════════════════════════════════════
+# Bootstrap Confidence Interval (A6) — for SI, p-value, etc.
+# ════════════════════════════════════════════════════════════════
+
+def bootstrap_selectivity_index(own_rmsds, cross_rmsds,
+                                 n_bootstrap: int = 10000,
+                                 ci: float = 0.95):
+    """A6: Bootstrap CI for selectivity index (SI = cross/own).
+
+    Reference: Efron 1979 (Ann Stat).
+    """
+    import numpy as np
+    own = np.array([x for x in own_rmsds if x is not None])
+    cross = np.array([x for x in cross_rmsds if x is not None])
+    if len(own) < 2 or len(cross) < 2:
+        return {'error': 'insufficient data'}
+
+    si_samples = []
+    rng = np.random.default_rng(42)
+    for _ in range(n_bootstrap):
+        own_s = rng.choice(own, size=len(own), replace=True)
+        cross_s = rng.choice(cross, size=len(cross), replace=True)
+        if own_s.mean() > 0:
+            si_samples.append(cross_s.mean() / own_s.mean())
+    si_samples = np.array(si_samples)
+    alpha = (1 - ci) / 2
+    return {
+        'si_mean': float(si_samples.mean()),
+        'si_median': float(np.median(si_samples)),
+        'si_std': float(si_samples.std()),
+        'si_ci_lower': float(np.percentile(si_samples, alpha * 100)),
+        'si_ci_upper': float(np.percentile(si_samples, (1 - alpha) * 100)),
+        'ci_level': ci,
+        'n_bootstrap': n_bootstrap,
+        'is_selective_at_ci': float(np.percentile(si_samples, alpha * 100)) > 1.5,
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# Enrichment Factor (B3) — vs decoy monomers
+# ════════════════════════════════════════════════════════════════
+
+def enrichment_factor(target_be_matrix: dict, decoy_be_matrix: dict) -> dict:
+    """B3: Enrichment of real monomers over decoys (negative control).
+
+    Higher value (e.g., 3-10) = real monomers genuinely bind better than random.
+    Reference: Mysinger 2012 (JCIM) — DUD-E benchmark concept.
+    """
+    import numpy as np
+    target_bes = [v for v in target_be_matrix.values() if v is not None]
+    decoy_bes = [v for v in decoy_be_matrix.values() if v is not None]
+    if not target_bes or not decoy_bes:
+        return {'error': 'empty matrix'}
+    t_mean = np.mean(target_bes)
+    d_mean = np.mean(decoy_bes)
+    # Lower (more negative) BE = stronger binding.
+    # EF = |target| / |decoy| → > 1 means real monomers bind genuinely stronger.
+    ef = abs(t_mean) / abs(d_mean) if d_mean != 0 else float('nan')
+    return {
+        'target_mean_be': float(t_mean),
+        'decoy_mean_be': float(d_mean),
+        'enrichment_factor': float(ef),
+        'enriched': ef > 1.5,  # target binds at least 1.5x stronger than decoys
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# Initiator Quantity Calculation (B10)
+# ════════════════════════════════════════════════════════════════
+
+def calculate_initiator_mass(total_monomer_mol: float,
+                              initiator: str = "Irgacure_2959",
+                              mol_percent: float = 1.0) -> dict:
+    """B10: Calculate initiator mass for given monomer amount.
+
+    Reference: Odian 2004 Polymer Synthesis textbook (0.5–2 mol% standard).
+    """
+    from .config import INITIATOR_MW
+    mw = INITIATOR_MW.get(initiator, 224.25)
+    init_mol = total_monomer_mol * mol_percent / 100.0
+    init_mass_mg = init_mol * mw * 1000.0
+    return {
+        'initiator': initiator,
+        'mol_percent': mol_percent,
+        'initiator_mass_mg': round(init_mass_mg, 2),
+        'initiator_mol': init_mol,
+        'note': f'{mol_percent} mol% of total monomer ({total_monomer_mol*1000:.2f} mmol)',
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# C2: Multi-Objective Optimization Helpers
+# ════════════════════════════════════════════════════════════════
+
+def compute_synthesizability_score(combo: list) -> dict:
+    """C2: Synthesizability score 0-10 for a monomer combination.
+
+    Combines:
+      • Polymerization compatibility (3 pts) — silane vs vinyl one-pot
+      • pH stability window (2 pts) — wider = more flexible synthesis
+      • Vinyl Q-e reactivity ratios (2.5 pts) — random copolymer ideal
+      • No "surface-only" pseudo-monomer issues (1.5 pts)
+      • Bonus for matching boronate chemistry to glycan target (1 pt)
+
+    Reference: Liu 2017 Nat Protoc (compatibility), Alfrey-Price 1947 (Q-e).
+    """
+    import itertools
+    from .config import (is_polymerization_compatible, synthesis_pH_window,
+                          reactivity_ratio_product, QE_PARAMS, ALL_MONOMERS)
+
+    score = 0.0
+    breakdown = {}
+
+    # 1. Polymerization compatibility (3 pts)
+    ok, dominant, _ = is_polymerization_compatible(combo)
+    if ok:
+        score += 3.0
+        breakdown["polymerization"] = 3.0
+    else:
+        breakdown["polymerization"] = 0.0
+
+    # 2. pH stability window (2 pts max)
+    pH_min, pH_max, pH_rec = synthesis_pH_window(combo)
+    if pH_min is not None and pH_max is not None and pH_max > pH_min:
+        window = pH_max - pH_min
+        pH_pts = min(2.0, (window / 5.0) * 2.0)  # 5+ pH range → 2 pts
+        score += pH_pts
+        breakdown["ph_window"] = round(pH_pts, 2)
+    else:
+        breakdown["ph_window"] = 0.0
+
+    # 3. Vinyl reactivity ratios (2.5 pts max, only for radical)
+    if dominant == "radical":
+        vinyl_ms = [m for m in combo if m in QE_PARAMS]
+        if len(vinyl_ms) >= 2:
+            n_good_pairs = 0
+            n_total_pairs = 0
+            for m1, m2 in itertools.combinations(vinyl_ms, 2):
+                rr = reactivity_ratio_product(m1, m2)
+                if rr is None:
+                    continue
+                n_total_pairs += 1
+                if 0.1 < rr < 10:
+                    n_good_pairs += 1
+            rxr_pts = (n_good_pairs / max(n_total_pairs, 1)) * 2.5
+            score += rxr_pts
+            breakdown["reactivity"] = round(rxr_pts, 2)
+        else:
+            breakdown["reactivity"] = 2.5  # not applicable, full credit
+            score += 2.5
+    else:
+        # Silane sol-gel doesn't have reactivity ratio issue
+        breakdown["reactivity"] = 2.5
+        score += 2.5
+
+    # 4. Surface-only monomer handling (1.5 pts)
+    surface_ms = [m for m in combo
+                   if ALL_MONOMERS.get(m, {}).get("polymerization") == "surface"]
+    if not surface_ms:
+        # All monomers polymerizable in-mix — clean
+        score += 1.5
+        breakdown["surface_clean"] = 1.5
+    elif len(surface_ms) == len(combo):
+        # All surface-only — invalid (no matrix)
+        breakdown["surface_clean"] = 0.0
+    else:
+        # Mixed surface + polymerizable — requires extra synthesis step
+        # (grafting before polymerization) but doable
+        score += 0.7
+        breakdown["surface_clean"] = 0.7
+
+    # 5. Boronate chemistry bonus (1 pt, for glycan targets)
+    has_boronate = any(m in {"APBA", "VPBA", "FPBA", "AAPBA"} for m in combo)
+    if has_boronate:
+        score += 1.0
+        breakdown["boronate_bonus"] = 1.0
+    else:
+        breakdown["boronate_bonus"] = 0.0
+
+    return {
+        "synth_score": round(score, 2),  # 0-10
+        "breakdown": breakdown,
+        "polymerization_type": dominant,
+        "synthesizable": ok and (pH_min is not None) and (pH_max > pH_min if pH_max else False),
+    }
+
+
+def compute_selectivity_score(combo: list, target: str,
+                              be_matrix: dict, all_targets: list) -> dict:
+    """C2: Selectivity score for monomer combination (using Phase 2 ΔΔG).
+
+    Higher value → combo monomers preferentially bind to target over others.
+    """
+    import numpy as np
+    other_targets = [t for t in all_targets if t != target]
+    ddg_per_monomer = []
+
+    for m in combo:
+        be_target = be_matrix.get(target, {}).get(m)
+        if be_target is None:
+            continue
+        # Mean BE on other targets
+        other_bes = [be_matrix.get(t, {}).get(m)
+                     for t in other_targets if be_matrix.get(t, {}).get(m) is not None]
+        if not other_bes:
+            continue
+        # ΔΔG = BE_target - mean(BE_other)
+        # Negative ΔΔG = target preferred
+        ddg = be_target - float(np.mean(other_bes))
+        ddg_per_monomer.append(ddg)
+
+    if not ddg_per_monomer:
+        return {"selectivity_score": 0.0, "mean_ddg": None, "n_evaluated": 0}
+
+    mean_ddg = float(np.mean(ddg_per_monomer))
+    # Score: more negative ΔΔG = higher selectivity score
+    # ΔΔG = -2.0 kcal/mol → score 1.0; ΔΔG = -4.0 → 2.0; clamped [0, 5]
+    score = max(0.0, min(5.0, -mean_ddg))
+    return {
+        "selectivity_score": round(score, 2),
+        "mean_ddg_kcal_mol": round(mean_ddg, 2),
+        "n_evaluated": len(ddg_per_monomer),
+    }
+
+
+def compute_3obj_for_combo(combo: list, target: str,
+                            mmsd_result: dict,
+                            be_matrix: dict, all_targets: list) -> dict:
+    """C2: Compute 3 objectives for NSGA-II.
+
+    All in MINIMIZATION form (smaller = better):
+      • affinity: -mmsd_per_monomer (more negative MMSD = better affinity)
+      • selectivity: -selectivity_score (higher selectivity = better)
+      • synthesizability: -(synth_score / 10)  (higher synth = better)
+
+    Returns dict with raw + normalized values.
+    """
+    # Affinity from Phase 3 MMSD
+    mmsd_per = mmsd_result.get("mmsd_per_monomer")
+    affinity_obj = mmsd_per if mmsd_per is not None else 0.0  # lower MMSD = stronger
+
+    # Selectivity from Phase 2 ΔΔG
+    sel = compute_selectivity_score(combo, target, be_matrix, all_targets)
+    selectivity_obj = -sel["selectivity_score"]  # negate to minimize
+
+    # Synthesizability
+    synth = compute_synthesizability_score(combo)
+    synth_obj = -synth["synth_score"] / 10.0  # normalize [-1, 0], minimize
+
+    return {
+        "objectives": [affinity_obj, selectivity_obj, synth_obj],
+        "raw": {
+            "affinity_mmsd_per_monomer": affinity_obj,
+            "selectivity_score": sel["selectivity_score"],
+            "selectivity_mean_ddg": sel.get("mean_ddg_kcal_mol"),
+            "synth_score": synth["synth_score"],
+            "synth_breakdown": synth["breakdown"],
+            "synthesizable": synth["synthesizable"],
+        },
+    }

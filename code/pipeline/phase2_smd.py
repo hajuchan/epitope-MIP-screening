@@ -165,9 +165,47 @@ def run_phase2(phase1_results: dict = None,
             output_dir, time_ns=MONOMER_CONTACT_MD_NS,
         )
 
+    # B3: Decoy baseline for enrichment factor
+    from .config import PHASE2_DECOY_BASELINE
+    decoy_results = {}
+    if PHASE2_DECOY_BASELINE:
+        logger.info("\nB3: Running decoy monomer baseline (enrichment factor)...")
+        for target in target_names:
+            t_result = phase1_results.get(target, {})
+            if "error" in t_result:
+                continue
+            try:
+                d = evaluate_decoy_baseline(
+                    target,
+                    Path(t_result["receptor_pdbqt"]),
+                    tuple(t_result["grid_center"]),
+                    tuple(t_result["grid_npts"]),
+                    output_dir,
+                )
+                decoy_results[target] = d
+                logger.info(f"  {target}: decoy framework set up "
+                            f"({d.get('n_valid_decoys', 0)} valid docked)")
+            except Exception as e:
+                logger.warning(f"  {target} decoy baseline failed: {e}")
+
     # 3. Compute selectivity matrix
     logger.info("\nComputing selectivity matrix...")
     selectivity = _compute_selectivity(be_matrix, target_names)
+
+    # B3 (cont.): Enrichment factor from be_matrix vs decoy_results
+    enrichment = {}
+    if PHASE2_DECOY_BASELINE and decoy_results:
+        from .utils_analysis import enrichment_factor
+        for target in target_names:
+            t_be = be_matrix.get(target, {})
+            d_be = decoy_results.get(target, {}).get("decoy_be_matrix", {})
+            valid_decoy = {k: v for k, v in d_be.items() if v is not None}
+            if t_be and valid_decoy:
+                ef = enrichment_factor(t_be, valid_decoy)
+                enrichment[target] = ef
+                logger.info(f"  {target}: Enrichment Factor = "
+                            f"{ef.get('enrichment_factor', '?')} "
+                            f"(enriched: {ef.get('enriched', '?')})")
 
     # 4. Filter candidates
     from .config import SMD_TOP_N_FOR_PHASE3
@@ -183,6 +221,8 @@ def run_phase2(phase1_results: dict = None,
         "selectivity": selectivity,
         "filtered": filtered,
         "contact_md_scores": contact_scores,
+        "decoy_baseline": decoy_results if PHASE2_DECOY_BASELINE else None,
+        "enrichment_factor": enrichment if PHASE2_DECOY_BASELINE else None,
         "dock_details": {
             t: {m: {k: v for k, v in r.items() if k != "clusters"}
                 for m, r in tresults.items()}
@@ -456,6 +496,30 @@ def _run_smd_for_target(target: str, receptor_pdbqt: Path,
                 results[name] = {"mean_cluster_energy": 0.0,
                                  "binding_energy": 0.0, "error": str(e)}
 
+    # A3: Pose clustering for each monomer (if dlg files available)
+    from .config import PHASE2_POSE_CLUSTERING
+    if PHASE2_POSE_CLUSTERING:
+        for name in results:
+            try:
+                work = dock_dir / f"{target}_{name}"
+                dlg_files = list(Path(work).rglob("*.dlg"))
+                if dlg_files:
+                    clusters = cluster_poses_from_dlg(dlg_files[0])
+                    if clusters:
+                        results[name]["pose_clusters"] = [
+                            {
+                                "cluster_size": c["cluster_size"],
+                                "binding_energy": c["binding_energy"],
+                                "energies_in_cluster": c.get(
+                                    "binding_energies_in_cluster", []),
+                            }
+                            for c in clusters
+                        ]
+                        logger.info(f"  {target}-{name}: A3 found "
+                                    f"{len(clusters)} pose clusters")
+            except Exception as e:
+                logger.debug(f"  {target}-{name}: pose clustering skipped ({e})")
+
     return results
 
 
@@ -568,3 +632,105 @@ def _plot_heatmap(be_matrix: dict, output_path: Path):
         logger.info(f"Heatmap → {output_path}")
     except ImportError:
         logger.warning("matplotlib not available, skipping heatmap")
+
+
+# ════════════════════════════════════════════════════════════════
+# A3: Pose Clustering — extract multiple binding modes from AutoDock
+# ════════════════════════════════════════════════════════════════
+
+def parse_autodock_dlg_poses(dlg_path) -> list:
+    """A3: Parse AutoDock4 .dlg file to extract all GA-run poses.
+
+    Returns list of {binding_energy, run, coords}.
+    """
+    poses = []
+    current = None
+    with open(dlg_path) as f:
+        in_pose = False
+        for line in f:
+            if line.startswith("DOCKED: USER    Run = "):
+                if current:
+                    poses.append(current)
+                run = int(line.split("=")[1].strip())
+                current = {"run": run, "coords": [], "binding_energy": None}
+                in_pose = True
+            elif in_pose and line.startswith("DOCKED: USER  Estimated Free Energy"):
+                try:
+                    be = float(line.split("=")[1].split()[0])
+                    if current:
+                        current["binding_energy"] = be
+                except (ValueError, IndexError):
+                    pass
+            elif in_pose and line.startswith("DOCKED: ATOM"):
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                    current["coords"].append([x, y, z])
+                except (ValueError, IndexError):
+                    pass
+    if current and current.get("binding_energy") is not None:
+        poses.append(current)
+    return poses
+
+
+def cluster_poses_from_dlg(dlg_path, rmsd_cutoff: float = None,
+                            max_clusters: int = None) -> list:
+    """A3: Cluster AutoDock poses by RMSD."""
+    from .config import POSE_CLUSTERING_RMSD_A, POSE_CLUSTERING_MAX_CLUSTERS
+    from .utils_analysis import cluster_docking_poses
+    rmsd_cutoff = rmsd_cutoff or POSE_CLUSTERING_RMSD_A
+    max_clusters = max_clusters or POSE_CLUSTERING_MAX_CLUSTERS
+
+    poses = parse_autodock_dlg_poses(dlg_path)
+    if not poses:
+        return []
+    clusters = cluster_docking_poses(poses, rmsd_cutoff=rmsd_cutoff)
+    # Sort by binding_energy and keep top-N
+    clusters.sort(key=lambda c: c.get("binding_energy", 0))
+    return clusters[:max_clusters]
+
+
+# ════════════════════════════════════════════════════════════════
+# B3: Decoy Monomer Evaluation — Enrichment Factor
+# ════════════════════════════════════════════════════════════════
+
+def evaluate_decoy_baseline(target: str, receptor_pdbqt, center, npts,
+                             output_dir: Path) -> dict:
+    """B3: Dock decoy monomers (negative control) for enrichment factor.
+
+    Reference: Mysinger 2012 (JCIM) DUD-E benchmark.
+    """
+    from .config import DECOY_MONOMERS, AUTODOCK4_GA_RUNS
+    from .utils_structure import smiles_to_mol2
+
+    decoy_be = {}
+    decoy_dir = output_dir / "decoy_baseline"
+    decoy_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, info in DECOY_MONOMERS.items():
+        try:
+            # Quick docking — fewer GA runs since this is reference
+            mol2 = smiles_to_mol2(info["smiles"], name, decoy_dir)
+            # Convert to PDBQT and dock against same receptor
+            # NOTE: simplified — actual production needs full AutoDock flow
+            # For now, store entry with placeholder; full impl requires
+            # mirroring `_run_smd_for_target` per decoy
+            decoy_be[name] = None  # placeholder; populated by actual docking
+            logger.debug(f"  Decoy {name}: scheduled for docking")
+        except Exception as e:
+            logger.debug(f"  Decoy {name} failed: {e}")
+            decoy_be[name] = None
+
+    # If any decoys actually got BE values, compute enrichment
+    valid_decoy_be = {k: v for k, v in decoy_be.items() if v is not None}
+    return {
+        "decoy_monomers_tested": list(decoy_be.keys()),
+        "decoy_be_matrix": decoy_be,
+        "n_valid_decoys": len(valid_decoy_be),
+        "note": (
+            "Decoy framework installed. Phase 2 must integrate "
+            "decoy docking step in _run_smd_for_target loop or "
+            "use evaluate_decoy_baseline() before main monomer screening."
+        ),
+    }

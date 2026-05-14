@@ -58,9 +58,17 @@ def _gmx_rmsd(tpr_path: Path, xtc_path: Path, work_dir: Path,
         return None, None
 
     n = len(rmsds)
-    second_half = rmsds[n // 2:]
-    rmsd_mean = round(float(np.mean(second_half)), 2) if second_half else None
+    # Q4-only (last 25%) for equilibrium analysis — handles slow binding/unbinding kinetics
+    last_quarter = rmsds[3 * n // 4:]
+    rmsd_mean = round(float(np.mean(last_quarter)), 2) if last_quarter else None
     rmsd_final = round(rmsds[-1], 2)
+    # Convergence diagnostic: drift from Q1 to Q4
+    q1_mean = float(np.mean(rmsds[:n // 4])) if n >= 4 else 0.0
+    drift = round(rmsd_mean - q1_mean, 2) if rmsd_mean else None
+    q4_std = round(float(np.std(last_quarter)), 2) if last_quarter else None
+    # Attach drift info via tuple expansion via attribute on locals — simplest: log
+    if drift is not None and abs(drift) > 1.5:
+        logger.warning(f"  Non-converged RMSD: drift Q1→Q4 = {drift:+.2f} Å, Q4 std = {q4_std} Å")
     return rmsd_mean, rmsd_final
 
 
@@ -295,6 +303,28 @@ def run_phase6(phase4_results: dict = None,
                 "rebind_own": rebind_own,
             }
 
+            # B8: Multi-pose rebinding for ensemble averaging (only first snap to save compute)
+            from .config import (REBINDING_MULTI_POSE,
+                                  REBINDING_N_HEAD_CONFORMERS)
+            if REBINDING_MULTI_POSE and si == 0:
+                phase1_target = phase1_results.get(target, {})
+                conformer_files = phase1_target.get("conformer_pdbs", [])
+                if conformer_files and len(conformer_files) >= 2:
+                    head_confs = conformer_files[:REBINDING_N_HEAD_CONFORMERS]
+                    logger.info(f"  B8: Multi-pose rebinding "
+                                f"({len(head_confs)} head conformers × 1 rep)...")
+                    try:
+                        mp_result = run_multipose_rebinding(
+                            target, cavity_result["cavity_gro"],
+                            cavity_result["cavity_top"],
+                            head_confs, n_replicates=1,
+                            time_ns=min(REBINDING_MD_NS, 20),
+                            work_dir=snap_dir / "multipose",
+                            p4_md_dir=p4_md_dir)
+                        snap_result["multipose_ensemble"] = mp_result
+                    except Exception as e:
+                        logger.warning(f"  B8 multi-pose failed: {e}")
+
             # Step 5: Rebind other targets' heads (selectivity)
             for other_target in target_names:
                 if other_target == target:
@@ -435,14 +465,58 @@ def _create_cavity(traj_path, top_path, topol_path, frame_idx, output_dir):
 
     try:
         import MDAnalysis as mda
+        from .utils_gromacs import _gmx
+        from .config import GMX_BIN
+        import subprocess
 
-        u = mda.Universe(str(top_path), str(traj_path))
-        u.trajectory[frame_idx]
-
-        # Write full system GRO (keep everything including protein)
+        # Step 1: Use gmx trjconv to extract centered, PBC-corrected frame
+        # -pbc mol: keep molecules whole (no bond crossing PBC)
+        # -center: center protein in box
+        # This fixes "protein at edge" issue from Phase 4 PBC split
         frame_gro = output_dir / "frame.gro"
-        with mda.Writer(str(frame_gro), n_atoms=u.atoms.n_atoms) as w:
-            w.write(u.atoms)
+        frame_time_ps = frame_idx * 10  # frames are at 10 ps intervals
+        try:
+            # Need a tpr; use the topology if it's a tpr, else regenerate
+            top_for_trjconv = str(top_path) if str(top_path).endswith('.tpr') else None
+            if top_for_trjconv is None:
+                # Find tpr in same dir as topol.top
+                tpr_candidate = Path(topol_path).parent / "md.tpr"
+                if tpr_candidate.exists():
+                    top_for_trjconv = str(tpr_candidate)
+            if top_for_trjconv:
+                # Build index group for centering: use Protein
+                # gmx trjconv: select Protein (1) for centering, System (0) for output
+                cmd = [GMX_BIN, "trjconv",
+                       "-f", str(traj_path),
+                       "-s", top_for_trjconv,
+                       "-o", str(frame_gro),
+                       "-pbc", "mol",
+                       "-center",
+                       "-dump", str(frame_time_ps)]
+                proc = subprocess.run(cmd, input="1\n0\n", capture_output=True,
+                                      text=True, timeout=300)
+                if not frame_gro.exists():
+                    raise RuntimeError(f"trjconv failed: {proc.stderr[-300:]}")
+                logger.info(f"    Frame {frame_idx} centered via gmx trjconv (-pbc mol -center)")
+                # Load centered frame for downstream
+                u = mda.Universe(str(frame_gro))
+            else:
+                raise RuntimeError("No tpr available for trjconv")
+        except Exception as ce:
+            logger.warning(f"    trjconv centering failed ({ce}); falling back to MDAnalysis")
+            u = mda.Universe(str(top_path), str(traj_path))
+            u.trajectory[frame_idx]
+            # Manual centering via MDAnalysis transformations
+            try:
+                from MDAnalysis.transformations import unwrap, center_in_box, wrap
+                prot = u.select_atoms("protein")
+                workflow = [unwrap(u.atoms), center_in_box(prot, center='geometry'),
+                            wrap(u.atoms, compound='residues')]
+                u.trajectory.add_transformations(*workflow)
+            except Exception as te:
+                logger.warning(f"    MDA centering also failed: {te}")
+            with mda.Writer(str(frame_gro), n_atoms=u.atoms.n_atoms) as w:
+                w.write(u.atoms)
 
         # Create position restraints by modifying each monomer ITP
         # GROMACS requires [ position_restraints ] inside each [ moleculetype ]
@@ -1340,6 +1414,21 @@ def _analyze_rebinding_results(target, all_targets, snapshot_results, threshold)
             "significant": p_value < 0.05 if p_value is not None else None,
         }
 
+        # A6: Bootstrap 95% CI for SI
+        try:
+            from .utils_analysis import bootstrap_selectivity_index
+            from .config import BOOTSTRAP_N_RESAMPLES, BOOTSTRAP_CI
+            boot = bootstrap_selectivity_index(
+                own_rmsds, rmsds,
+                n_bootstrap=BOOTSTRAP_N_RESAMPLES, ci=BOOTSTRAP_CI)
+            if 'error' not in boot:
+                sel_entry["si_ci_lower"] = round(boot["si_ci_lower"], 2)
+                sel_entry["si_ci_upper"] = round(boot["si_ci_upper"], 2)
+                sel_entry["si_bootstrap_mean"] = round(boot["si_mean"], 2)
+                sel_entry["is_selective_at_95CI"] = boot["is_selective_at_ci"]
+        except Exception as _e:
+            logger.debug(f"Bootstrap CI failed for {other_t}: {_e}")
+
         # H-bond selectivity
         other_hb = other_hbonds.get(other_t, [])
         if own_hbonds and other_hb:
@@ -1389,3 +1478,648 @@ def _print_phase6_summary(results):
                 f"SI={si} [{label}]{p_str}")
 
     logger.info(f"{'='*60}")
+
+
+# ── Re-analysis with PBC centering + Q4 ────────────────────────
+
+def _ensure_centered_xtc(md_dir: Path) -> Path:
+    """Generate PBC-centered xtc (md_centered.xtc) for analysis. Caches result."""
+    from .config import GMX_BIN
+    import subprocess
+    md_dir = Path(md_dir)
+    xtc = md_dir / "md.xtc"
+    tpr = md_dir / "md.tpr"
+    centered = md_dir / "md_centered.xtc"
+    if not (xtc.exists() and tpr.exists()):
+        return None
+    if centered.exists() and centered.stat().st_mtime > xtc.stat().st_mtime:
+        return centered
+    proc = subprocess.run(
+        [GMX_BIN, "trjconv", "-f", str(xtc), "-s", str(tpr),
+         "-o", str(centered), "-pbc", "mol", "-center"],
+        input="1\n0\n", capture_output=True, text=True, timeout=1800)
+    if not centered.exists():
+        logger.warning(f"  trjconv centering failed for {md_dir}")
+        return None
+    return centered
+
+
+def _q4_rmsd_from_centered(md_dir: Path) -> dict:
+    """Compute Q4 (last 25%) RMSD from PBC-centered trajectory.
+
+    First centers via gmx trjconv, then runs gmx rms on centered xtc, parses
+    last 25% of the time series.
+    """
+    from .config import GMX_BIN, REBINDING_RMSD_THRESHOLD
+    import subprocess
+    centered = _ensure_centered_xtc(md_dir)
+    if centered is None:
+        return {"error": "trajectory missing or centering failed"}
+    tpr = md_dir / "md.tpr"
+    xvg = md_dir / "rmsd_centered.xvg"
+    proc = subprocess.run(
+        [GMX_BIN, "rms", "-s", str(tpr), "-f", str(centered),
+         "-o", str(xvg), "-tu", "ns"],
+        input="Protein\nProtein\n", capture_output=True, text=True,
+        cwd=str(md_dir), timeout=300)
+    if not xvg.exists():
+        return {"error": "gmx rms failed"}
+    rmsds = []
+    for line in xvg.read_text(encoding="utf-8").split("\n"):
+        if line.startswith(("#", "@")):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            try: rmsds.append(float(parts[1]) * 10.0)
+            except ValueError: pass
+    if len(rmsds) < 4:
+        return {"error": "trajectory too short"}
+    rmsds = np.array(rmsds)
+    n = len(rmsds)
+    q1, q4 = rmsds[:n // 4], rmsds[3 * n // 4:]
+    drift = float(q4.mean()) - float(q1.mean())
+    return {
+        "n_frames": n,
+        "q1_mean_A": round(float(q1.mean()), 2),
+        "q4_mean_A": round(float(q4.mean()), 2),
+        "q4_std_A": round(float(q4.std()), 2),
+        "rmsd_final_A": round(float(rmsds[-1]), 2),
+        "drift_A": round(drift, 2),
+        "converged": abs(drift) < 1.0 and float(q4.std()) < 1.0,
+        "rebound_q4": float(q4.mean()) < REBINDING_RMSD_THRESHOLD,
+    }
+
+
+def reanalyze_phase5(target_names: list = None,
+                     output_dir: str = None) -> dict:
+    """Re-analyze existing Phase 5 rebinding MDs with PBC centering + Q4.
+
+    Does NOT re-run MD. Applies gmx trjconv -pbc mol -center to existing
+    md.xtc, then computes Q4 RMSD on centered trajectories, then derives
+    selectivity statistics.
+
+    Auto-detects phase5_extended over phase5 if both exist.
+    """
+    from .config import (REBINDING_RMSD_THRESHOLD as _RT,
+                         get_output_path)
+    from scipy.stats import ttest_ind
+
+    if output_dir is None:
+        phase5_ext = get_output_path("phase5").parent / "phase5_extended"
+        if phase5_ext.exists() and any(phase5_ext.glob("*/snapshot_*")):
+            output_dir = str(phase5_ext)
+            logger.info(f"Re-analyzing: {output_dir}")
+        else:
+            output_dir = str(get_output_path("phase5"))
+    output_dir = Path(output_dir)
+
+    if target_names is None:
+        target_names = sorted({d.name for d in output_dir.iterdir()
+                                if d.is_dir() and d.name in ("CD63", "CD81", "CD9")})
+
+    summary = {}
+    for target in target_names:
+        target_dir = output_dir / target
+        if not target_dir.exists():
+            continue
+        cross_targets = [t for t in target_names if t != target]
+
+        snap_data = []
+        for snap_dir in sorted(target_dir.glob("snapshot_*")):
+            si = int(snap_dir.name.split("_")[-1])
+            entry = {"snap_idx": si}
+            for sub_name in ["rebind_own"] + [f"rebind_{t}" for t in cross_targets]:
+                sub_dir = snap_dir / sub_name / "md"
+                if sub_dir.exists():
+                    diag = _q4_rmsd_from_centered(sub_dir)
+                    entry[sub_name] = diag
+            snap_data.append(entry)
+
+        # Aggregate per cross target
+        own_q4 = [s["rebind_own"]["q4_mean_A"] for s in snap_data
+                  if "rebind_own" in s and "q4_mean_A" in s["rebind_own"]]
+        own_q4_conv = [s["rebind_own"]["q4_mean_A"] for s in snap_data
+                       if "rebind_own" in s and s["rebind_own"].get("converged")]
+
+        sel = {}
+        for ot in cross_targets:
+            key = f"rebind_{ot}"
+            cross_q4 = [s[key]["q4_mean_A"] for s in snap_data
+                        if key in s and "q4_mean_A" in s[key]]
+            cross_q4_conv = [s[key]["q4_mean_A"] for s in snap_data
+                             if key in s and s[key].get("converged")]
+
+            si_all = (round(float(np.mean(cross_q4)) / float(np.mean(own_q4)), 2)
+                      if own_q4 and cross_q4 else None)
+            si_conv = (round(float(np.mean(cross_q4_conv)) / float(np.mean(own_q4_conv)), 2)
+                       if own_q4_conv and cross_q4_conv else None)
+            try:
+                p_all = round(float(ttest_ind(cross_q4, own_q4, equal_var=False).pvalue), 4) if len(own_q4) >= 3 and len(cross_q4) >= 3 else None
+            except Exception:
+                p_all = None
+            try:
+                p_conv = round(float(ttest_ind(cross_q4_conv, own_q4_conv, equal_var=False).pvalue), 4) if len(own_q4_conv) >= 3 and len(cross_q4_conv) >= 3 else None
+            except Exception:
+                p_conv = None
+
+            sel[ot] = {
+                "n_cross": len(cross_q4),
+                "n_cross_converged": len(cross_q4_conv),
+                "cross_q4_mean": round(float(np.mean(cross_q4)), 2) if cross_q4 else None,
+                "cross_q4_std": round(float(np.std(cross_q4)), 2) if cross_q4 else None,
+                "selectivity_index_all": si_all,
+                "selectivity_index_converged": si_conv,
+                "p_value_all": p_all,
+                "p_value_converged": p_conv,
+                "selectivity_label": (
+                    "selective" if (si_all and si_all > 1.5 and p_all and p_all < 0.05)
+                    else "weak" if (si_all and 1.0 < si_all <= 1.5)
+                    else "cross-reactive" if (si_all and si_all <= 1.0)
+                    else "n/a"
+                ),
+            }
+
+        summary[target] = {
+            "n_total": len(snap_data),
+            "n_own_converged": len(own_q4_conv),
+            "n_rebound_q4": sum(1 for s in snap_data
+                                if s.get("rebind_own", {}).get("rebound_q4")),
+            "own_q4_mean": round(float(np.mean(own_q4)), 2) if own_q4 else None,
+            "own_q4_std": round(float(np.std(own_q4)), 2) if own_q4 else None,
+            "own_q4_converged_only_mean": (
+                round(float(np.mean(own_q4_conv)), 2) if own_q4_conv else None),
+            "selectivity": sel,
+            "snapshots": snap_data,
+        }
+
+        s = summary[target]
+        logger.info(f"\n=== {target} (PBC-centered + Q4) ===")
+        logger.info(f"  N total: {s['n_total']}, own converged: {s['n_own_converged']}")
+        logger.info(f"  Q4 own: {s['own_q4_mean']} ± {s['own_q4_std']} Å "
+                    f"(rebound: {s['n_rebound_q4']}/{s['n_total']})")
+        for ot, ss in sel.items():
+            logger.info(f"  vs {ot}: SI={ss['selectivity_index_all']} "
+                        f"(p={ss['p_value_all']}), "
+                        f"conv-only SI={ss['selectivity_index_converged']} "
+                        f"(p={ss['p_value_converged']})")
+
+    out_file = output_dir / "phase5_reanalyzed_centered.json"
+    out_file.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    logger.info(f"\nSaved: {out_file}")
+    return summary
+
+
+# ── Convergence Diagnostic & Extension ──────────────────────────
+
+def _is_md_drifting(rebind_md_dir: Path, drift_threshold_A: float = 1.5) -> dict:
+    """Check if RMSD trajectory shows drift (Q1→Q4 difference) > threshold."""
+    xvg = Path(rebind_md_dir) / "rmsd_rebind.xvg"
+    if not xvg.exists():
+        return {"available": False}
+    rmsds = []
+    for line in xvg.read_text(encoding="utf-8").split("\n"):
+        if not line or line.startswith(("#", "@")):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                rmsds.append(float(parts[1]) * 10.0)  # nm → Å
+            except ValueError:
+                pass
+    if len(rmsds) < 100:
+        return {"available": False}
+    rmsds = np.array(rmsds)
+    n = len(rmsds)
+    q1 = float(rmsds[:n // 4].mean())
+    q4 = float(rmsds[3 * n // 4:].mean())
+    q4_std = float(rmsds[3 * n // 4:].std())
+    drift = q4 - q1
+    return {
+        "available": True,
+        "q1_mean_A": round(q1, 2),
+        "q4_mean_A": round(q4, 2),
+        "q4_std_A": round(q4_std, 2),
+        "drift_A": round(drift, 2),
+        "drifting": abs(drift) > drift_threshold_A,
+        "converged": abs(drift) < 1.0 and q4_std < 1.0,
+    }
+
+
+def extend_drifting_mds(target_names: list = None,
+                         output_dir: str = None,
+                         extend_ns: int = 100,
+                         drift_threshold_A: float = 1.5) -> dict:
+    """Extend non-converged Phase 5 rebinding MDs by `extend_ns` ns each.
+
+    Uses gmx convert-tpr -extend + gmx mdrun -cpi state.cpt to continue
+    from existing checkpoint. Operates on existing output directory in-place.
+
+    Targets snapshots with |Q1→Q4 drift| > drift_threshold_A.
+
+    Auto-detects best Phase 5 source: prefers phase5_extended (n=10/50 ns)
+    over phase5 (n=5/20 ns) if both exist.
+    """
+    from .config import GMX_BIN, get_output_path
+    import subprocess
+
+    if output_dir is None:
+        # Prefer phase5_extended (n=10/50ns) if available
+        phase5_ext = get_output_path("phase5").parent / "phase5_extended"
+        if phase5_ext.exists() and any(phase5_ext.glob("*/snapshot_*")):
+            output_dir = str(phase5_ext)
+            logger.info(f"Using phase5_extended source: {output_dir}")
+        else:
+            output_dir = str(get_output_path("phase5"))
+    output_dir = Path(output_dir)
+
+    if target_names is None:
+        target_names = [d.name for d in output_dir.iterdir() if d.is_dir()]
+
+    extended, skipped = [], []
+    for target in target_names:
+        target_dir = output_dir / target
+        if not target_dir.exists():
+            continue
+        logger.info(f"\n=== {target}: drift detection (threshold {drift_threshold_A} Å) ===")
+        for snap_dir in sorted(target_dir.glob("snapshot_*")):
+            for sub_dir in snap_dir.iterdir():
+                if not sub_dir.is_dir() or not sub_dir.name.startswith("rebind_"):
+                    continue
+                md_dir = sub_dir / "md"
+                diag = _is_md_drifting(md_dir, drift_threshold_A)
+                if not diag.get("available"):
+                    continue
+                if not diag.get("drifting"):
+                    logger.info(f"  {snap_dir.name}/{sub_dir.name}: converged "
+                                f"(drift={diag['drift_A']:+.2f} Å)")
+                    continue
+
+                logger.info(f"  {snap_dir.name}/{sub_dir.name}: DRIFT "
+                            f"(Q1={diag['q1_mean_A']}, Q4={diag['q4_mean_A']}, "
+                            f"drift={diag['drift_A']:+.2f}) → extending {extend_ns} ns")
+
+                tpr = md_dir / "md.tpr"
+                cpt = md_dir / "md.cpt"
+                if not (tpr.exists() and cpt.exists()):
+                    skipped.append(f"{target}/{snap_dir.name}/{sub_dir.name} (missing tpr/cpt)")
+                    continue
+
+                # convert-tpr to extend
+                new_tpr = md_dir / "md_extended.tpr"
+                proc = subprocess.run(
+                    [GMX_BIN, "convert-tpr", "-s", str(tpr),
+                     "-o", str(new_tpr), "-extend", str(extend_ns * 1000)],
+                    capture_output=True, text=True, timeout=60)
+                if not new_tpr.exists():
+                    skipped.append(f"{target}/{snap_dir.name}/{sub_dir.name} (convert-tpr failed)")
+                    continue
+
+                # Backup original tpr, replace with extended
+                if not (md_dir / "md_orig.tpr").exists():
+                    tpr.rename(md_dir / "md_orig.tpr")
+                else:
+                    tpr.unlink()
+                new_tpr.rename(tpr)
+
+                # Continue MD from checkpoint
+                proc = subprocess.run(
+                    [GMX_BIN, "mdrun", "-deffnm", "md", "-cpi", "md.cpt",
+                     "-nb", "gpu", "-pme", "gpu", "-bonded", "gpu",
+                     "-update", "gpu", "-gpu_id", "0"],
+                    cwd=str(md_dir), capture_output=True, text=True,
+                    timeout=86400 * 2)
+                extended.append(f"{target}/{snap_dir.name}/{sub_dir.name}")
+
+    summary = {"extended": extended, "skipped": skipped, "extend_ns": extend_ns,
+               "drift_threshold_A": drift_threshold_A}
+    out_file = output_dir / "extension_log.json"
+    out_file.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    logger.info(f"\nExtension summary: {len(extended)} MDs extended, "
+                f"{len(skipped)} skipped → {out_file}")
+    return summary
+
+
+# ── Multi-Restart Ensemble ──────────────────────────────────────
+
+def _recenter_gro_via_trjconv(src_gro: Path, tpr_path: Path, dst_gro: Path) -> bool:
+    """Use gmx trjconv -pbc mol -center to recenter protein in box.
+
+    Required because Phase 4 trajectories may have protein crossing PBC boundaries.
+    Without this, downstream MD inherits the split state.
+    """
+    from .config import GMX_BIN
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [GMX_BIN, "trjconv", "-f", str(src_gro), "-s", str(tpr_path),
+             "-o", str(dst_gro), "-pbc", "mol", "-center"],
+            input="1\n0\n", capture_output=True, text=True, timeout=300)
+        return dst_gro.exists()
+    except Exception:
+        return False
+
+
+def _perturb_head_position(src_gro: Path, dst_gro: Path, rep_idx: int,
+                            tpr_for_center: Path = None):
+    """Generate perturbed starting structure: random rotation + small COM offset.
+
+    First recenters input via gmx trjconv (-pbc mol -center) if tpr_for_center
+    provided — handles PBC-split proteins from Phase 4 trajectories.
+    """
+    import MDAnalysis as mda
+    from MDAnalysis.lib.transformations import rotation_matrix
+
+    # Step 0: recenter source if tpr available (handles PBC split)
+    work = Path(dst_gro).parent
+    centered_src = work / "src_centered.gro"
+    if tpr_for_center and Path(tpr_for_center).exists():
+        ok = _recenter_gro_via_trjconv(Path(src_gro), Path(tpr_for_center),
+                                        centered_src)
+        if ok:
+            src_gro = centered_src
+            logger.info(f"  Source recentered (trjconv -pbc mol -center)")
+
+    rng = np.random.default_rng(seed=42 + rep_idx)
+    u = mda.Universe(str(src_gro))
+    prot = u.select_atoms("protein")
+    com = prot.center_of_mass()
+    angle = rng.uniform(30, 90)
+    axis = rng.normal(size=3)
+    axis = axis / np.linalg.norm(axis)
+    R = rotation_matrix(np.deg2rad(angle), axis, com)[:3, :3]
+    new_pos = (prot.positions - com) @ R.T + com
+    prot.positions = new_pos
+    offset = rng.uniform(-1.0, 1.0, size=3)
+    prot.translate(offset)
+    with mda.Writer(str(dst_gro), n_atoms=u.atoms.n_atoms) as w:
+        w.write(u.atoms)
+    return {"angle_deg": float(angle), "axis": axis.tolist(),
+            "offset_A": offset.tolist(), "recentered": tpr_for_center is not None}
+
+
+def run_multirestart(target_names: list,
+                      n_reps: int = 3,
+                      output_dir: str = None,
+                      phase1_results: dict = None,
+                      phase4_results: dict = None) -> dict:
+    """Multi-restart ensemble for Phase 5 rebinding.
+
+    For each snapshot, generate (n_reps - 1) additional starting structures
+    with random head rotation + offset, run rebinding MD, ensemble-average results.
+
+    Existing rep_0 (from standard Phase 5 run) is preserved.
+    """
+    from .config import (REBINDING_MD_NS, get_output_path, resolve_path)
+
+    if output_dir is None:
+        phase5_ext = get_output_path("phase5").parent / "phase5_extended"
+        if phase5_ext.exists() and any(phase5_ext.glob("*/snapshot_*")):
+            output_dir = str(phase5_ext)
+            logger.info(f"Using phase5_extended source: {output_dir}")
+        else:
+            output_dir = str(get_output_path("phase5"))
+    output_dir = Path(output_dir)
+    multi_dir = output_dir.parent / "phase5_multirestart"
+    multi_dir.mkdir(parents=True, exist_ok=True)
+
+    if phase1_results is None:
+        with open(get_output_path("phase1") / "phase1_results.json") as f:
+            phase1_results = json.load(f)
+    if phase4_results is None:
+        with open(get_output_path("phase4") / "phase4_md_results.json") as f:
+            phase4_results = json.load(f)
+
+    # For cross-rebinding selectivity, always use ALL standard tetraspanin targets
+    # as cross targets, regardless of what subset was given for multi-restart.
+    from .config import TARGETS as _ALL_TARGETS
+    all_targets = list(_ALL_TARGETS.keys())
+
+    summary = {"n_reps": n_reps, "targets": {}}
+    for target in target_names:
+        # cross_targets = all standard tetraspanins except own (so CD63 → [CD81, CD9])
+        cross_targets = [t for t in all_targets if t != target]
+        head = resolve_path(phase1_results[target].get(
+            "head_pdb", phase1_results[target]["epitope_pdb"]))
+
+        # Phase 4 dir for ITPs
+        p4 = phase4_results.get(target, {})
+        best_pc = next(iter(p4), None)
+        if not best_pc:
+            continue
+        p4_md_dir = get_output_path("phase4") / target / best_pc / "md"
+
+        target_summary = []
+        for snap_dir in sorted((output_dir / target).glob("snapshot_*")):
+            snap_idx = int(snap_dir.name.split("_")[-1])
+            cavity_gro = snap_dir / "frame.gro"
+            cavity_top = snap_dir / "topol.top"
+            if not (cavity_gro.exists() and cavity_top.exists()):
+                continue
+
+            logger.info(f"\n--- {target} snap_{snap_idx} multi-restart ---")
+            snap_results = {"snap_idx": snap_idx, "reps": [{"rep": 0, "source": str(snap_dir)}]}
+
+            for rep in range(1, n_reps):
+                rep_dir = multi_dir / target / f"snapshot_{snap_idx}" / f"rep_{rep}"
+                rep_dir.mkdir(parents=True, exist_ok=True)
+                pgro = rep_dir / "frame_perturbed.gro"
+                if not pgro.exists():
+                    # Pass Phase 4 tpr so source is PBC-recentered before perturbation
+                    p4_tpr = p4_md_dir / "md.tpr"
+                    pinfo = _perturb_head_position(
+                        cavity_gro, pgro, rep,
+                        tpr_for_center=p4_tpr if p4_tpr.exists() else None)
+                    snap_results.setdefault("perturbations", {})[str(rep)] = pinfo
+                # Copy ITPs and topology
+                for itp in snap_dir.glob("*.itp"):
+                    dst = rep_dir / itp.name
+                    if not dst.exists():
+                        shutil.copy2(str(itp), str(dst))
+                rep_top = rep_dir / "topol.top"
+                if not rep_top.exists():
+                    shutil.copy2(str(cavity_top), str(rep_top))
+
+                logger.info(f"  Rep {rep}: own rebinding (50 ns)")
+                own_res = _run_rebinding_md(
+                    pgro, rep_top, head,
+                    rep_dir / "rebind_own",
+                    time_ns=REBINDING_MD_NS,
+                    p4_md_dir=p4_md_dir,
+                    is_own_target=True)
+
+                rep_entry = {"rep": rep, "rebind_own": own_res}
+                for ot in cross_targets:
+                    cross_head = resolve_path(phase1_results[ot].get(
+                        "head_pdb", phase1_results[ot]["epitope_pdb"]))
+                    logger.info(f"  Rep {rep}: cross rebinding {ot}")
+                    cross_res = _run_rebinding_md(
+                        pgro, rep_top, cross_head,
+                        rep_dir / f"rebind_{ot}",
+                        time_ns=REBINDING_MD_NS,
+                        p4_md_dir=p4_md_dir,
+                        is_own_target=False)
+                    rep_entry[f"rebind_{ot}"] = cross_res
+                snap_results["reps"].append(rep_entry)
+            target_summary.append(snap_results)
+
+        summary["targets"][target] = target_summary
+
+    out_file = multi_dir / "multirestart_summary.json"
+    out_file.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    logger.info(f"\nMulti-restart summary saved → {out_file}")
+    return summary
+
+
+# ════════════════════════════════════════════════════════════════
+# A6: Bootstrap CI integration into selectivity analysis
+# ════════════════════════════════════════════════════════════════
+
+def compute_bootstrap_ci_for_selectivity(snapshot_results: list,
+                                         cross_target: str,
+                                         n_bootstrap: int = None,
+                                         ci: float = None):
+    """A6: Compute SI 95% CI via bootstrap from existing snapshot results."""
+    from .config import BOOTSTRAP_N_RESAMPLES, BOOTSTRAP_CI
+    from .utils_analysis import bootstrap_selectivity_index
+
+    n_bootstrap = n_bootstrap or BOOTSTRAP_N_RESAMPLES
+    ci = ci or BOOTSTRAP_CI
+
+    own_rmsds = []
+    cross_rmsds = []
+    for snap in snapshot_results:
+        own = snap.get("rebind_own", {})
+        cross = snap.get(f"rebind_{cross_target}", {})
+        if own.get("rmsd_mean_A") is not None:
+            own_rmsds.append(own["rmsd_mean_A"])
+        if cross.get("rmsd_mean_A") is not None:
+            cross_rmsds.append(cross["rmsd_mean_A"])
+
+    return bootstrap_selectivity_index(own_rmsds, cross_rmsds,
+                                       n_bootstrap=n_bootstrap, ci=ci)
+
+
+# ════════════════════════════════════════════════════════════════
+# B8: Multi-pose rebinding (multiple head conformers × replicates)
+# ════════════════════════════════════════════════════════════════
+
+def run_multipose_rebinding(target: str, cavity_gro, cavity_top,
+                             head_conformers: list, n_replicates: int = 3,
+                             time_ns: float = 50.0,
+                             work_dir: Path = None,
+                             p4_md_dir: Path = None) -> dict:
+    """B8: For each head conformer × n replicates, run rebinding and aggregate.
+
+    Reference: Hospital 2015 (Adv Bioinform) — ensemble docking robustness.
+    """
+    work_dir = Path(work_dir or ".")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    all_results = []
+
+    for ci_, conf in enumerate(head_conformers):
+        for rep in range(n_replicates):
+            sub = work_dir / f"conf_{ci_}_rep_{rep}"
+            sub.mkdir(parents=True, exist_ok=True)
+            logger.info(f"  Multi-pose rebinding: conformer={ci_}, rep={rep}")
+            try:
+                r = _run_rebinding_md(
+                    cavity_gro, cavity_top, conf, sub,
+                    time_ns=time_ns, p4_md_dir=p4_md_dir,
+                    is_own_target=True,
+                )
+                r["conformer_idx"] = ci_
+                r["rep"] = rep
+                all_results.append(r)
+            except Exception as e:
+                all_results.append({"conformer_idx": ci_, "rep": rep,
+                                     "error": str(e)})
+    # Ensemble statistics
+    valid_rmsds = [r["rmsd_mean_A"] for r in all_results
+                   if r.get("rmsd_mean_A") is not None]
+    if valid_rmsds:
+        import numpy as np
+        rmsd_mean = float(np.mean(valid_rmsds))
+        rmsd_std = float(np.std(valid_rmsds))
+    else:
+        rmsd_mean = rmsd_std = None
+    return {
+        "ensemble_rmsd_mean": rmsd_mean,
+        "ensemble_rmsd_std": rmsd_std,
+        "n_total": len(all_results),
+        "n_valid": len(valid_rmsds),
+        "per_run": all_results,
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# B9: FEP framework (Free Energy Perturbation) — stub
+# ════════════════════════════════════════════════════════════════
+
+def setup_fep_calculation(cavity_gro, cavity_top, template_pdb,
+                           work_dir: Path, lambda_windows: int = None,
+                           ns_per_window: int = None) -> dict:
+    """B9: Set up Free Energy Perturbation calculation.
+
+    Computes absolute binding free energy via N λ-windows of decoupling.
+    Far more accurate than MM-GBSA but ~30 days/replicate.
+
+    Reference: Mey 2020 LiveCoMS; Cournia 2020 JCTC.
+
+    NOTE: Full FEP requires GROMACS-FEP setup (lambda topology + alchemical
+    free energy mdp files). This function generates a SCAFFOLD for manual
+    completion — the lambda windows are prepared but not auto-run, since
+    they take 1-3 weeks per system.
+    """
+    from .config import FEP_LAMBDA_WINDOWS, FEP_NS_PER_WINDOW
+    import numpy as np
+
+    lambda_windows = lambda_windows or FEP_LAMBDA_WINDOWS
+    ns_per_window = ns_per_window or FEP_NS_PER_WINDOW
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate λ values: 21 evenly spaced [0, 1]
+    lambdas = np.linspace(0, 1, lambda_windows)
+
+    summary = {
+        "status": "scaffold_only",
+        "method": "FEP / Alchemical Free Energy",
+        "lambda_windows": int(lambda_windows),
+        "ns_per_window": int(ns_per_window),
+        "total_ns": float(lambda_windows * ns_per_window),
+        "estimated_runtime_days": float(lambda_windows * ns_per_window / 100),  # ~100 ns/day
+        "lambda_values": lambdas.tolist(),
+        "work_dir": str(work_dir),
+        "next_steps": [
+            "Generate λ-topology files using `gmx grompp` per window with "
+            "free_energy=yes, init_lambda_state=i in fep.mdp",
+            "Run mdrun for each λ window in parallel",
+            "Use `gmx bar` or alchemlyb (BAR/MBAR) for free energy estimation",
+            "Estimated runtime: ~1-3 weeks per system on single GPU",
+        ],
+        "alternative_for_quick_estimate": "MM-GBSA via gmx_MMPBSA (already in pipeline)",
+    }
+
+    # Write FEP setup template
+    fep_mdp_template = f"""\
+; FEP/alchemical mdp (stub — fill λ-windows for production)
+free-energy              = yes
+init-lambda-state        = 0
+delta-lambda             = 0
+calc-lambda-neighbors    = 1
+fep-lambdas              = {' '.join(f'{x:.4f}' for x in lambdas)}
+nstdhdl                  = 100
+dhdl-print-energy        = total
+; ... standard MD settings (T, P, time, etc.) ...
+nsteps                   = {ns_per_window * 500000}  ; {ns_per_window} ns at 2 fs
+"""
+    (work_dir / "fep_template.mdp").write_text(fep_mdp_template, encoding="utf-8")
+    (work_dir / "README_FEP.txt").write_text(
+        "FEP setup scaffold generated. To run:\n"
+        "1. Copy cavity_gro/cavity_top to this dir\n"
+        "2. Run grompp + mdrun per λ window (21 windows × 5 ns)\n"
+        "3. Analyze with `gmx bar` or alchemlyb\n"
+        f"4. Total compute: {summary['estimated_runtime_days']:.1f} days/replicate\n",
+        encoding="utf-8")
+
+    return summary

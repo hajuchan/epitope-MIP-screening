@@ -5,6 +5,7 @@ __pycache__/
 
 # Results — exclude large files (MD trajectories, docking outputs)
 results/
+results_*
 
 # GROMACS stray files (from manual debugging)
 mdout.mdp

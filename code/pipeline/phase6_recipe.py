@@ -112,19 +112,85 @@ def run_phase5(phase3_results: dict = None,
         )
         recipes[target] = recipe
 
+        # A7: NIP (Non-Imprinted Polymer) control recipe — same as MIP minus template
+        from .config import PHASE6_GENERATE_NIP
+        if PHASE6_GENERATE_NIP:
+            nip_recipe = _generate_nip_recipe(recipe)
+            recipes[target + "_NIP"] = nip_recipe
+
         # Log recipe
         _log_recipe(target, recipe)
 
-    # Save recipes
+    # Save recipes (one combined JSON)
     with open(output_dir / "phase6_recipes.json", "w") as f:
         json.dump(recipes, f, indent=2)
 
-    # Generate human-readable protocol
+    # A7: Per-target recipe file (MIP + NIP in SAME file per CD)
+    for target in target_names:
+        if target not in recipes:
+            continue
+        target_recipes = {target: recipes[target]}
+        if PHASE6_GENERATE_NIP and (target + "_NIP") in recipes:
+            target_recipes[target + "_NIP"] = recipes[target + "_NIP"]
+        per_target_path = output_dir / f"{target}_recipe.txt"
+        _write_protocol(target_recipes, per_target_path)
+        logger.info(f"  Per-target recipe ({target} MIP + NIP) → {per_target_path}")
+
+    # Combined protocol (all targets)
     protocol_path = output_dir / "synthesis_protocol.txt"
     _write_protocol(recipes, protocol_path)
-    logger.info(f"\nProtocol → {protocol_path}")
+    logger.info(f"\nCombined protocol → {protocol_path}")
 
     return recipes
+
+
+def _generate_nip_recipe(mip_recipe: dict) -> dict:
+    """A7: Generate NIP (Non-Imprinted Polymer) control from MIP recipe.
+
+    NIP is identical synthesis BUT WITHOUT template addition.
+    Used as denominator for IF (Imprinting Factor = MIP/NIP).
+
+    Reference: Vasapollo 2011 (Int J Mol Sci); Mosbach 1994 (Trends Biotechnol).
+    """
+    import copy
+    nip = copy.deepcopy(mip_recipe)
+    nip["target"] = nip.get("target", "Unknown") + "_NIP"
+    nip["target_description"] = (
+        (nip.get("target_description") or "") +
+        " — NIP control (no template)"
+    )
+    nip["template"] = None
+    nip["is_nip"] = True
+
+    # Filter out template-related steps from protocol
+    if "protocol" in nip and "steps" in nip["protocol"]:
+        filtered_steps = []
+        for step in nip["protocol"]["steps"]:
+            s_lower = step.lower()
+            # Skip steps that explicitly add/remove template
+            if any(kw in s_lower for kw in [
+                "epitope", "template", "glycopeptide", "boronate-reversal",
+                "boronate reversal", "pba competition", "phenylboronic acid",
+                "fructose competition",
+            ]):
+                continue
+            filtered_steps.append(step)
+        nip["protocol"]["steps"] = filtered_steps
+
+    # Update notes
+    nip_note = (
+        "NIP CONTROL — Non-Imprinted Polymer:\n"
+        "  • Identical synthesis to MIP BUT WITHOUT template addition\n"
+        "  • Glutaraldehyde activation + NaBH3CN reduction still performed\n"
+        "    (gives identical surface chemistry to MIP)\n"
+        "  • Use as denominator for Imprinting Factor: IF = Binding_MIP / Binding_NIP\n"
+        "  • Target IF > 3 (good MIP); IF > 5-10 (excellent)\n"
+        "  • Vasapollo 2011 / Mosbach 1994 — standard MIP validation"
+    )
+    if "notes" not in nip or not isinstance(nip.get("notes"), list):
+        nip["notes"] = []
+    nip["notes"].insert(0, nip_note)
+    return nip
 
 
 def _select_best_pc(p3_data: dict, p4_data: dict) -> dict:
@@ -190,16 +256,160 @@ def _generate_recipe(target: str, monomers: list,
 
     # Special notes
     notes = []
+
+    # ── Polymerization compatibility check (Liu 2017 Nat. Protoc.) ──
+    from .config import (is_polymerization_compatible, synthesis_pH_window,
+                         reactivity_ratio_product, QE_PARAMS)
+    compatible, dominant, conflicts = is_polymerization_compatible(monomers)
+    if not compatible:
+        notes.append(
+            "❌ POLYMERIZATION COMPATIBILITY ISSUE: " + " | ".join(conflicts) +
+            " Choose ONE polymerization chemistry path per pot: "
+            "(a) sol-gel for silane monomers (Liu 2017 boronate-anchored "
+            "oriented imprinting); (b) free-radical for vinyl monomers."
+        )
+
+    # ── pH stability check (intersection of monomer pH ranges) ──
+    pH_min, pH_max, pH_rec = synthesis_pH_window(monomers)
+    if pH_min is not None:
+        if pH_rec is None:
+            notes.append(
+                f"❌ NO COMMON pH RANGE: monomers' stability windows do not "
+                f"overlap (max-min = {pH_min:.1f}–{pH_max:.1f}). "
+                "Some monomers must be removed or substituted."
+            )
+        else:
+            notes.append(
+                f"✓ Recommended synthesis pH: {pH_rec:.1f} "
+                f"(common stability range: {pH_min:.1f}–{pH_max:.1f})"
+            )
+
+    # ── Vinyl reactivity ratio check (Q-e scheme, radical only) ──
+    vinyl_ms = [m for m in monomers if m in QE_PARAMS]
+    if dominant == "radical" and len(vinyl_ms) >= 2:
+        # Pairwise r1·r2 product
+        bad_pairs = []
+        ideal_pairs = []
+        for i, m1 in enumerate(vinyl_ms):
+            for m2 in vinyl_ms[i + 1:]:
+                rr = reactivity_ratio_product(m1, m2)
+                if rr is None: continue
+                if rr < 0.05 or rr > 20:
+                    bad_pairs.append((m1, m2, rr))
+                elif 0.1 < rr < 10:
+                    ideal_pairs.append((m1, m2, rr))
+        if bad_pairs:
+            pair_str = ", ".join(f"{a}/{b} (r1·r2={r:.2f})" for a, b, r in bad_pairs)
+            notes.append(
+                f"⚠ REACTIVITY MISMATCH (Q-e scheme): {pair_str}. "
+                f"r1·r2 outside [0.1, 10] → block-like or homopolymer instead of "
+                f"random copolymer (Alfrey-Price 1947). Consider monomer substitution."
+            )
+        if ideal_pairs:
+            pair_str = ", ".join(f"{a}/{b} (r1·r2={r:.2f})" for a, b, r in ideal_pairs)
+            notes.append(
+                f"✓ Vinyl co-polymerization OK for: {pair_str}"
+            )
+
+    # ── Serum cross-reactivity warning (Tier 5 critical) ──
+    has_boronate = any(m in {"APBA", "VPBA", "FPBA", "AAPBA"} for m in monomers)
+    if has_boronate:
+        notes.append(
+            "⚠ SERUM CROSS-REACTIVITY (boronate MIPs): Human serum contains "
+            "highly sialylated proteins that compete with target binding. "
+            "Major interferents (per liter): transferrin (3 g, 4 sialic), "
+            "α1-acid glycoprotein (1 g, 14 sialic!), haptoglobin (1-3 g, 5-7 "
+            "sialic), fetuin (<0.1 g, 8 sialic). Mandatory pretreatment: "
+            "(a) ultracentrifugation (100,000 g) for EV isolation BEFORE MIP "
+            "capture; OR (b) pre-clearance with anti-transferrin/fetuin "
+            "antibody beads; OR (c) size-exclusion chromatography. "
+            "Direct serum capture without pretreatment will give false positives."
+        )
+
+    # ── EV-specific consideration ──
+    if target.startswith("CD") and target in ("CD63", "CD81", "CD9"):
+        notes.append(
+            f"EV CONTEXT: {target} is a transmembrane tetraspanin on EV surface "
+            "(~100 nm vesicle). MIP cavity designed from soluble head epitope "
+            "may not match steric access to native membrane-anchored protein. "
+            "Validate with intact EVs (not just recombinant protein) via "
+            "QCM-D and TIRF microscopy."
+        )
+
+    # ── N-glycan heterogeneity caveat (for dual-imprinting targets) ──
+    if has_boronate and target_cfg.get("n_glycan_sites", 0) > 0:
+        notes.append(
+            "GLYCAN HETEROGENEITY: N-glycans on the same site can be "
+            "high-mannose (no sialic acid → no boronate binding), complex "
+            "(with sialic acid → binds), or hybrid. Only ~50-70% of CD63 "
+            "N-glycans are sialylated complex-type. Cancer-derived EVs often "
+            "have altered sialylation (Cancer Cell 2020). Calibrate MIP "
+            "against the specific EV source intended for diagnostic use."
+        )
+
+    # ── Initiator suggestion ──
+    if dominant == "silane":
+        notes.append(
+            "Synthesis: sol-gel polycondensation. Catalyst: 1 M HCl (acid-catalyzed) "
+            "or 1 M NH3 (base-catalyzed). Polymerization at RT, 16-24 h, no initiator needed."
+        )
+    elif dominant == "radical":
+        # B10: Compute initiator mass from monomer mol total
+        from .config import INITIATOR_MOL_PERCENT
+        from .utils_analysis import calculate_initiator_mass
+        # Estimate total monomer mol (~5 mmol for 100 mg NP scale, default)
+        total_mol = 0.005  # 5 mmol for standard 100 mg NP synthesis
+        if any(m in {"VPBA", "AAPBA"} for m in monomers):
+            mass_info = calculate_initiator_mass(
+                total_mol, "Irgacure_2959", INITIATOR_MOL_PERCENT)
+            notes.append(
+                f"Synthesis: free-radical polymerization. Initiator: "
+                f"{mass_info['initiator_mass_mg']} mg Irgacure 2959 "
+                f"({INITIATOR_MOL_PERCENT} mol% of {total_mol*1000:.1f} mmol "
+                f"total monomer; Odian 2004 standard 0.5-2 mol%). "
+                "UV 365 nm, RT — RT required for boronate stability. "
+                "Solvent: acetonitrile/PBS (3:1). N2 atmosphere."
+            )
+        else:
+            mass_aibn = calculate_initiator_mass(
+                total_mol, "AIBN", INITIATOR_MOL_PERCENT)
+            mass_irg = calculate_initiator_mass(
+                total_mol, "Irgacure_2959", INITIATOR_MOL_PERCENT)
+            notes.append(
+                f"Synthesis: free-radical polymerization. Initiator options: "
+                f"({mass_aibn['initiator_mass_mg']} mg AIBN, thermal 60°C 16h) "
+                f"or ({mass_irg['initiator_mass_mg']} mg Irgacure 2959, "
+                f"UV 365 nm RT). Both at {INITIATOR_MOL_PERCENT} mol% of "
+                f"{total_mol*1000:.1f} mmol total monomer. "
+                "Solvent: acetonitrile (porogen). N2 atmosphere."
+            )
+
+    # APBA polymerizability warning (APBA itself is NOT polymerizable)
     if "APBA" in monomers:
         notes.append(
-            "APBA (boronic acid) provides glycan-selective recognition. "
-            f"Target {target} has {target_cfg.get('n_glycan_sites', 0)} "
-            "N-glycan sites. Ensure pH 7.4 for optimal boronate-diol binding."
+            "⚠️ APBA NOTE: 3-Aminophenylboronic acid has no vinyl group and "
+            "cannot undergo free-radical co-polymerization. Use FPBA (surface "
+            "grafted via Schiff base) for sol-gel pathways, or VPBA "
+            "(4-vinylphenylboronic acid) / AAPBA for radical pathways. "
+            "Phase 3 scored APBA on binding affinity only — chemistry "
+            "manually validated downstream."
         )
-    if target_cfg.get("n_glycan_sites", 0) == 0 and "APBA" in monomers:
+
+    # Glycan layer rationale
+    n_gly = target_cfg.get("n_glycan_sites", 0)
+    if n_gly > 0:
         notes.append(
-            f"WARNING: {target} is non-glycosylated. APBA may not provide "
-            "additional selectivity."
+            f"Glycan recognition layer: {target} has {n_gly} N-glycan site(s). "
+            f"For optimal recognition, use FPBA-grafted NP support + glycopeptide "
+            f"template at pH 8.5 (boronate-diol cyclic ester optimum). "
+            f"GFN2-xTB L1 prediction: {n_gly}-valent ΔΔG ≈ "
+            f"-{3.29*n_gly:.1f} kcal/mol vs glycan-free target."
+        )
+    if n_gly == 0 and ("APBA" in monomers or "VPBA" in monomers or "FPBA" in monomers):
+        notes.append(
+            f"WARNING: {target} has 0 N-glycan sites → boronate-glycan "
+            "recognition not applicable. Boronate monomer acts only as "
+            "π-stacking + electrostatic functional monomer."
         )
     # Teixeira 2021: dual-epitope for glycosylated targets
     from .config import DUAL_EPITOPE_CD63, GLYCAN_EPITOPE

@@ -119,13 +119,36 @@ def _prepare_single_target(name: str, cfg: dict,
     ecl2_pdb = assign_protonation_states(ecl2_pdb, ph=MD_SOLVENT_PH)
     result["ecl2_pdb"] = str(ecl2_pdb)
 
+    # 3b-A1: Multi-epitope candidate evaluation (if enabled and candidates listed)
+    from .config import PHASE1_EVALUATE_MULTI_EPITOPE
+    selected_head_range = cfg["head_residues"]  # legacy default
+    if PHASE1_EVALUATE_MULTI_EPITOPE and cfg.get("head_candidates"):
+        logger.info(f"[{name}] A1: Evaluating {len(cfg['head_candidates'])} "
+                    f"epitope candidates...")
+        candidates = evaluate_epitope_candidates(name, cfg, full_pdb, target_dir,
+                                                  skip_md=True)
+        result["epitope_candidates"] = candidates
+        # Pick highest quality_score candidate
+        if candidates and "error" not in candidates[0]:
+            best = candidates[0]
+            selected_head_range = tuple(best["range"])
+            logger.info(f"[{name}]   → Best: '{best['name']}' "
+                        f"{selected_head_range} score={best['quality_score']}")
+            for c in candidates:
+                logger.info(f"[{name}]     • {c.get('name','?')}: "
+                            f"score={c.get('quality_score','?')}, "
+                            f"GRAVY={c.get('gravy',0):.2f}, "
+                            f"glycan_in_head={c.get('glycan_in_head', [])}")
+            result["selected_head_candidate"] = best["name"]
+            result["selected_head_range"] = list(selected_head_range)
+
     # 3b. Extract head region for synthesis template (16-mer)
     logger.info(f"[{name}] Extracting head region for synthesis template "
-                f"(residues {cfg['head_residues']})...")
+                f"(residues {selected_head_range})...")
     head_pdb = target_dir / f"{name}_head.pdb"
     extract_epitope(
         full_pdb, cfg.get("chain", "A"),
-        cfg["head_residues"], head_pdb
+        selected_head_range, head_pdb
     )
     result["head_pdb"] = str(head_pdb)
     result["epitope_pdb"] = str(ecl2_pdb)  # docking uses ECL2
@@ -143,6 +166,37 @@ def _prepare_single_target(name: str, cfg: dict,
     _log_properties(name, result["properties"])
     logger.info(f"[{name}] ECL2: {len(ecl2_seq)} residues (docking receptor)")
     logger.info(f"[{name}] Head: {len(head_seq)} residues (synthesis template)")
+
+    # B1/B2: Compute SASA + GRAVY for selected head
+    from .config import (PHASE1_COMPUTE_SASA, PHASE1_COMPUTE_GRAVY,
+                          EPITOPE_GRAVY_MIN, EPITOPE_GRAVY_MAX,
+                          EPITOPE_SASA_MIN_A2)
+    from .utils_analysis import (gravy_index, compute_sasa_per_residue)
+
+    quality = {}
+    if PHASE1_COMPUTE_GRAVY:
+        gravy = gravy_index(head_seq)
+        balance = ("too_hydrophobic" if gravy > EPITOPE_GRAVY_MAX
+                   else "too_hydrophilic" if gravy < EPITOPE_GRAVY_MIN
+                   else "balanced")
+        quality["gravy"] = round(gravy, 2)
+        quality["balance"] = balance
+        logger.info(f"[{name}] B2: GRAVY={gravy:+.2f} ({balance})")
+
+    if PHASE1_COMPUTE_SASA:
+        try:
+            sasa = compute_sasa_per_residue(head_pdb, selected_head_range)
+            quality["sasa"] = sasa
+            if sasa.get("mean_sasa_A2") is not None:
+                accessible = sasa["mean_sasa_A2"] >= EPITOPE_SASA_MIN_A2
+                quality["surface_accessible"] = accessible
+                logger.info(f"[{name}] B1: SASA mean={sasa['mean_sasa_A2']:.1f} Å² "
+                            f"(threshold {EPITOPE_SASA_MIN_A2}, "
+                            f"accessible: {'✓' if accessible else '✗'})")
+        except Exception as e:
+            logger.warning(f"[{name}] B1 SASA failed: {e}")
+
+    result["epitope_quality"] = quality
 
     # 5. BLAST uniqueness check (Bossi 2021)
     from .utils_structure import check_epitope_uniqueness
@@ -228,14 +282,33 @@ def _extract_md_conformers(md_dir: Path, output_dir: Path,
     conformers = []
     try:
         # Get trajectory length
-        from .config import EPITOPE_MD_TIME_NS
+        from .config import EPITOPE_MD_TIME_NS, ENSEMBLE_CLUSTERING_METHOD
         total_ps = EPITOPE_MD_TIME_NS * 1000  # ns to ps
-        # Sample from last 75% of trajectory (skip equilibration)
-        start_ps = int(total_ps * 0.25)
-        interval = (total_ps - start_ps) / (n_conformers + 1)
 
-        for i in range(n_conformers):
-            time_ps = int(start_ps + (i + 1) * interval)
+        # A2: Choose conformer selection method
+        time_points_ps = []
+        if ENSEMBLE_CLUSTERING_METHOD == "kmedoids":
+            try:
+                from .utils_analysis import cluster_conformers_kmedoids
+                kmedoid_result = cluster_conformers_kmedoids(
+                    str(xtc), str(tpr), n_clusters=n_conformers, stride=10)
+                if kmedoid_result and kmedoid_result.get("frames"):
+                    # frames are frame indices; convert to time using 10 ps per frame
+                    time_points_ps = [int(f * 10) for f in kmedoid_result["frames"]]
+                    logger.info(f"  A2: K-medoids selected {len(time_points_ps)} "
+                                f"diverse conformers (frame indices: "
+                                f"{kmedoid_result['frames']})")
+            except Exception as e:
+                logger.warning(f"  A2 K-medoids failed ({e}); using uniform sampling")
+
+        if not time_points_ps:
+            # Legacy uniform sampling (fallback)
+            start_ps = int(total_ps * 0.25)
+            interval = (total_ps - start_ps) / (n_conformers + 1)
+            time_points_ps = [int(start_ps + (i + 1) * interval)
+                              for i in range(n_conformers)]
+
+        for i, time_ps in enumerate(time_points_ps):
             conf_pdb = output_dir / f"conf_{i}.pdb"
 
             # Extract single frame using gmx trjconv
@@ -312,3 +385,90 @@ def _log_properties(name: str, props: dict):
     logger.info(f"  Aromatic: {props.get('aromatic_residues', 'N/A')}")
     logger.info(f"  N-glycan: {props.get('n_glycan_sites_known', 'N/A')} "
                 f"(sequons: {props.get('n_glyco_sequons_detected', 'N/A')})")
+
+
+# ════════════════════════════════════════════════════════════════
+# A1: Multi-epitope candidate evaluation + B1/B2 quality scoring
+# ════════════════════════════════════════════════════════════════
+
+def evaluate_epitope_candidates(target: str, target_cfg: dict,
+                                 pdb_path, output_dir: Path,
+                                 skip_md: bool = True) -> dict:
+    """A1+B1+B2: Evaluate all head_candidates for a target.
+
+    For each candidate: extract sequence, compute GRAVY, SASA, stability
+    proxy. Rank by composite quality score; select best.
+
+    Returns list of evaluated candidates sorted by quality_score (desc).
+    """
+    from .utils_analysis import check_epitope_quality
+
+    candidates = target_cfg.get("head_candidates", [])
+    if not candidates:
+        # Fallback to legacy single head_residues
+        candidates = [{
+            "range": target_cfg["head_residues"],
+            "name": "head_canonical",
+            "glycan_in": [],
+        }]
+
+    evaluated = []
+    for cand in candidates:
+        rng = tuple(cand["range"])
+        try:
+            sequence = _extract_sequence(pdb_path, rng)
+        except Exception as e:
+            evaluated.append({**cand, "error": f"extraction failed: {e}"})
+            continue
+        # Quality check (GRAVY + SASA)
+        quality = check_epitope_quality(sequence, pdb_path=pdb_path,
+                                         residue_range=rng)
+        # Glycan colocalization bonus
+        glycan_in_head = [g for g in target_cfg.get("n_glycan_positions", [])
+                          if rng[0] <= g <= rng[1]]
+        glycan_score = len(glycan_in_head) * 0.5  # +0.5 per glycan in head
+        composite_score = quality["quality_score"] + glycan_score
+
+        entry = {
+            **cand,
+            "sequence": sequence,
+            "gravy": quality["gravy"],
+            "balance": quality["balance"],
+            "sasa": quality.get("sasa"),
+            "surface_accessible": quality.get("surface_accessible"),
+            "glycan_in_head": glycan_in_head,
+            "glycan_bonus": glycan_score,
+            "quality_score": composite_score,
+        }
+        evaluated.append(entry)
+
+    # Sort by score (desc)
+    evaluated.sort(key=lambda e: e.get("quality_score", -float("inf")),
+                    reverse=True)
+    return evaluated
+
+
+def _extract_sequence(pdb_path, residue_range: tuple) -> str:
+    """Extract amino acid sequence from PDB within residue range."""
+    aa3to1 = {
+        "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C",
+        "GLU":"E","GLN":"Q","GLY":"G","HIS":"H","ILE":"I",
+        "LEU":"L","LYS":"K","MET":"M","PHE":"F","PRO":"P",
+        "SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V",
+    }
+    seen = set()
+    seq = []
+    start, end = residue_range
+    with open(pdb_path) as f:
+        for line in f:
+            if not line.startswith("ATOM"):
+                continue
+            try:
+                resnum = int(line[22:26].strip())
+                resname = line[17:20].strip()
+            except (ValueError, IndexError):
+                continue
+            if start <= resnum <= end and (resnum, resname) not in seen:
+                seen.add((resnum, resname))
+                seq.append(aa3to1.get(resname, "X"))
+    return "".join(seq)
