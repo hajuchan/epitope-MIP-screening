@@ -1327,11 +1327,12 @@ def _generate_silane_itp(name: str, smiles: str, output_dir: Path) -> dict:
     angles_section = "\n[ angles ]\n" + "\n".join(aangle_lines) + "\n" if aangle_lines else ""
 
     itp_path.write_text(
-        f"; {name} — PolCA Si (Jorge 2021) + GAFF2\n"
+        f"; {name} - PolCA Si (Jorge 2021) + GAFF2\n"
         f"{atomtypes_section}"
         f"[ moleculetype ]\n{name}    3\n\n[ atoms ]\n"
         + "\n".join(alines) + "\n\n"
-        + bonds_section + angles_section)
+        + bonds_section + angles_section,
+        encoding="utf-8")
 
     gro_path = output_dir / f"{name}.gro"
     gl = [f"{name} silane", f" {n_atoms}"]
@@ -1341,7 +1342,7 @@ def _generate_silane_itp(name: str, smiles: str, output_dir: Path) -> dict:
         gl.append(f"{1:5d}{name:>5s}{a.GetSymbol()+str(i+1):>5s}{i+1:5d}"
                   f"{pos.x/10:8.3f}{pos.y/10:8.3f}{pos.z/10:8.3f}")
     gl.append("   5.00000   5.00000   5.00000")
-    gro_path.write_text("\n".join(gl) + "\n")
+    gro_path.write_text("\n".join(gl) + "\n", encoding="utf-8")
 
     logger.info(f"  {name}: PolCA topology ({si_type}, "
                 f"sigma={si_lj['sigma']}, eps={si_lj['eps']})")
@@ -1351,7 +1352,7 @@ def _generate_silane_itp(name: str, smiles: str, output_dir: Path) -> dict:
 
 def _parse_mmpbsa_results(dat_path: Path) -> dict:
     """Parse gmx_MMPBSA FINAL_RESULTS file."""
-    text = Path(dat_path).read_text()
+    text = Path(dat_path).read_text(encoding="utf-8", errors="replace")
     results = {}
 
     # gmx_MMPBSA uses Δ (unicode delta) prefix
