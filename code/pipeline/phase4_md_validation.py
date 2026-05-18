@@ -66,9 +66,28 @@ def run_phase4(phase1_results: dict = None,
     time_ns = MD_QUICK_NS if quick else MD_PRODUCTION_NS
     total_monomers = EPITOPE_MONOMER_MOLAR_RATIO  # 20
 
+    # Per-target resume: load partial results if previous run was interrupted
+    partial_json = output_dir / "phase4_md_results.json"
     results = {}
+    if partial_json.exists():
+        try:
+            with open(partial_json) as f:
+                results = json.load(f)
+            done_targets = [t for t in results
+                            if isinstance(results.get(t), dict) and results[t]]
+            if done_targets:
+                logger.info(f"Resume: loaded existing Phase 4 results for "
+                            f"{done_targets} — skipping these targets")
+        except Exception as e:
+            logger.warning(f"Could not parse existing phase4_md_results.json: {e}")
+            results = {}
 
     for target in target_names:
+        # Skip if already completed in a prior run
+        if isinstance(results.get(target), dict) and results[target]:
+            logger.info(f"\n{'='*20} Phase 4: {target} (RESUMED — already done) {'='*20}")
+            continue
+
         p3_data = phase3_results.get(target, {})
         if "error" in p3_data:
             continue
@@ -149,9 +168,17 @@ def run_phase4(phase1_results: dict = None,
 
         results[target] = target_results
 
+        # Per-target incremental save — survives crashes
+        try:
+            with open(output_dir / "phase4_md_results.json", "w") as f:
+                json.dump(results, f, indent=2, default=str)
+            logger.info(f"  Phase 4: {target} complete → saved partial results")
+        except Exception as e:
+            logger.warning(f"  Failed to save partial Phase 4 results: {e}")
+
     # Cross-reactivity removed — Phase 6 cavity rebinding handles selectivity
 
-    # Save
+    # Final save (in case all 3 targets ran in one go)
     with open(output_dir / "phase4_md_results.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
 

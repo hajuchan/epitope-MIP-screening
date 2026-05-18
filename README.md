@@ -90,7 +90,7 @@ CD63에는 head 후보가 4개 (canonical 16-mer + N130/N150/**N172** glycan 주
 │ • Head 16-mer template + 25개 모노머 PACKMOL 배치 + 350 ns MD│
 │ • PolCA force field (Si) + GAFF2 (vinyl) + amber99sb-ildn    │
 │ • A5/B7: solvent sweep (water / EtOH-water / DMSO)           │
-│ • B6: ratio sweep (5 preset)                                 │
+│ • ~~B6: ratio sweep~~ (DISABLED — redundant with EBN ratio)  │
 │ • Contact freq · residence time · EBN · HBNMax · per-atom RDF│
 │ • MM-GBSA + per-residue decomposition                        │
 │ • Q1→Q4 convergence + PBC centering (trjconv -pbc mol)       │
@@ -364,9 +364,9 @@ results/phase3/
 
 `MD_SOLVENT_SWEEP = True` 시 water / EtOH-water 3:1 / DMSO 3개 solvent에서 MD 반복 → best solvent 자동 선택 (cavity compactness, RMSD, MM-GBSA 기준).
 
-### 6.5 B6: Ratio sweep
+### 6.5 ~~B6: Ratio sweep~~ (DISABLED)
 
-`MD_RATIO_SWEEP = True` 시 functional:crosslinker 비율 5개 preset (3:7 / 4:6 / 5:5 / 6:4 / 7:3) 비교.
+원래 5 preset (1:1:1, 2:1:1, 3:1:1, 1:2:1, 1:1:2)을 30 ns 별도 MD로 비교했으나, **EBN 기반 optimal_ratio (§6.6)와 중복**이고 Phase 6 recipe가 EBN ratio만 사용했으므로 `PHASE4_RATIO_SWEEP = False`로 비활성화. ~150 ns × 3 target = ~9 hr compute 절약.
 
 ### 6.6 합성 비율 결정 (EBN 기반)
 
@@ -593,7 +593,7 @@ epoxy    ↔ any matrix                (side-chain covalent)
 | **B2** | GRAVY hydrophilicity balance | Phase 1 |
 | **B3** | Decoy baseline + enrichment factor | Phase 2 |
 | **B5** | DFT validation hook (Psi4 stub) | Phase 3 |
-| **B6** | Functional:crosslinker ratio sweep | Phase 4 |
+| ~~B6~~ | ~~Functional:crosslinker ratio sweep~~ (disabled — redundant with EBN ratio) | Phase 4 |
 | **B7** | Multi-solvent comparison | Phase 4 |
 | **B8** | Multi-pose rebinding ensemble | Phase 5 |
 | **B9** | FEP framework (stub) | Phase 5 |
@@ -686,7 +686,7 @@ Monomer_screening_in_Bio/
 
 ### 12.2 Level 2 — Algorithm correctness
 
-- 새 기능 실제 호출 (A1, A2, A3, A6, A7, B1, B2, B3, B5, B6, B7, B8, B10)
+- 새 기능 실제 호출 (A1, A2, A3, A6, A7, B1, B2, B3, B5, B7, B8, B10) — B6는 disabled
 - Config flag → 행동 일치 (예: `nsga2` default → NSGA-II 호출)
 - Fallback chain 정상 (pymoo 없으면 BO, BO 없으면 greedy)
 - 의도된 metric 출력 (Pareto front, bootstrap CI, GRAVY 등)

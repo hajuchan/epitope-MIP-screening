@@ -118,12 +118,33 @@ _PHASE_RESULT_FILES = {
 }
 
 
-def _check_phase_completed(phase_num: int, output_dir: str) -> bool:
-    """Check if a phase's result file exists (= already completed)."""
+def _check_phase_completed(phase_num: int, output_dir: str,
+                           target_names: list = None) -> bool:
+    """Check if a phase's result file exists AND covers all requested targets.
+
+    If target_names is given, also verify each target has non-empty entry
+    in the JSON. Phases that save partial results per-target (e.g., Phase 4)
+    will return False here if any target is missing, so the phase re-runs
+    and the per-target resume logic inside the phase skips completed targets.
+    """
     result_file = _PHASE_RESULT_FILES.get(phase_num)
     if result_file is None:
         return False
-    return (Path(output_dir) / result_file).exists()
+    path = Path(output_dir) / result_file
+    if not path.exists():
+        return False
+
+    if target_names:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            for t in target_names:
+                entry = data.get(t)
+                if not isinstance(entry, dict) or not entry:
+                    return False  # missing or empty target → re-run
+        except Exception:
+            return False
+    return True
 
 
 def _load_phase_result(phase_num: int, output_dir: str) -> dict:
@@ -331,7 +352,7 @@ def main():
 
     if args.resume:
         for phase_num in phases:
-            if _check_phase_completed(phase_num, out_dir):
+            if _check_phase_completed(phase_num, out_dir, target_names):
                 loaded = _load_phase_result(phase_num, out_dir)
                 prev_results[f"phase{phase_num}"] = loaded
                 logger.info(f"Phase {phase_num}: LOADED from existing results "

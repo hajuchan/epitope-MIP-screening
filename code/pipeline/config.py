@@ -145,8 +145,11 @@ DFT_VALIDATION_TOP_N = 3         # Top-N PCs to DFT refine
 DFT_LEVEL = "M06-2X/def2-TZVP"   # DFT functional/basis
 DFT_SOLVENT = "water"            # implicit solvent
 
-# B6: Variable monomer ratio sweep (DEFAULT ON)
-PHASE4_RATIO_SWEEP = True
+# B6: Variable monomer ratio sweep (DISABLED — redundant with EBN-based optimal_ratio)
+# Rationale: optimal_ratio is computed from the main production MD via EBN
+# (Yuan 2024 standard). The B6 sweep ran 5 preset ratios × 30 ns separately and
+# was not consumed by Phase 6 recipe — pure overhead, removed.
+PHASE4_RATIO_SWEEP = False
 PHASE4_RATIO_PRESETS = [
     (1, 1, 1, 1),
     (2, 1, 1, 1),

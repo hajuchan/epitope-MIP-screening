@@ -86,7 +86,28 @@ def run_phase3(phase1_results: dict = None,
             "npts": tuple(p1t["grid_npts"]),
         }
 
+    # Per-target resume: load partial results if previous run was interrupted
+    partial_json = output_dir / "phase3_mmsd_results.json"
+    if partial_json.exists():
+        try:
+            with open(partial_json) as f:
+                results = json.load(f)
+            done_targets = [t for t in results
+                            if isinstance(results.get(t), dict)
+                            and results[t].get("top_pcs")]
+            if done_targets:
+                logger.info(f"Resume: loaded existing Phase 3 results for "
+                            f"{done_targets} — skipping these targets")
+        except Exception as e:
+            logger.warning(f"Could not parse existing phase3_mmsd_results.json: {e}")
+            results = {}
+
     for target in target_names:
+        # Skip if already completed in a prior run
+        if isinstance(results.get(target), dict) and results[target].get("top_pcs"):
+            logger.info(f"\n{'='*20} Phase 3: {target} (RESUMED — already done) {'='*20}")
+            continue
+
         logger.info(f"\n{'='*20} Phase 3 Greedy+MMSD: {target} {'='*20}")
 
         be_matrix = phase2_results["be_matrix"].get(target, {})
@@ -293,7 +314,15 @@ def run_phase3(phase1_results: dict = None,
                 f"sum={pc.get('mmsd_sum', 'N/A')}"
             )
 
-    # Save results
+        # Per-target incremental save — survives crashes
+        try:
+            with open(output_dir / "phase3_mmsd_results.json", "w") as f:
+                json.dump(results, f, indent=2, default=str)
+            logger.info(f"  Phase 3: {target} complete → saved partial results")
+        except Exception as e:
+            logger.warning(f"  Failed to save partial Phase 3 results: {e}")
+
+    # Final save
     with open(output_dir / "phase3_mmsd_results.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
 

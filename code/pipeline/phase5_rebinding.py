@@ -207,9 +207,28 @@ def run_phase6(phase4_results: dict = None,
     if target_names is None:
         target_names = [t for t in phase4_results if t != "cross_reactivity"]
 
+    # Per-target resume: load partial results if previous run was interrupted
+    partial_json = output_dir / "phase5_rebinding_results.json"
     results = {}
+    if partial_json.exists():
+        try:
+            with open(partial_json) as f:
+                results = json.load(f)
+            done_targets = [t for t in results
+                            if isinstance(results.get(t), dict) and results[t]]
+            if done_targets:
+                logger.info(f"Resume: loaded existing Phase 5 results for "
+                            f"{done_targets} — skipping these targets")
+        except Exception as e:
+            logger.warning(f"Could not parse existing phase5_rebinding_results.json: {e}")
+            results = {}
 
     for target in target_names:
+        # Skip if already completed in a prior run
+        if isinstance(results.get(target), dict) and results[target]:
+            logger.info(f"\n{'='*20} Phase 5: {target} (RESUMED — already done) {'='*20}")
+            continue
+
         p4 = phase4_results.get(target, {})
         if not p4:
             continue
@@ -387,7 +406,15 @@ def run_phase6(phase4_results: dict = None,
             logger.info(f"  {target}: weak selectivity but no N-glycan → "
                         f"dual-imprinting not applicable")
 
-    # Save
+        # Per-target incremental save — survives crashes
+        try:
+            with open(output_dir / "phase5_rebinding_results.json", "w") as f:
+                json.dump(results, f, indent=2, default=str)
+            logger.info(f"  Phase 5: {target} complete → saved partial results")
+        except Exception as e:
+            logger.warning(f"  Failed to save partial Phase 5 results: {e}")
+
+    # Final save
     with open(output_dir / "phase5_rebinding_results.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
 
