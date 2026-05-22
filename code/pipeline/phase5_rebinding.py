@@ -182,7 +182,15 @@ def run_phase6(phase4_results: dict = None,
     3. Test selectivity with other targets' heads
     """
     from .config import (TARGETS, REBINDING_MD_NS, REBINDING_N_SNAPSHOTS,
-                         REBINDING_RMSD_THRESHOLD, get_output_path, resolve_path)
+                         REBINDING_RMSD_THRESHOLD, REBINDING_TRIAL_MODE,
+                         get_output_path, resolve_path)
+
+    # Trial mode: 1 snapshot per target, 30 ns rebinding MD
+    # Used to validate method works (ECL2 discrimination) before full 10-snapshot run
+    if REBINDING_TRIAL_MODE:
+        REBINDING_N_SNAPSHOTS = 1
+        REBINDING_MD_NS = 30
+        logger.warning("REBINDING_TRIAL_MODE active: 1 snapshot × 30 ns per target")
 
     if output_dir is None:
         output_dir = str(get_output_path("phase6"))
@@ -239,8 +247,18 @@ def run_phase6(phase4_results: dict = None,
             continue
 
         pc_data = p4[best_pc_id]
-        head_pdb = resolve_path(phase1_results[target].get("head_pdb",
-                                phase1_results[target]["epitope_pdb"]))
+        # Template for rebinding: use the same template used in Phase 4.
+        # In whole-protein imprinting mode (PHASE4_TEMPLATE_MODE="ecl2"),
+        # rebind the entire ECL2 (~90 residues) rather than just the 16-mer head.
+        from .config import PHASE4_TEMPLATE_MODE
+        if PHASE4_TEMPLATE_MODE == "ecl2":
+            head_pdb = resolve_path(phase1_results[target].get("ecl2_pdb",
+                                    phase1_results[target].get("head_pdb",
+                                    phase1_results[target]["epitope_pdb"])))
+            logger.info(f"  Whole-ECL2 rebinding mode (template: {head_pdb.name})")
+        else:
+            head_pdb = resolve_path(phase1_results[target].get("head_pdb",
+                                    phase1_results[target]["epitope_pdb"]))
 
         # Phase 4 MD directory
         p4_md_dir = get_output_path("phase4") / target / best_pc_id / "md"
@@ -348,8 +366,14 @@ def run_phase6(phase4_results: dict = None,
             for other_target in target_names:
                 if other_target == target:
                     continue
-                other_head = resolve_path(phase1_results[other_target].get(
-                    "head_pdb", phase1_results[other_target]["epitope_pdb"]))
+                # Cross-rebinding template: match Phase 4 mode (ECL2 or head)
+                if PHASE4_TEMPLATE_MODE == "ecl2":
+                    other_head = resolve_path(phase1_results[other_target].get(
+                        "ecl2_pdb", phase1_results[other_target].get(
+                            "head_pdb", phase1_results[other_target]["epitope_pdb"])))
+                else:
+                    other_head = resolve_path(phase1_results[other_target].get(
+                        "head_pdb", phase1_results[other_target]["epitope_pdb"]))
 
                 logger.info(f"  Step 5: Rebinding {other_target} head (selectivity)...")
                 rebind_other = _run_rebinding_md(
@@ -485,7 +509,9 @@ def _create_cavity(traj_path, top_path, topol_path, frame_idx, output_dir):
     Keep full system (protein + monomers + water) — topology unchanged.
     For rebinding: replace protein coordinates with new template.
     """
-    from .config import REBINDING_RESTRAINT_K
+    from .config import (REBINDING_RESTRAINT_K,
+                          REBINDING_CROSSLINKER_RESTRAINT_K,
+                          CROSSLINKER_LIBRARY)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -578,8 +604,17 @@ def _create_cavity(traj_path, top_path, topol_path, frame_idx, output_dir):
                 if in_atoms and line.strip() and not line.strip().startswith(";"):
                     n_atoms += 1
 
-            # Add position restraints for all heavy atoms (mass > 2)
+            # Two-tier restraint (Yuan 2024, adenovirus eIP protocol):
+            #  - Crosslinker = irreversible C-C network → stiff (k=5000)
+            #  - Functional monomer = non-covalent anchor → moderate (k=1000)
+            mol_name = itp_file.stem  # e.g. "TTMS", "DVB"
+            is_crosslinker = mol_name in CROSSLINKER_LIBRARY
+            k = (REBINDING_CROSSLINKER_RESTRAINT_K if is_crosslinker
+                 else REBINDING_RESTRAINT_K)
+            tier_label = "CROSSLINKER stiff" if is_crosslinker else "functional moderate"
+
             posre_block = "\n#ifdef POSRES_MONOMER\n[ position_restraints ]\n"
+            posre_block += f"; {tier_label} (k = {k} kJ/mol/nm²)\n"
             posre_block += "; ai  funct  fcx    fcy    fcz\n"
             in_atoms = False
             atom_idx = 0
@@ -598,8 +633,7 @@ def _create_cavity(traj_path, top_path, topol_path, frame_idx, output_dir):
                     except (ValueError, IndexError):
                         mass = 12.0
                     if mass > 2.0:  # heavy atoms only
-                        posre_block += (f"  {atom_idx}    1  {REBINDING_RESTRAINT_K}  "
-                                        f"{REBINDING_RESTRAINT_K}  {REBINDING_RESTRAINT_K}\n")
+                        posre_block += (f"  {atom_idx}    1  {k}  {k}  {k}\n")
             posre_block += "#endif\n"
 
             # Append to ITP content

@@ -93,11 +93,21 @@ def run_phase4(phase1_results: dict = None,
             continue
 
         top_pcs = p3_data.get("top_pcs", [])
-        # Use head 16-mer (not full ECL2) for pre-polymerization MD
-        # Matches actual MIP synthesis template; all monomer contacts are relevant
+        # Use full ECL2 (not 16-mer head) for pre-polymerization MD.
+        # Rationale: actual MIP synthesis uses the whole protein (~90 aa ECL2 is
+        # the only solvent-accessible face of tetraspanin TM4 proteins). Head-only
+        # imprinting (epitope MIP) fails because isolated 16-mer is too flexible —
+        # cavity formed against unstable peptide doesn't discriminate other heads
+        # at rebinding time (observed in initial head-template run: SI=0.85, 1/10
+        # rebound). Whole-ECL2 imprinting is closer to the experimental reality
+        # (surface MIP) and is what the adenovirus eIP paper (PMC11059108) and
+        # other 2024 epitope-MIP work converged on after similar failures.
+        # Protein Cα backbone is restrained in MD (k=1000 kJ/mol/nm²) to mimic
+        # solid-phase / surface immobilization during polymerization.
         from .config import resolve_path
-        epitope_pdb = resolve_path(phase1_results[target].get("head_pdb",
-                                   phase1_results[target]["epitope_pdb"]))
+        epitope_pdb = resolve_path(phase1_results[target].get("ecl2_pdb",
+                                   phase1_results[target].get("head_pdb",
+                                   phase1_results[target]["epitope_pdb"])))
 
         logger.info(f"\n{'='*20} Phase 4: {target} "
                     f"({len(top_pcs)} PCs, {time_ns}ns, "
@@ -267,12 +277,18 @@ def _run_prepolymerization_md(target: str, pc_id: str,
 
             logger.info(f"  Total monomer molecules: {len(monomer_itps)}")
 
-        # Step B: Run MD
+        # Step B: Run MD with protein backbone restrained (whole-ECL2 imprinting).
+        # Mimics solid-phase / surface immobilization during polymerization —
+        # protein cannot diffuse, monomers polymerize around its exposed face.
+        # Reference: adenovirus eIP (PMC11059108), Pluhar/Battaglia 2021.
+        from .config import PHASE4_TEMPLATE_MODE
+        protein_restrained = (PHASE4_TEMPLATE_MODE == "ecl2")
         md_result = run_full_md_pipeline(
             epitope_pdb, monomer_itps,
             work_dir / "md",
             time_ns=time_ns,
             quick=(time_ns <= 20),
+            protein_restrained=protein_restrained,
         )
         result.update(md_result)
 

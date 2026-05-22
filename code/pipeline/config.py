@@ -542,7 +542,10 @@ MMSD_PENALIZE_COMPETITION = False # disabled — competition info recorded but n
 MMSD_ENFORCE_POLYMERIZATION_COMPATIBILITY = True
 
 # ── Phase 4: MD Validation — GROMACS ───────────────────────────
-MD_PRODUCTION_NS = 350            # pre-polymerization MD (Polania 2024: 350ns for convergence)
+# Trial mode for whole-ECL2 imprinting validation: 100 ns is sufficient for
+# protein-surface cavity equilibration (smaller system relative to head-template).
+# Set back to 350 ns for production after method validation.
+MD_PRODUCTION_NS = 100            # pre-polymerization MD (trial mode for ECL2; default 350 ns)
 MD_TIMESTEP_FS = 2.0              # integration timestep
 MD_TEMPERATURE_K = 300.0          # K
 MD_PRESSURE_BAR = 1.0             # bar
@@ -563,11 +566,27 @@ MMPBSA_METHOD = "GBSA"            # "PBSA" or "GBSA" — Sullivan used GBSA
 # Sullivan 2019 / Sehit 2024: DSSP 2° structure analysis (computational CD)
 DSSP_ANALYSIS = True              # track helix/sheet/coil changes during MD
 
-# ── Phase 6: VIP Cavity Rebinding (Zink 2018) ─────────────────
+# ── Phase 4: Whole-protein imprinting mode ────────────────────
+# Use ECL2 (not head 16-mer) as template — matches actual MIP synthesis where
+# whole protein is used. Protein backbone heavy atoms restrained during MD
+# to mimic solid-phase / surface immobilization (Pluhar/Battaglia 2021 review,
+# adenovirus eIP PMC11059108 protocol).
+PHASE4_TEMPLATE_MODE = "ecl2"     # "head" (16-mer, legacy) | "ecl2" (whole loop)
+PHASE4_PROTEIN_RESTRAINT_K = 1000 # kJ/mol/nm² — Cα/heavy-atom restraint during MD
+
+# ── Phase 5/6: VIP Cavity Rebinding (Zink 2018, two-tier restraint) ───────
 REBINDING_MD_NS = 50              # rebinding simulation time per snapshot (extended from 20ns)
 REBINDING_N_SNAPSHOTS = 10        # top contact frames (n=10 for statistical power)
 REBINDING_RMSD_THRESHOLD = 5.0    # Å — template stays in cavity if RMSD < this
-REBINDING_RESTRAINT_K = 1000      # kJ/mol/nm² — position restraint on monomer heavy atoms
+REBINDING_RESTRAINT_K = 1000      # kJ/mol/nm² — position restraint on FUNCTIONAL monomers
+# Two-tier restraint (Yuan 2024, adenovirus eIP protocol):
+#  - Crosslinker = irreversible C-C covalent network → very stiff
+#  - Functional monomer = non-covalent H-bond anchor → moderate (allows recognition)
+REBINDING_CROSSLINKER_RESTRAINT_K = 5000  # kJ/mol/nm² — rigid matrix
+REBINDING_PROTEIN_RESTRAINED = True       # keep ECL2 Cα restrained during rebinding
+
+# Trial / quick mode: 1 snapshot per target for method validation
+REBINDING_TRIAL_MODE = True       # if True: N_SNAPSHOTS=1, MD_NS=30 (override above)
 # Crosslinker ratio sweep (Phase 4 supplementary; Phase 6 default 5%)
 CROSSLINKER_RATIO_SWEEP = [0.03, 0.05, 0.08, 0.10]
 CROSSLINKER_SWEEP_MD_NS = 30      # short MD per ratio for cavity stability check (reduced for faster sweep)

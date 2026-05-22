@@ -730,7 +730,8 @@ def run_mmpbsa(work_dir: Path, start_ns: float = 150.0,
 def run_full_md_pipeline(protein_pdb: Path, monomer_itps: list,
                           work_dir: Path,
                           time_ns: float = 200.0,
-                          quick: bool = False) -> dict:
+                          quick: bool = False,
+                          protein_restrained: bool = False) -> dict:
     """
     Complete GROMACS MD pipeline:
     pdb2gmx → solvate → EM → NVT → NPT → production → analysis → MM-PBSA
@@ -802,11 +803,17 @@ def run_full_md_pipeline(protein_pdb: Path, monomer_itps: list,
 
         # 6. Production MD
         if not (work_dir / "md.gro").exists():
-            logger.info(f"Production MD ({time_ns} ns)...")
+            define = "define = -DPOSRES" if protein_restrained else ""
+            if protein_restrained:
+                logger.info(f"Production MD ({time_ns} ns) with -DPOSRES "
+                            "(protein heavy atoms restrained, surface MIP mode)...")
+            else:
+                logger.info(f"Production MD ({time_ns} ns)...")
             run_production_md(work_dir, time_ns=time_ns,
                                temperature=MD_TEMPERATURE_K,
                                pressure=MD_PRESSURE_BAR,
-                               gpu_id=MD_GPU_ID)
+                               gpu_id=MD_GPU_ID,
+                               define=define)
         else:
             logger.info(f"Production MD: FOUND, skipping")
 
