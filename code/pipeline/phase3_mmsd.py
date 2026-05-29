@@ -238,16 +238,25 @@ def run_phase3(phase1_results: dict = None,
         # C2 fix: when NSGA-II used, take FULL combo (functional + crosslinker)
         # and verify compatibility — auto-picked crosslinker may break otherwise
         # compatible functional set.
-        from .config import is_polymerization_compatible
+        from .config import (is_polymerization_compatible,
+                             MMSD_REQUIRE_CHEMISTRY_DIVERSITY)
+        from .utils_analysis import check_chemistry_diversity
 
         def _full_compat(r):
-            """Check compatibility of full combo (functional + crosslinker)."""
+            """Check compatibility AND chemistry diversity of full combo."""
             full = list(r.get("functional_monomers", []) or r.get("monomers", []))
             xl = r.get("crosslinker")
             if xl and xl not in full:
                 full.append(xl)
             ok, _, _ = is_polymerization_compatible(full)
-            return ok
+            if not ok:
+                return False
+            # Rule 1 + Rule 2 hard check (entropy bonus already in NSGA-II obj)
+            if MMSD_REQUIRE_CHEMISTRY_DIVERSITY:
+                div = check_chemistry_diversity(full)
+                if not div["valid"]:
+                    return False
+            return True
 
         if nsga_pareto_front:
             # Pareto front items have format {monomers, objectives, mmsd_result}.
@@ -1069,10 +1078,13 @@ def _run_nsga2_mmsd(target, available_monomers, receptor_pdbqt,
     Reference: Deb 2002 NSGA-II; Garcia-Ortegon 2022 DOCKSTRING.
     """
     from .config import (MMSD_ENFORCE_POLYMERIZATION_COMPATIBILITY,
-                         is_polymerization_compatible)
+                         is_polymerization_compatible,
+                         MMSD_REQUIRE_CHEMISTRY_DIVERSITY,
+                         MMSD_CHEMISTRY_ENTROPY_WEIGHT)
     from .utils_analysis import (compute_3obj_for_combo,
                                   compute_synthesizability_score,
-                                  compute_selectivity_score)
+                                  compute_selectivity_score,
+                                  check_chemistry_diversity)
 
     try:
         from pymoo.core.problem import ElementwiseProblem
@@ -1122,6 +1134,15 @@ def _run_nsga2_mmsd(target, available_monomers, receptor_pdbqt,
                     out["F"] = [1e6, 1e6, 1e6]
                     return
 
+            # Chemistry diversity filter (Mavliutova 2021, Liu 2017, Cleland 2022)
+            # Rule 1: ≥3 chemistry classes among non-XL monomers
+            # Rule 2: single class ≤50% of non-XL monomers
+            if MMSD_REQUIRE_CHEMISTRY_DIVERSITY:
+                div = check_chemistry_diversity(combo)
+                if not div["valid"]:
+                    out["F"] = [1e6, 1e6, 1e6]
+                    return
+
             # Cache key
             key = tuple(sorted(combo))
             if key in eval_cache:
@@ -1158,6 +1179,16 @@ def _run_nsga2_mmsd(target, available_monomers, receptor_pdbqt,
                 f_values[1] = -sel_score_cross  # minimize negative score
                 objs["raw"]["selectivity_score_cross_mmsd"] = round(sel_score_cross, 2)
                 objs["raw"]["selectivity_mean_ddg_cross"] = round(ddg, 2)
+
+            # Chemistry entropy bonus (Rule 3 — Cleland 2022, Mavliutova 2021)
+            # Higher diversity → better recognition specificity → reward in selectivity obj
+            if MMSD_REQUIRE_CHEMISTRY_DIVERSITY:
+                div = check_chemistry_diversity(combo)
+                ent_bonus = MMSD_CHEMISTRY_ENTROPY_WEIGHT * div["normalized_entropy"]
+                f_values[1] -= ent_bonus  # bonus to selectivity objective (minimize)
+                objs["raw"]["chemistry_classes"] = div["classes"]
+                objs["raw"]["chemistry_entropy"] = div["entropy"]
+                objs["raw"]["chemistry_normalized_entropy"] = div["normalized_entropy"]
 
             eval_cache[key] = f_values
             out["F"] = f_values

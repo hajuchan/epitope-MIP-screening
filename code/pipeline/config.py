@@ -487,6 +487,50 @@ def is_polymerization_compatible(monomer_names: list) -> tuple:
     return True, dominant, []
 CROSSLINKERS = set(CROSSLINKER_LIBRARY.keys())
 
+# ── Chemistry primary class for diversity constraint (Mavliutova 2021, Liu 2017)
+# Each functional monomer maps to ONE primary recognition mode. NSGA-II requires
+# top combos to span ≥3 classes (Rule 1) with ≤50% in single class (Rule 2).
+# References: Liu 2017 (Acc.Chem.Res. — boronate class-selectivity),
+#  Mavliutova 2021 (PMC8154165 — sialic-acid MIP needs ≥3 modes),
+#  Cleland 2022 (PMC9460123 — dual-monomer 2× IF over single)
+# Crosslinkers (XL) are STRUCTURAL — do NOT count toward recognition diversity.
+PRIMARY_CHEM_CLASS = {
+    # Boronate-diol (glycan / Ser-Thr-Tyr OH)
+    "APBA":  "boronate",  "VPBA":   "boronate",
+    "AAPBA": "boronate",  "FPBA":   "boronate",
+    # Catechol (multi H-bond + π-π)
+    "DA":    "catechol",  "NE":     "catechol",
+    # Aromatic π-π (Phe/Tyr/Trp stacking)
+    "PTES":  "pi_stack",  "TTMS":   "pi_stack",
+    "4VIm":  "pi_stack",
+    # H-bond donor (amine/urea — Asp/Glu/backbone NH)
+    "APTES": "hbond_donor",   "APTMS":  "hbond_donor",
+    "UPTMS": "hbond_donor",   "EDTMS":  "hbond_donor",
+    "AAm":   "hbond_donor",   "NIPAm":  "hbond_donor",
+    # H-bond acceptor (CN, ester carbonyl)
+    "CETES": "hbond_accept",  "HEMA":   "hbond_accept",
+    # Hydrophobic alkyl (Leu/Ile/Val packing)
+    "IBTES": "hydrophobic",   "MTMS":   "hydrophobic",
+    "DIDMS": "hydrophobic",   "TBAm":   "hydrophobic",
+    # Covalent reactive (Lys ε-NH2 — epoxy/isocyanate/thiol)
+    "GPTMS": "covalent",      "ICTES":  "covalent",
+    "MPTMS": "covalent",      "VTMS":   "covalent",
+    # Electrostatic (COOH — Lys/Arg)
+    "AA":    "electrostatic", "MAA":    "electrostatic",
+    # Crosslinkers — STRUCTURAL only (excluded from diversity count)
+    "TEOS":  "xl_structural", "TMOS":   "xl_structural",
+    "MBAAm": "xl_structural", "EGDMA":  "xl_structural",
+    "DVB":   "xl_structural", "TRIM":   "xl_structural",
+}
+
+# Diversity constraint thresholds
+# Calibration: must reject CD9 (3 boronates / 4 functional) but accept CD81
+# (2 boronates / 3 functional, observed PCSI=1.90 in trial).
+MMSD_REQUIRE_CHEMISTRY_DIVERSITY = True
+MMSD_MIN_CHEMISTRY_CLASSES = 2       # Rule 1: ≥2 classes (literature ≥3 too strict)
+MMSD_MAX_PER_CLASS_COUNT = 2         # Rule 2: max 2 monomers per single class (absolute)
+MMSD_CHEMISTRY_ENTROPY_WEIGHT = 0.3  # Rule 3: soft bonus weight in NSGA-II
+
 # Combined libraries
 ALL_MONOMERS = {**SILANE_MONOMERS, **VINYL_MONOMERS, **CROSSLINKER_LIBRARY}
 
@@ -587,6 +631,14 @@ REBINDING_PROTEIN_RESTRAINED = True       # keep ECL2 Cα restrained during rebi
 
 # Trial / quick mode: 1 snapshot per target for method validation
 REBINDING_TRIAL_MODE = True       # if True: N_SNAPSHOTS=1, MD_NS=30 (override above)
+
+# Steric Complementarity Score (SCS) — size-exclusion selectivity.
+# When a cross-target protein is too large for the cavity, it clashes severely
+# with the restrained monomers → this IS selectivity (shape/size exclusion,
+# Hoshino 2008, Shea group). Instead of running MD that explodes, we count
+# heavy-atom clashes after rigid placement: high clash = REJECTED = selective.
+REBINDING_CLASH_CUTOFF_A = 2.0    # Å — heavy-atom pair below this = clash
+REBINDING_CLASH_THRESHOLD = 30    # >this many clashes → size-excluded (selective)
 # Crosslinker ratio sweep (Phase 4 supplementary; Phase 6 default 5%)
 CROSSLINKER_RATIO_SWEEP = [0.03, 0.05, 0.08, 0.10]
 CROSSLINKER_SWEEP_MD_NS = 30      # short MD per ratio for cavity stability check (reduced for faster sweep)

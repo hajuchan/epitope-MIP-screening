@@ -280,6 +280,13 @@ def verify_phase4():
 
 
 def verify_phase5():
+    """Phase 5 verification — uses PCSI (persistent contact selectivity index)
+    as PRIMARY metric. Falls back to RMSD-SI if PCSI not yet computed.
+
+    PCSI is size-invariant (counts persistent residue contacts) — replaces
+    backbone RMSD which is biased by protein size (smaller proteins → higher
+    RMSD even if cavity-bound). See analyze_persistent_contacts.py.
+    """
     p = RESULTS_ROOT / "phase5"
     report = {"phase": 5, "level1": {}, "level2": {}, "level3": {}, "issues": []}
     json_p = p / "phase5_rebinding_results.json"
@@ -289,19 +296,36 @@ def verify_phase5():
     with open(json_p) as f:
         data = json.load(f)
 
+    # PRIMARY metric: PCSI from analyze_persistent_contacts.py output
+    pcsi_path = REPORTS_DIR / "phase5_persistent_contacts.json"
+    pcsi_data = {}
+    if pcsi_path.exists():
+        try:
+            with open(pcsi_path) as f:
+                pcsi_data = json.load(f)
+        except Exception:
+            pass
+    else:
+        report["issues"].append(
+            "PCSI metric not computed yet — run: "
+            "python code/analyze_persistent_contacts.py")
+
+    n_targets_pass = 0
+    n_targets_total = 0
     for t in TARGETS:
         td = data.get(t, {})
         if not td:
             continue
         sel = td.get("selectivity", {})
-        # A6: bootstrap CI in each selectivity
         a6_count = sum(1 for v in sel.values() if "si_ci_lower" in v)
-        # B8: multipose in any snapshot
         snaps = td.get("snapshots", [])
         b8_count = sum(1 for s in snaps if "multipose_ensemble" in s)
+        n_rebound = td.get("n_rebound", 0)
+        n_snaps = td.get("n_snapshots", 0)
+
         report["level1"][t] = {
-            "n_rebound": td.get("n_rebound", 0),
-            "n_snapshots": td.get("n_snapshots", 0),
+            "n_rebound": n_rebound,
+            "n_snapshots": n_snaps,
             "n_cross_selectivity": len(sel),
         }
         report["level2"][t] = {
@@ -309,12 +333,51 @@ def verify_phase5():
             "A6_n_with_CI": a6_count,
             "B8_multipose_done": b8_count > 0,
         }
-        # L3: cavity centering — snapshot_0 frame.gro
+
+        # Level 3: cavity centering
         snap0 = p / t / "snapshot_0"
         if (snap0 / "frame.gro").exists():
             report["level3"][t] = _check_md_centering(snap0 / "frame.gro")
+        if t not in report["level3"]:
+            report["level3"][t] = {}
 
-    report["decision"] = "proceed_to_phase_6"
+        # ⭐ PRIMARY: PCSI metric (chemistry-corrected selectivity)
+        n_targets_total += 1
+        if t in pcsi_data:
+            tgt_pcsi = pcsi_data[t]
+            own_d = tgt_pcsi.get(t, {})
+            own_n = own_d.get("n_persistent_residues", 0) if isinstance(own_d, dict) else 0
+            cross_ns = [tgt_pcsi.get(o, {}).get("n_persistent_residues", 0)
+                        for o in TARGETS if o != t
+                        and isinstance(tgt_pcsi.get(o, {}), dict)
+                        and "n_persistent_residues" in tgt_pcsi.get(o, {})]
+            max_cross = max(cross_ns) if cross_ns else 0
+            pcsi = own_n / max_cross if max_cross > 0 else float('inf')
+            pcsi_pass = pcsi > 1.2  # weak threshold for PASS
+            if pcsi_pass:
+                n_targets_pass += 1
+            report["level3"][t]["PCSI"] = round(pcsi, 2) if pcsi != float('inf') else "inf"
+            report["level3"][t]["own_persistent_contacts"] = own_n
+            report["level3"][t]["max_cross_persistent_contacts"] = max_cross
+            report["level3"][t]["PCSI_PASS"] = pcsi_pass
+        else:
+            # Fallback: traditional SI-RMSD (less reliable)
+            rmsd_si_pass = any(
+                v.get("selectivity_index", 0) > 1.5
+                for v in sel.values()
+            )
+            if rmsd_si_pass:
+                n_targets_pass += 1
+            report["level3"][t]["RMSD_SI_PASS"] = rmsd_si_pass
+            report["level3"][t]["note"] = "Using RMSD-SI fallback (PCSI not computed)"
+
+    # Decision: ≥1 target passes PCSI → Phase 6 with target subset
+    report["n_targets_pass_PCSI"] = n_targets_pass
+    report["n_targets_total"] = n_targets_total
+    if n_targets_pass >= 1:
+        report["decision"] = f"proceed_to_phase_6_with_{n_targets_pass}_target(s)"
+    else:
+        report["decision"] = "redesign_required_no_target_passed_PCSI"
     return report
 
 

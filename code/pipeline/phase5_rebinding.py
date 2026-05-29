@@ -408,11 +408,13 @@ def run_phase6(phase4_results: dict = None,
             and (s.get("p_value") is None or s.get("p_value") > 0.05)
             for s in sel.values())
         n_rebound = target_result.get("n_rebound", 0)
+        # Adaptive rebound threshold: ≥3 in full run (10 snaps), ≥1 in trial (1 snap)
+        rebound_threshold = max(1, REBINDING_N_SNAPSHOTS // 3)
 
-        if any_not_significant and n_glycan > 0 and n_rebound >= 3:
+        if any_not_significant and n_glycan > 0 and n_rebound >= rebound_threshold:
             logger.info(f"\n  *** Dual-imprinting triggered for {target} ***")
             logger.info(f"      Reason: non-significant selectivity (SI<1.5, p>0.05) "
-                        f"+ {n_glycan} N-glycan sites + rebinding {n_rebound}/5")
+                        f"+ {n_glycan} N-glycan sites + rebinding {n_rebound}/{REBINDING_N_SNAPSHOTS}")
             logger.info(f"      Action: adding APBA (boronic acid) to cavity for glycan recognition")
 
             dual_results = _run_dual_imprinting_vip(
@@ -614,7 +616,7 @@ def _create_cavity(traj_path, top_path, topol_path, frame_idx, output_dir):
             tier_label = "CROSSLINKER stiff" if is_crosslinker else "functional moderate"
 
             posre_block = "\n#ifdef POSRES_MONOMER\n[ position_restraints ]\n"
-            posre_block += f"; {tier_label} (k = {k} kJ/mol/nm²)\n"
+            posre_block += f"; {tier_label} (k = {k} kJ/mol/nm^2)\n"
             posre_block += "; ai  funct  fcx    fcy    fcz\n"
             in_atoms = False
             atom_idx = 0
@@ -837,6 +839,41 @@ def _run_rebinding_md(cavity_gro, cavity_top, template_pdb,
         from .utils_gromacs import (run_energy_minimization,
                                      run_nvt_equilibration, run_npt_equilibration,
                                      run_production_md)
+
+        # ── Steric Complementarity check (size-exclusion selectivity) ──
+        # For cross-target rebinding: if the protein is too large for the cavity,
+        # severe clashes mean it's physically REJECTED (selective). Detect this
+        # BEFORE EM (which would explode with Max-force=inf), record as
+        # size-excluded, and skip the doomed MD.
+        if not is_own_target:
+            from .config import (REBINDING_CLASH_CUTOFF_A,
+                                 REBINDING_CLASH_THRESHOLD)
+            from .utils_analysis import compute_steric_clash
+            try:
+                clash = compute_steric_clash(
+                    md_dir / "rebind_system.gro",
+                    clash_cutoff_A=REBINDING_CLASH_CUTOFF_A)
+                logger.info(f"    Steric clash: {clash['clash_count']} "
+                            f"({clash['clash_per_residue']}/residue)")
+                if clash["clash_count"] > REBINDING_CLASH_THRESHOLD:
+                    logger.info(f"    → SIZE-EXCLUDED: cross-protein too large "
+                                f"for cavity ({clash['clash_count']} clashes "
+                                f"> {REBINDING_CLASH_THRESHOLD}) — REJECTED "
+                                f"(size-exclusion selectivity ✓)")
+                    return {
+                        "time_ns": 0,
+                        "rmsd_mean_A": None,
+                        "rmsd_final_A": None,
+                        "rebound": False,
+                        "size_excluded": True,
+                        "steric_clash": clash,
+                        "hbond_mean": 0.0,
+                        "contact_mean": 0.0,
+                        "mmpbsa_dG": None,
+                        "status": "SIZE_EXCLUDED",
+                    }
+            except Exception as e:
+                logger.warning(f"    Steric clash check failed: {e}, proceeding to MD")
 
         ionized = md_dir / "ionized.gro"
         if not ionized.exists():
@@ -1270,13 +1307,32 @@ def _run_dual_imprinting_vip(target, target_names, snapshot_results,
                         apba_atomtypes += line + "\n"
 
             if apba_atomtypes and "[ atomtypes ]" in top_text:
-                # Append APBA atomtypes to existing [ atomtypes ] section
-                # Find end of existing atomtypes (next [ section)
-                at_start = top_text.find("[ atomtypes ]")
-                next_section = top_text.find("\n[", at_start + 1)
-                if next_section > at_start:
-                    top_text = (top_text[:next_section] + "\n"
-                                + apba_atomtypes + top_text[next_section:])
+                # Insert APBA atomtypes INSIDE the [ atomtypes ] block, right after
+                # the existing atomtype entries and BEFORE any #include (which pull
+                # in moleculetypes). Inserting before the next "[" section would
+                # place them after the silane #includes + APBA #include → GROMACS
+                # would parse APBA's [ atoms ] (using n3) before n3 is defined.
+                lines = top_text.split("\n")
+                out_lines = []
+                inserted = False
+                in_at = False
+                for ln in lines:
+                    if ln.strip().startswith("[ atomtypes ]"):
+                        in_at = True
+                        out_lines.append(ln)
+                        continue
+                    if in_at and not inserted:
+                        # End of atomtype entries: blank line, #include, or new [ section
+                        stripped = ln.strip()
+                        if (stripped == "" or stripped.startswith("#")
+                                or stripped.startswith("[")):
+                            out_lines.append(apba_atomtypes.rstrip("\n"))
+                            inserted = True
+                            in_at = False
+                    out_lines.append(ln)
+                if not inserted:  # fallback: append at very end of atomtypes header
+                    out_lines.append(apba_atomtypes)
+                top_text = "\n".join(out_lines)
 
             # Add position restraint to APBA ITP
             if "#ifdef POSRES_MONOMER" not in apba_itp_text:
@@ -1312,9 +1368,13 @@ def _run_dual_imprinting_vip(target, target_names, snapshot_results,
             traceback.print_exc()
             continue
 
-        # 4. Run rebinding MD with APBA-enhanced cavity
+        # 4. Run rebinding MD with APBA-enhanced cavity.
+        # Use SAME template type as Phase 4 (ECL2 in whole-protein mode).
+        from .config import PHASE4_TEMPLATE_MODE
+        _tkey = "ecl2_pdb" if PHASE4_TEMPLATE_MODE == "ecl2" else "head_pdb"
         own_head = resolve_path(phase1_results[target].get(
-            "head_pdb", phase1_results[target]["epitope_pdb"]))
+            _tkey, phase1_results[target].get(
+                "head_pdb", phase1_results[target]["epitope_pdb"])))
 
         logger.info(f"    snap{i}: rebinding own ({target}) with APBA cavity...")
         rebind_own = _run_rebinding_md(
@@ -1333,7 +1393,8 @@ def _run_dual_imprinting_vip(target, target_names, snapshot_results,
             other_n_glycan = phase1_results[other_t].get(
                 "properties", {}).get("n_glycan_sites_known", 0)
             other_head = resolve_path(phase1_results[other_t].get(
-                "head_pdb", phase1_results[other_t]["epitope_pdb"]))
+                _tkey, phase1_results[other_t].get(
+                    "head_pdb", phase1_results[other_t]["epitope_pdb"])))
 
             logger.info(f"    snap{i}: rebinding {other_t} "
                         f"(glycan={other_n_glycan}) with APBA cavity...")
@@ -1389,6 +1450,8 @@ def _analyze_rebinding_results(target, all_targets, snapshot_results, threshold)
     other_hbonds = {t: [] for t in all_targets if t != target}
     own_contacts = []
     other_contacts = {t: [] for t in all_targets if t != target}
+    # Size-exclusion: count snapshots where cross-protein was rejected by clash
+    other_size_excluded = {t: 0 for t in all_targets if t != target}
 
     for snap in snapshot_results:
         if not snap.get("success"):
@@ -1411,6 +1474,10 @@ def _analyze_rebinding_results(target, all_targets, snapshot_results, threshold)
             if other_t == target:
                 continue
             other = snap.get(f"rebind_{other_t}", {})
+            # Size-exclusion: cross-protein rejected by steric clash
+            if other.get("size_excluded"):
+                other_size_excluded[other_t] += 1
+                continue
             r = other.get("rmsd_mean_A")
             if r is not None:
                 other_rmsds[other_t].append(r)
@@ -1505,6 +1572,20 @@ def _analyze_rebinding_results(target, all_targets, snapshot_results, threshold)
         result["selectivity"][other_t] = sel_entry
         # Keep backward compatibility
         result[f"other_{other_t}_rmsd_mean"] = round(other_mean, 2)
+
+    # Size-excluded cross-targets → strong selectivity (shape/size exclusion).
+    # These had no MD (rejected by steric clash) so aren't in other_rmsds.
+    for other_t, n_excl in other_size_excluded.items():
+        if n_excl > 0 and other_t not in result["selectivity"]:
+            result["selectivity"][other_t] = {
+                "other_rmsd_mean": None,
+                "selectivity_index": None,
+                "selectivity_label": "size-excluded",
+                "size_excluded_snapshots": n_excl,
+                "p_value": None,
+                "significant": True,  # physical rejection = significant
+                "mechanism": "size/shape exclusion (cross-protein too large for cavity)",
+            }
 
     return result
 

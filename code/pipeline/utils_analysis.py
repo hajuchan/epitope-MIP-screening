@@ -925,3 +925,105 @@ def compute_3obj_for_combo(combo: list, target: str,
             "synthesizable": synth["synthesizable"],
         },
     }
+
+
+def compute_steric_clash(system_gro, clash_cutoff_A: float = 2.0) -> dict:
+    """Steric Complementarity Score — count heavy-atom clashes between the
+    (cross-)protein and the restrained cavity monomers in a placed system.
+
+    High clash = protein too large/wrong shape for cavity = size-exclusion
+    selectivity (Hoshino 2008). Used to detect rejected cross-targets WITHOUT
+    running MD that would explode (Max-force = inf).
+
+    Returns {clash_count, protein_atoms, monomer_atoms, clash_per_residue}.
+    """
+    import MDAnalysis as mda
+    from MDAnalysis.analysis.distances import distance_array
+    import numpy as np
+
+    u = mda.Universe(str(system_gro))
+    protein = u.select_atoms("protein and not name H*")
+    monomers = u.select_atoms(
+        "not protein and not resname SOL HOH WAT NA CL TIP3 and not name H*")
+
+    if len(protein) == 0 or len(monomers) == 0:
+        return {"clash_count": 0, "protein_atoms": len(protein),
+                "monomer_atoms": len(monomers), "clash_per_residue": 0.0}
+
+    # Distance matrix protein-heavy × monomer-heavy
+    box = u.dimensions
+    d = distance_array(protein.positions, monomers.positions, box=box)
+    clash_count = int(np.sum(d < clash_cutoff_A))
+    n_res = len(protein.residues) if len(protein.residues) else 1
+
+    return {
+        "clash_count": clash_count,
+        "protein_atoms": len(protein),
+        "monomer_atoms": len(monomers),
+        "clash_per_residue": round(clash_count / n_res, 2),
+        "n_protein_residues": n_res,
+    }
+
+
+def check_chemistry_diversity(combo: list, crosslinker: str = None) -> dict:
+    """Verify combo meets chemistry diversity rules (literature consensus).
+
+    Rules (Mavliutova 2021, Liu 2017, Cleland 2022):
+      1. ≥3 distinct primary chemistry classes among non-crosslinker monomers
+      2. Single class ≤ 50% of non-crosslinker monomers
+      3. Shannon entropy as soft bonus (higher = better)
+
+    Crosslinkers (xl_structural) excluded from diversity count — they form
+    the polymer matrix, not the recognition site.
+    """
+    from collections import Counter
+    import math
+    from .config import (PRIMARY_CHEM_CLASS, MMSD_MIN_CHEMISTRY_CLASSES,
+                         MMSD_MAX_PER_CLASS_COUNT, CROSSLINKER_LIBRARY)
+
+    # Non-crosslinker monomers
+    func_monomers = [m for m in combo
+                     if m not in CROSSLINKER_LIBRARY
+                     and PRIMARY_CHEM_CLASS.get(m) != "xl_structural"]
+
+    if not func_monomers:
+        return {"valid": False, "reason": "no functional monomers",
+                "n_classes": 0, "max_class_frac": 0.0, "entropy": 0.0,
+                "classes": {}}
+
+    classes = [PRIMARY_CHEM_CLASS.get(m, "unknown") for m in func_monomers]
+    counter = Counter(classes)
+    n_classes = len(counter)
+    n_total = len(classes)
+    max_class_count = max(counter.values())
+    max_class_frac = max_class_count / n_total
+
+    # Shannon entropy (natural log)
+    fracs = [c / n_total for c in counter.values()]
+    entropy = -sum(p * math.log(p) for p in fracs if p > 0)
+    max_entropy = math.log(n_classes) if n_classes > 1 else 1.0
+    normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+
+    # Apply rules
+    rule1_pass = n_classes >= MMSD_MIN_CHEMISTRY_CLASSES
+    rule2_pass = max_class_count <= MMSD_MAX_PER_CLASS_COUNT
+    valid = rule1_pass and rule2_pass
+
+    reason = "OK"
+    if not rule1_pass:
+        reason = f"Rule 1 fail: only {n_classes} classes (need ≥{MMSD_MIN_CHEMISTRY_CLASSES})"
+    elif not rule2_pass:
+        dom_class = counter.most_common(1)[0][0]
+        reason = (f"Rule 2 fail: {dom_class}={max_class_count} monomers "
+                  f"(max {MMSD_MAX_PER_CLASS_COUNT} per class)")
+
+    return {
+        "valid": valid,
+        "reason": reason,
+        "n_classes": n_classes,
+        "max_class_frac": round(max_class_frac, 3),
+        "entropy": round(entropy, 3),
+        "normalized_entropy": round(normalized_entropy, 3),
+        "classes": dict(counter),
+        "functional_monomers": func_monomers,
+    }
