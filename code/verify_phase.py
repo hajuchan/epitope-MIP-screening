@@ -347,19 +347,34 @@ def verify_phase5():
             tgt_pcsi = pcsi_data[t]
             own_d = tgt_pcsi.get(t, {})
             own_n = own_d.get("n_persistent_residues", 0) if isinstance(own_d, dict) else 0
+            # Size-exclusion: cross-targets physically excluded from the cavity
+            # are selective by mechanism. Their persistent-contact counts come
+            # from stale/forced MD (oversized protein crammed against walls) and
+            # must NOT be scored against the target.
+            size_excluded = {o for o, v in sel.items()
+                             if isinstance(v, dict)
+                             and v.get("selectivity_label") == "size-excluded"}
             cross_ns = [tgt_pcsi.get(o, {}).get("n_persistent_residues", 0)
                         for o in TARGETS if o != t
+                        and o not in size_excluded
                         and isinstance(tgt_pcsi.get(o, {}), dict)
                         and "n_persistent_residues" in tgt_pcsi.get(o, {})]
             max_cross = max(cross_ns) if cross_ns else 0
             pcsi = own_n / max_cross if max_cross > 0 else float('inf')
-            pcsi_pass = pcsi > 1.2  # weak threshold for PASS
+            # PASS if PCSI clears threshold on measurable cross-targets AND the
+            # target actually binds its own template (own_n > 0).
+            pcsi_pass = (pcsi > 1.2) and own_n > 0
             if pcsi_pass:
                 n_targets_pass += 1
             report["level3"][t]["PCSI"] = round(pcsi, 2) if pcsi != float('inf') else "inf"
             report["level3"][t]["own_persistent_contacts"] = own_n
             report["level3"][t]["max_cross_persistent_contacts"] = max_cross
             report["level3"][t]["PCSI_PASS"] = pcsi_pass
+            if size_excluded:
+                report["level3"][t]["size_excluded_targets"] = sorted(size_excluded)
+                report["level3"][t]["selectivity_mechanism"] = (
+                    "size/shape exclusion + persistent-contact"
+                    if cross_ns else "size/shape exclusion")
         else:
             # Fallback: traditional SI-RMSD (less reliable)
             rmsd_si_pass = any(

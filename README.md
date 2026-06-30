@@ -2,7 +2,19 @@
 
 엑소좀 테트라스파닌 ECL2(CD63 / CD81 / CD9)를 선택적으로 인식하는 에피토프-각인 MIP의 최적 모노머 조합을 계산화학적으로 스크리닝하는 **6-Phase end-to-end 파이프라인**.
 
-도킹(AutoDock-GPU) + MD(GROMACS) + 다목적 최적화(NSGA-II) + cross-docking selectivity penalty + 합성 레시피 자동 생성을 한 번의 명령으로 실행한다.
+도킹(AutoDock-GPU) + MD(GROMACS) + 다목적 최적화(NSGA-II) + cross-docking ΔΔG penalty + 화학 다양성 제약 + 두-단계 restraint + 입체 배제 (size-exclusion) + dual-imprinting (APBA glycan layer) + PCSI 기반 검증 + 합성 레시피 자동 생성을 한 번의 명령으로 실행한다.
+
+> **실제 MIP 합성과의 정합성**: 본 파이프라인은 합성 시 **전체 단백질을 그대로 임프린팅하는 표면-MIP 방식**을 반영한다. Phase 4–5는 **ECL2 whole-loop**를 템플릿으로 사용하며, 단백질 Cα를 `-DPOSRES`로 고정해 solid-phase 또는 silica-bead 표면 고정 조건을 모사한다. 모노머에는 두-단계 restraint (crosslinker `k=5000`, functional `k=1000`)를 적용해 가교제는 강체 매트릭스, 기능성 모노머는 인식 가능한 anchor 상태로 만든다.
+
+### 현재 검증 상태 — 3/3 타겟 통과 (Trial mode validation, 2026-05-29)
+
+| 타겟 | 선택성 메커니즘 | PCSI | Verdict |
+|---|---|---|---|
+| **CD63** | Dual-imprinting (실란 매트릭스 + APBA boronate × 3 → glycan 인식) | **2.00** | STRONG ✓ |
+| **CD81** | Persistent-contact (계면 잔기 접촉 지속성) | **1.90** | PASS ✓ |
+| **CD9** | Size/shape exclusion (가장 작은 캐비티 → 더 큰 CD63·CD81 입체 배제) | **∞** (own=13, cross 모두 excluded) | STRONG ✓ |
+
+`verify_phase 5` 결정: `proceed_to_phase_6_with_3_target(s)`. 현재 본 실행 (Phase 4 350 ns + Phase 5 10-snapshot × 50 ns)이 진행 중이며 통계적 신뢰구간이 확보되면 결과가 갱신된다.
 
 ---
 
@@ -86,8 +98,9 @@ CD63에는 head 후보가 4개 (canonical 16-mer + N130/N150/**N172** glycan 주
 │ → Top PC (functional monomer set + crosslinker)              │
 └──────────────────────────────────────────────────────────────┘
                               ↓
-┌─ Phase 4 ─ Pre-polymerization MD ────────────────────────────┐
-│ • Head 16-mer template + 25개 모노머 PACKMOL 배치 + 350 ns MD│
+┌─ Phase 4 ─ Pre-polymerization MD (ECL2 whole-loop) ──────────┐
+│ • ECL2 전체 + Cα DPOSRES (k=1000) → surface immobilization   │
+│ • 25개 모노머 PACKMOL 배치 + 350 ns MD                       │
 │ • PolCA force field (Si) + GAFF2 (vinyl) + amber99sb-ildn    │
 │ • A5/B7: solvent sweep (water / EtOH-water / DMSO)           │
 │ • ~~B6: ratio sweep~~ (DISABLED — redundant with EBN ratio)  │
@@ -97,14 +110,16 @@ CD63에는 head 후보가 4개 (canonical 16-mer + N130/N150/**N172** glycan 주
 │ → 합성 비율 (EBN 기반) + cavity 안정성                       │
 └──────────────────────────────────────────────────────────────┘
                               ↓
-┌─ Phase 5 ─ VIP Cavity Rebinding ─────────────────────────────┐
+┌─ Phase 5 ─ VIP Rebinding + PCSI + Size-Excl + Dual-Imprint ─┐
 │ • 균등 간격 10 snapshot (cherry-picking 방지)                │
-│ • 모노머 position restraint (1000 kJ/mol/nm²) → 중합 근사    │
+│ • Two-tier restraint: crosslinker k=5000 / functional k=1000 │
 │ • Template removal test (10 ns) + rebinding MD (50 ns)       │
-│ • Cross-rebinding (own / cross_target1 / cross_target2)      │
-│ • A6: Selectivity Index + bootstrap 95% CI                   │
-│ • B8: multi-pose ensemble (snap 0)                           │
-│ → SI > 1.5 + bootstrap CI lower > 1.5 → selective cavity     │
+│ • Cross-rebinding (own / cross_t1 / cross_t2)                │
+│ • ★ Steric clash 사전 검사 (≥30 clashes → SIZE_EXCLUDED)    │
+│ • ★ PCSI primary metric (persistent ≥50% frames × 6Å)       │
+│ • ★ Dual-imprinting auto-trigger (weak SI + N-glycan ≥1)    │
+│ • A6: bootstrap 95% CI / B8: multi-pose ensemble (snap 0)    │
+│ → PCSI > 1.2 (PASS) / > 1.5 (STRONG) or 모든 cross excluded  │
 └──────────────────────────────────────────────────────────────┘
                               ↓
 ┌─ Phase 6 ─ 합성 레시피 ──────────────────────────────────────┐
@@ -240,7 +255,7 @@ delta_sum   = mmsd_sum - smd_sum
               > 0 → interference (steric clash)
 ```
 
-### 5.2 C2: NSGA-II 3-objective Pareto optimization
+### 5.2 C2: NSGA-II 3-objective Pareto optimization + Chemistry Diversity 제약
 
 기존 [9]는 affinity 단일 목적이었으나, 본 파이프라인은 **NSGA-II** (Deb 2002, pymoo 구현)로 3개 목표를 동시 최적화:
 
@@ -253,6 +268,16 @@ delta_sum   = mmsd_sum - smd_sum
 - Pop size = 20, n_gen = 15 → ~300 evals (cache hit ~ 80 unique)
 - Repair: `RoundingRepair()` (integer chromosome → 모노머 인덱스)
 - 결과: **Pareto front** (≥20 non-dominated 조합)
+
+**Chemistry diversity 제약** (Mavliutova 2021, Liu 2017, Cleland 2022): 같은 화학적 클래스의 모노머만 골라 affinity를 극대화하는 NSGA-II의 함정을 막기 위해 hard filter + entropy bonus를 적용한다. `PRIMARY_CHEM_CLASS`에 각 모노머가 boronate/catechol/π-stack/H-bond donor/H-bond acceptor/hydrophobic/covalent/electrostatic/xl_structural 중 하나로 매핑돼 있고, `_evaluate()`에서:
+
+| 규칙 | 조건 | 처리 |
+|---|---|---|
+| **Rule 1** (hard) | 최소 클래스 수 `≥ MMSD_MIN_CHEMISTRY_CLASSES (=2)` | 위반 → infeasible |
+| **Rule 2** (hard) | 한 클래스 멤버 수 `≤ MMSD_MAX_PER_CLASS_COUNT (=2)` | 위반 → infeasible |
+| **Rule 3** (soft) | normalized Shannon entropy | `selectivity_score -= MMSD_CHEMISTRY_ENTROPY_WEIGHT (=0.3) × H_norm` |
+
+`MMSD_REQUIRE_CHEMISTRY_DIVERSITY = True`로 토글. CD9의 trial mode 조합 (AAPBA/FPBA/NE/DA/DVB) 처럼 다중 인식 메커니즘이 자동 선호된다.
 
 ### 5.3 Cross-MMSD ΔΔG Selectivity Penalty (본 파이프라인의 핵심)
 
@@ -324,11 +349,11 @@ results/phase3/
 
 **파일**: `code/pipeline/phase4_md_validation.py`
 
-### 6.1 시스템 구축
+### 6.1 시스템 구축 (ECL2 whole-protein 모드)
 
-- **Template**: Head 16-mer (실제 합성 조건과 일치)
-- **모노머 배치**: Phase 3 optimal combo의 functional × 5 copy + crosslinker × 5 copy = **25개 모노머**
-- **배치 방식**: 단백질 중심 반경 3.1–4.1 nm 구 껍질 랜덤 (min sep 1 nm) — PACKMOL [27] 방식 [12]
+- **Template**: **ECL2 전체 loop** (head 16-mer가 아닌 단백질 전체) — `PHASE4_TEMPLATE_MODE = "ecl2"`. 실제 MIP 합성에서 단백질 전체를 surface-immobilize 후 임프린팅하는 방식과 정합.
+- **단백질 restraint**: Cα/heavy-atom `-DPOSRES` (k = 1000 kJ/mol/nm²) → solid-phase 또는 silica bead 표면 고정 조건 모사 (Pluhar/Battaglia 2021 review, adenovirus eIP PMC11059108 protocol).
+- **모노머 배치**: Phase 3 optimal combo의 functional × 5 copy + crosslinker × 5 copy = **25개 모노머**, 단백질 표면 반경 3.1–4.1 nm 구 껍질 랜덤 (min sep 1 nm) — PACKMOL [27] 방식 [12].
 - **Force field**:
   - Protein: amber99sb-ildn [20]
   - Vinyl monomers: GAFF2 (acpype [28])
@@ -378,19 +403,27 @@ EBN이 높은 모노머 = template 표면에 결합 site 많음 → 더 많이 �
 
 ---
 
-## 7. Phase 5 — VIP Cavity Rebinding
+## 7. Phase 5 — VIP Cavity Rebinding (PCSI + Size-Exclusion + Dual-Imprinting)
 
-**파일**: `code/pipeline/phase5_rebinding.py`
+**파일**: `code/pipeline/phase5_rebinding.py`, `code/analyze_persistent_contacts.py`, `code/verify_phase.py`
 
-VIP (Virtually Imprinted Polymer) [11] 방식 — 중합을 position restraint로 근사하여 cavity 형성과 rebinding을 한 simulation에서 검증.
+VIP (Virtually Imprinted Polymer) [11] 방식 — 중합을 position restraint로 근사하여 cavity 형성과 rebinding을 한 simulation에서 검증. **PCSI**(Persistent Contact Selectivity Index)를 **Primary verification metric**으로, RMSD-SI는 fallback으로 사용한다. 또한 **size-exclusion**(입체 배제)과 **dual-imprinting**(글리칸 APBA 층) 두 가지 추가 선택성 메커니즘을 자동으로 감지·적용한다.
 
 ### 7.1 Snapshot 선택
 
 Phase 4 trajectory 후반 50%에서 **균등 간격 10 frame** 추출. Cherry-picking 방지 — 실제 중합은 UV/열에 의해 랜덤 시점에 발생하므로 "최적 프레임" 선택은 과적합.
 
-### 7.2 중합 근사
+### 7.2 중합 근사 — Two-tier position restraint (Yuan 2024, adenovirus eIP)
 
-모노머 heavy atoms에 **harmonic position restraint** (k = 1000 kJ mol⁻¹ nm⁻², GROMACS standard) → "현재 위치에서 cross-linking되어 polymer network에 잠긴" 상태.
+가교제와 기능성 모노머를 동일하게 restrain하던 기존 방식과 달리, 두 역할을 분리한다:
+
+| 모노머 종류 | k (kJ mol⁻¹ nm⁻²) | 물리적 의미 |
+|---|---|---|
+| **Crosslinker** (TEOS/TMOS/MBAAm/EGDMA/DVB/TRIM) | **5000** | 비가역 C-C 공유결합 네트워크 → 강체 매트릭스 |
+| **Functional monomer** | **1000** | 비공유 H-bond/π-π anchor → 인식 가능한 유연성 |
+| **Protein (ECL2)** | 1000 (`-DPOSRES`) | Surface-immobilization 조건 |
+
+`config.REBINDING_CROSSLINKER_RESTRAINT_K = 5000`, `REBINDING_RESTRAINT_K = 1000`. `CROSSLINKER_LIBRARY` 멤버 여부로 자동 분류.
 
 ### 7.3 Template removal test (10 ns)
 
@@ -398,45 +431,90 @@ Phase 4 trajectory 후반 50%에서 **균등 간격 10 frame** 추출. Cherry-pi
 - Template이 cavity 이탈 (RMSD > 5 Å) → "removable" = template 세척 가능 = **적정 결합 강도**
 - 이탈 못 함 → "stuck" = 결합 너무 강함 = 실제 합성에서 template 제거 어려움 → IF 저하
 
-### 7.4 Rebinding MD (50 ns × {own, cross_t1, cross_t2})
+### 7.4 Rebinding MD — ECL2 cross-rebinding
 
-동일 cavity에 own/다른 head 재삽입 후 50 ns. Cross-rebinding으로 selectivity 정량화:
+동일 cavity에 own ECL2 / 다른 ECL2를 재삽입 후 50 ns. 단, **EM 전에 steric clash 사전 검사** 단계가 추가됐다 (§7.6 size-exclusion).
+
+### 7.5 ★ PCSI — Persistent Contact Selectivity Index (Primary)
+
+RMSD는 단백질 크기에 영향을 받아 작은 단백질일수록 큰 값을 내는 편향이 있다. 본 파이프라인은 size-invariant한 **PCSI**를 1차 지표로 채택한다:
 
 ```
-SI (Selectivity Index) = RMSD_other / RMSD_own
-  SI > 1.5            → selective
-  SI 1.0 – 1.5        → weak selectivity
-  SI < 1.0            → cross-reactive
+persistent_residue   = trajectory 후반 50% 중 ≥50% 프레임에서 모노머와 6 Å 이내 접촉인 잔기
+PCSI(target)         = persistent(own) / max(persistent(cross_t1), persistent(cross_t2))
+  PCSI > 1.5         → STRONG selectivity
+  PCSI 1.2 – 1.5     → MODERATE / PASS (verify 임계)
+  PCSI 1.0 – 1.2     → WEAK
+  PCSI < 1.0         → CROSS-REACTIVE
 ```
 
-Welch's t-test로 own vs other RMSD 차이의 유의성 (p < 0.05).
+구현: `code/analyze_persistent_contacts.py` — MDAnalysis `distance_array`로 매 프레임 잔기-모노머 minimum distance 계산. 결과 → `results/reports/phase5_persistent_contacts.json`.
 
-### 7.5 A6: Bootstrap CI for SI
+### 7.6 ★ Size/Shape Exclusion Selectivity (Hoshino 2008, Shea group)
 
-SI는 단일 통계량 → 신뢰구간이 필요. **Bootstrap resampling** (1000 iter) → 95% CI:
+> "whole ECL2에 자연적으로 생성된 캐비티가 단백질마다 크기가 다르면 이미 선택성이 있는 것."
+
+가장 작은 단백질로 임프린팅된 캐비티(예: CD9, 79 잔기)는 더 큰 단백질(CD63 101, CD81 89)을 **물리적으로 수용할 수 없다**. EM 단계 이전에 `compute_steric_clash` (utils_analysis.py)가 단백질 heavy atom – 모노머 heavy atom 간 < `REBINDING_CLASH_CUTOFF_A` (2.0 Å) clash를 카운트:
+
+- `clash_count > REBINDING_CLASH_THRESHOLD` (30) → 해당 cross-target은 `size_excluded=True / status=SIZE_EXCLUDED`로 표시되고 MD를 실행하지 않음.
+- `verify_phase5`는 size-excluded 타겟의 (stale) persistent-contact 수를 PCSI 분모에서 **제외**. 모든 cross가 excluded이면 PCSI = ∞ → STRONG.
+
+이 메커니즘으로 CD9는 trial mode에서 own=13, CD63·CD81 모두 size-excluded (clash 38·74)로 STRONG 판정.
+
+### 7.7 ★ Dual-Imprinting Auto-Trigger (Teixeira 2021 [1])
+
+PCSI/SI가 약하지만 own에 N-glycan ≥ 1개이고 own 결합 자체는 성립할 때 (`n_rebound ≥ N_SNAPSHOTS // 3`), 자동으로 **APBA 보론산 층**을 cavity에 추가한 후 재시뮬레이션:
+
+1. APBA (3-aminophenylboronic acid) GAFF2 파라미터화 (acpype)
+2. Phase 2 docked pose가 있으면 그 위치, 아니면 단백질 COM 근처에 `n_glycan` copy 배치
+3. APBA heavy atom에 `POSRES_MONOMER` (k = 1000) — 위치 고정
+4. Atomtypes 정합성: APBA의 `[atomtypes]`를 main `topol.top`의 `[atomtypes]` 블록 **내부**(다른 `#include` 이전)에 삽입 — GROMACS가 `n3` 등 새 타입을 `#include` 전에 인식하게 함
+5. 동일 own / cross rebinding MD 재실행 → APBA – glycan diol boronate 결합 형성 여부 평가
+
+```
+적용 조건 (모두 만족):
+- 어느 cross-target의 selectivity_label ∈ {weak, cross-reactive}
+- n_glycan_sites_known ≥ 1
+- n_rebound ≥ max(1, N_SNAPSHOTS // 3)
+```
+
+CD63 (N-glycan 3개) Trial mode 결과: 실란-only 시 PCSI = 0/27 = 0 (cross-reactive) → APBA 3 copy 추가 후 own=6 / CD81=0 / CD9=3 → **PCSI 2.00 STRONG**. CD81은 glycan이 없어 boronate layer에 결합하지 못해 own→0으로 떨어지는 게 결정적.
+
+### 7.8 RMSD-SI (Fallback) + A6 Bootstrap CI
+
+PCSI 미산출 시 fallback으로 `SI = RMSD_other / RMSD_own` + Welch's t-test 사용. **Bootstrap resampling** (1000 iter, 95% CI)으로 점추정의 robustness 평가:
+
 - CI lower > 1.5 → 통계적으로 robust한 selectivity
-- CI 1–2 polish: SI 점추정이 1.5여도 CI가 0.8–2.5라면 신뢰 못 함
 
-### 7.6 B8: Multi-pose ensemble (snap 0)
+### 7.9 B8: Multi-pose ensemble (snap 0)
 
 대안 binding mode 확인. Snap 0에서 conformer × replica 다중 rebinding → cavity가 단일 mode인지 multiple mode 허용인지 평가.
 
-### 7.7 Multi-restart fallback
+### 7.10 Resume + 중간 저장
 
-특정 snap이 발산하면 (RMSD > 10 Å within 1 ns) seed 바꿔 최대 3회 재시도 — extension 안 함, 새 run으로 재시작.
+각 target 완료 시 `phase5_rebinding_results.json`을 incremental update — 장시간 (수일~수주) run에서 정전·OOM·디스크 부족으로 중단되어도 재실행 시 완료된 타겟은 자동 skip. GROMACS는 `-cpi md.cpt -append`로 trajectory 이어쓰기.
 
-### 7.8 출력
+### 7.11 출력
 
 ```
 results/phase5/{target}/
 ├── snapshot_{0..9}/
-│   ├── rebind_own/md/         # 50 ns own rebinding
-│   ├── rebind_{other1}/md/    # cross rebinding
+│   ├── rebind_own/md/          # 50 ns own rebinding (ECL2)
+│   ├── rebind_{other1}/md/     # cross rebinding (size-exclusion 검사 후)
 │   ├── rebind_{other2}/md/
-│   └── removal_test/md/       # 10 ns removal
-├── snapshot_0/multipose/      # B8 multi-pose (snap 0만)
+│   ├── removal_test/md/        # 10 ns removal
+│   └── dual_imprinting/        # (CD63만) APBA 추가 후 재시뮬레이션
+│       ├── topol.top
+│       ├── dual_cavity.gro
+│       └── rebind_{own,other1,other2}/md/
+├── snapshot_0/multipose/       # B8 multi-pose (snap 0만)
+├── dual_apba_param/            # (CD63만) APBA GAFF2 파라미터
 └── phase5_rebinding_results.json
 ```
+
+검증 산출물:
+- `results/reports/phase5_persistent_contacts.json` — PCSI 원자료
+- `results/reports/phase5_verification.json` — 통과/실패 판정 + size-exclusion 메커니즘 표기
 
 ---
 
@@ -604,6 +682,13 @@ epoxy    ↔ any matrix                (side-chain covalent)
 | 코드 | 기능 | 위치 |
 |------|------|------|
 | **C2** | **NSGA-II 3-objective Pareto** + **cross-MMSD ΔΔG penalty** | Phase 3 |
+| **C3** | **Chemistry diversity 제약** (Rule 1·2 hard + Rule 3 entropy soft) | Phase 3 |
+| **C4** | **ECL2 whole-protein 모드** + Cα `-DPOSRES` (surface MIP 정합) | Phase 4 |
+| **C5** | **Two-tier restraint** (crosslinker k=5000 / functional k=1000) | Phase 5 |
+| **C6** | **PCSI** (Persistent Contact Selectivity Index) — size-invariant primary metric | Phase 5 |
+| **C7** | **Size/Shape Exclusion** 자동 감지 (steric clash pre-EM) | Phase 5 |
+| **C8** | **Dual-imprinting auto-trigger** (APBA boronate glycan layer) | Phase 5 |
+| **C9** | **Per-target incremental JSON + checkpoint resume** (`-cpi md.cpt -append`) | Phase 4-5 |
 
 ---
 
@@ -742,18 +827,26 @@ else (전부 통과):
 | 3 | 조합 크기 | 2–6 (자동) | 가변 |
 | 3 | **SELECTIVITY_WEIGHT** | **0.5** | **Garcia-Ortegon 2022 [32]** |
 | 3 | **SELECTIVITY_DDG_THRESHOLD** | **-1.0 kcal/mol** | **≈ 1.5·RT (298 K)** |
-| 4 | Template | Head 16-mer | 합성 조건 동일 |
+| 3 | **MMSD_MIN_CHEMISTRY_CLASSES** | **2** | Mavliutova 2021 — 다중 인식 |
+| 3 | **MMSD_MAX_PER_CLASS_COUNT** | **2** | Liu 2017 — 단일 클래스 dominate 방지 |
+| 3 | **MMSD_CHEMISTRY_ENTROPY_WEIGHT** | **0.3** | Cleland 2022 — soft entropy bonus |
+| 4 | **Template mode** | **ECL2 whole-loop** (`PHASE4_TEMPLATE_MODE="ecl2"`) | 실제 surface-MIP 합성과 일치 |
+| 4 | **Protein restraint** | `-DPOSRES` Cα k=1000 | Surface immobilization |
 | 4 | 모노머 수 | 25 (각 type 5) | 통계 + 효율 |
-| 4 | MD 시간 | 350 ns (production) | 평형 도달 |
+| 4 | MD 시간 | **350 ns** (production) / 100 ns (trial) | 평형 도달 |
 | 4 | Contact cutoff | 6 Å | vdW 포함 |
 | 4 | H-bond | d-a 3.5 Å, angle 150° | Yuan 2024 [14] |
 | 4 | Convergence | Q1→Q4 diff < 10% | Polania 2024 [12] |
 | 4 | MM-GBSA | igb=5, saltcon=0.15, idecomp=2 | Kumar 2024 [15] |
-| 5 | Snapshot | 균등 10개 | Cherry-picking 방지 |
-| 5 | Restraint k | 1000 kJ/mol/nm² | Zink 2018 [11] |
-| 5 | Rebinding 기준 | RMSD < 5 Å | head 직경 1/3 |
-| 5 | SI threshold | > 1.5 | Mohsenzadeh 2024 [16] |
-| 5 | Bootstrap CI | 1000 iter, 95% | 표준 통계 |
+| 5 | Snapshot | 균등 **10**개 (trial: 1) | Cherry-picking 방지 |
+| 5 | **Crosslinker restraint k** | **5000** kJ/mol/nm² | 강체 매트릭스 (Yuan 2024) |
+| 5 | **Functional restraint k** | **1000** kJ/mol/nm² | Anchor 유연성 |
+| 5 | Rebinding MD | 50 ns × {own, cross1, cross2} | head 직경 1/3 |
+| 5 | **PCSI threshold** | **PASS > 1.2 / STRONG > 1.5** | size-invariant primary metric |
+| 5 | Persistent-contact 기준 | ≥ 50% 프레임 × 6 Å | Hoshino 2008 / 본 파이프라인 |
+| 5 | **Steric clash cutoff / threshold** | **2.0 Å / 30 clashes** | Size-exclusion 자동 감지 |
+| 5 | **Dual-imprinting trigger** | weak SI + N-glycan ≥ 1 + n_rebound ≥ N/3 | Teixeira 2021 [1] |
+| 5 | Bootstrap CI (fallback) | 1000 iter, 95% | 표준 통계 |
 | 5 | 재현성 | ≥ 3/10 snapshot | A6 + B8 |
 | 6 | Initiator | 1 mol% of vinyl | B10 |
 
@@ -908,4 +1001,4 @@ autodock_gpu_128wi --version
 
 ---
 
-*Last updated: 2026-05-13 — selectivity-aware MMSD (cross-docking ΔΔG penalty) added to Phase 3*
+*Last updated: 2026-05-31 — ECL2 whole-protein imprinting (Phase 4-5 redesign), two-tier restraint (crosslinker 5000 / functional 1000), PCSI primary verification metric, automatic size-exclusion detection, dual-imprinting auto-trigger (APBA glycan layer for CD63), chemistry diversity constraint (NSGA-II Rule 1/2/3), per-target incremental JSON + GROMACS checkpoint resume. Trial mode 3/3 타겟 통과 검증 완료 후 본 실행 (Phase 4 350 ns + Phase 5 10-snapshot) 진행 중.*

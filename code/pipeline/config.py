@@ -589,7 +589,7 @@ MMSD_ENFORCE_POLYMERIZATION_COMPATIBILITY = True
 # Trial mode for whole-ECL2 imprinting validation: 100 ns is sufficient for
 # protein-surface cavity equilibration (smaller system relative to head-template).
 # Set back to 350 ns for production after method validation.
-MD_PRODUCTION_NS = 100            # pre-polymerization MD (trial mode for ECL2; default 350 ns)
+MD_PRODUCTION_NS = 350            # pre-polymerization MD (full production; trial mode was 100 ns)
 MD_TIMESTEP_FS = 2.0              # integration timestep
 MD_TEMPERATURE_K = 300.0          # K
 MD_PRESSURE_BAR = 1.0             # bar
@@ -630,7 +630,7 @@ REBINDING_CROSSLINKER_RESTRAINT_K = 5000  # kJ/mol/nm² — rigid matrix
 REBINDING_PROTEIN_RESTRAINED = True       # keep ECL2 Cα restrained during rebinding
 
 # Trial / quick mode: 1 snapshot per target for method validation
-REBINDING_TRIAL_MODE = True       # if True: N_SNAPSHOTS=1, MD_NS=30 (override above)
+REBINDING_TRIAL_MODE = False      # if True: N_SNAPSHOTS=1, MD_NS=30 (override above)
 
 # Steric Complementarity Score (SCS) — size-exclusion selectivity.
 # When a cross-target protein is too large for the cavity, it clashes severely

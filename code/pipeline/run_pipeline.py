@@ -138,9 +138,11 @@ def _check_phase_completed(phase_num: int, output_dir: str,
         try:
             with open(path) as f:
                 data = json.load(f)
+            # Phase 2 nests targets under "filtered" (not at top level).
+            container = data.get("filtered", data) if phase_num == 2 else data
             for t in target_names:
-                entry = data.get(t)
-                if not isinstance(entry, dict) or not entry:
+                entry = container.get(t)
+                if entry is None or (isinstance(entry, (dict, list)) and not entry):
                     return False  # missing or empty target → re-run
         except Exception:
             return False

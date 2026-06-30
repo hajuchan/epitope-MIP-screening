@@ -394,15 +394,30 @@ def run_phase6(phase4_results: dict = None,
         results[target] = _analyze_rebinding_results(
             target, target_names, snapshot_results, REBINDING_RMSD_THRESHOLD)
 
-        # Step 7: Auto dual-imprinting if weak selectivity + has N-glycan
+        # Step 7: Auto dual-imprinting if weak selectivity + has N-glycan IN ECL2
         target_result = results[target]
-        n_glycan = phase1_results[target].get("properties", {}).get(
-            "n_glycan_sites_known", 0)
+        # Count N-X-S/T sequons in the ECL2 sequence (X != P). The total-protein
+        # `n_glycan_sites_known` counts glycans anywhere (including ECL1 / intracellular)
+        # — but APBA grafted into our ECL2-imprinted cavity can only reach glycans
+        # that actually sit on the ECL2 surface. Counting ECL2-local sequons here
+        # prevents false-positive triggers (e.g. CD9: 1 total glycan at N52 in ECL1,
+        # 0 in ECL2 → dual must NOT trigger).
+        ecl2_seq = phase1_results[target].get("ecl2_sequence", "") or ""
+        n_glycan = sum(
+            1 for i in range(len(ecl2_seq) - 2)
+            if ecl2_seq[i] == "N" and ecl2_seq[i + 1] != "P"
+            and ecl2_seq[i + 2] in ("S", "T"))
         sel = target_result.get("selectivity", {})
         # Dual-imprinting criteria:
         # 1. Any cross-target SI < 1.5 AND p > 0.05 (not statistically selective)
-        # 2. N-glycan ≥ 1 (APBA boronate-diol target exists) [Teixeira 2021]
-        # 3. Rebinding ≥ 3/5 (cavity works; if <3, monomer combo itself is the issue)
+        # 2. N-glycan ≥ 1 *in ECL2* (APBA needs accessible diol on ECL2 surface)
+        # 3. Rebinding ≥ N/3 (cavity works; if too low, monomer combo itself is bad)
+        # 4. NO cross-target is already size-excluded. Size-exclusion is a stronger,
+        #    mechanism-level selectivity than APBA glycan recognition — if it's already
+        #    in effect, adding APBA only introduces background.
+        any_size_excluded = any(
+            s.get("selectivity_label") == "size-excluded"
+            for s in sel.values())
         any_not_significant = any(
             s.get("selectivity_label") in ("weak", "cross-reactive")
             and (s.get("p_value") is None or s.get("p_value") > 0.05)
@@ -411,10 +426,11 @@ def run_phase6(phase4_results: dict = None,
         # Adaptive rebound threshold: ≥3 in full run (10 snaps), ≥1 in trial (1 snap)
         rebound_threshold = max(1, REBINDING_N_SNAPSHOTS // 3)
 
-        if any_not_significant and n_glycan > 0 and n_rebound >= rebound_threshold:
+        if (any_not_significant and n_glycan > 0 and n_rebound >= rebound_threshold
+                and not any_size_excluded):
             logger.info(f"\n  *** Dual-imprinting triggered for {target} ***")
             logger.info(f"      Reason: non-significant selectivity (SI<1.5, p>0.05) "
-                        f"+ {n_glycan} N-glycan sites + rebinding {n_rebound}/{REBINDING_N_SNAPSHOTS}")
+                        f"+ {n_glycan} ECL2 N-glycan sites + rebinding {n_rebound}/{REBINDING_N_SNAPSHOTS}")
             logger.info(f"      Action: adding APBA (boronic acid) to cavity for glycan recognition")
 
             dual_results = _run_dual_imprinting_vip(
@@ -424,13 +440,20 @@ def run_phase6(phase4_results: dict = None,
             )
             target_result["dual_imprinting"] = dual_results
             target_result["dual_imprinting_reason"] = (
-                f"SI weak + {n_glycan} N-glycan sites → APBA layer 2")
+                f"SI weak + {n_glycan} ECL2 N-glycan sites → APBA layer 2")
         elif any_not_significant and n_glycan == 0:
             target_result["dual_imprinting"] = None
             target_result["dual_imprinting_reason"] = (
-                "Weak selectivity but no N-glycan sites — dual-imprinting not applicable")
-            logger.info(f"  {target}: weak selectivity but no N-glycan → "
+                "Weak selectivity but no N-glycan sites in ECL2 — dual-imprinting not applicable")
+            logger.info(f"  {target}: weak selectivity but no ECL2 N-glycan → "
                         f"dual-imprinting not applicable")
+        elif any_size_excluded:
+            target_result["dual_imprinting"] = None
+            target_result["dual_imprinting_reason"] = (
+                "Cross-target already size-excluded — size/shape selectivity is "
+                "mechanism-level; APBA layer would only add background, skipped")
+            logger.info(f"  {target}: size-exclusion already provides selectivity → "
+                        f"dual-imprinting skipped")
 
         # Per-target incremental save — survives crashes
         try:
