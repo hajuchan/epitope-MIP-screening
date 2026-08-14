@@ -20,13 +20,24 @@ def run_phase5(phase3_results: dict = None,
                phase4_results: dict = None,
                phase5_results: dict = None,
                target_names: list = None,
-               output_dir: str = None) -> dict:
+               output_dir: str = None,
+               fresh: bool = False) -> dict:
     """
-    Phase 5 entry point: generate synthesis recipes.
+    Phase 6 in the pipeline order: generate synthesis recipes.
+
+    NOTE ON NAMING: this function is HISTORICALLY named `run_phase5`. The
+    pipeline in run_pipeline.py dispatches this as Phase 6 (recipe generation).
+    `run_phase6_recipe` below is the semantically-correct alias — prefer it in
+    new code; `run_phase5` is kept for back-compat.
+
+    `fresh` is accepted for uniform threading from the runner; this phase has
+    no persistent per-target cache to invalidate (it rewrites recipes end-to-end
+    each call), so the flag is currently a no-op but harmless.
 
     Returns dict with recipes per target, including monomer ratios,
     synthesis protocol, and characterization recommendations.
     """
+    del fresh  # accepted for signature uniformity; no cache to invalidate
     from .config import (TARGETS, ALL_MONOMERS, CROSSLINKERS,
                          SILANE_MONOMERS, VINYL_MONOMERS,
                          POLYMERIZATION_SILANE, POLYMERIZATION_VINYL,
@@ -100,9 +111,56 @@ def run_phase5(phase3_results: dict = None,
 
         # Get Phase 4 optimal ratio if available
         p4_ratio = {}
+        p4_ratio_basis = None
+        p4_accepted = None
+        p4_quality_failures = None
         best_pc_id = best_pc.get("pc_id", "")
+        p4_lookup_missed = False
+        p4_ratio_unavailable = False
         if best_pc_id in p4:
-            p4_ratio = p4[best_pc_id].get("optimal_ratio", {})
+            _p4pc = p4[best_pc_id]
+            # optimal_ratio is None when Phase 4 could not derive one — a zero
+            # or absent EBN, which now raises there instead of being clamped to
+            # 1 part (REVIEW FINDING 13). `or {}` keeps _generate_recipe on its
+            # default-ratio path, and the flag taints the recipe below.
+            p4_ratio = _p4pc.get("optimal_ratio") or {}
+            if _p4pc.get("optimal_ratio", "missing") is None:
+                p4_ratio_unavailable = True
+                logger.error(
+                    f"[{target}] Phase 4 leg {best_pc_id} derived NO synthesis "
+                    f"ratio: "
+                    f"{(_p4pc.get('optimal_ratio_basis') or {}).get('error')}. "
+                    f"The recipe falls back to the default ratio and is marked "
+                    f"PROVISIONAL.")
+            # optimal_ratio_basis states where each HALF of the ratio came from:
+            # the functional parts are EBN-derived, the crosslinker part is a
+            # mole fraction (SOLGEL_Q_MOLE_FRACTION for sol-gel systems). Before
+            # the audit the crosslinker was hardcoded to exactly 50 mol% for every
+            # recipe regardless of the EBN data it claimed to derive from.
+            p4_ratio_basis = _p4pc.get("optimal_ratio_basis")
+            p4_accepted = _p4pc.get("accepted")
+            p4_quality_failures = _p4pc.get("quality_failures")
+        else:
+            # A LOOKUP MISS IS NOT AN ACCEPTANCE (REVIEW FINDING 6).
+            #
+            # This branch had no else and no log. On a pc_id mismatch between
+            # Phase 3's top_pc and Phase 4's result key, p4_accepted stayed
+            # None — which is FALSY BUT NOT False, so the bench-safety gate
+            # below (`if p4_accepted is False`) never fired. The recipe was
+            # emitted with the default non-MD ratio, was NOT marked
+            # provisional, and nothing anywhere recorded that the MD-derived
+            # ratio had been dropped. A REJECTED Phase 4 leg reads identically
+            # to an accepted one through this path.
+            #
+            # A missing acceptance verdict is unverified, and unverified taints
+            # the recipe exactly as a failed verdict does.
+            p4_lookup_missed = True
+            logger.error(
+                f"[{target}] Phase 4 has no leg {best_pc_id!r} "
+                f"(available: {sorted(p4)}) — no MD-derived monomer ratio and "
+                f"NO acceptance verdict for the composition Phase 3 selected. "
+                f"The recipe falls back to the default ratio and is marked "
+                f"PROVISIONAL.")
 
         # Generate recipe
         recipe = _generate_recipe(
@@ -110,12 +168,57 @@ def run_phase5(phase3_results: dict = None,
             ALL_MONOMERS, TARGETS[target],
             md_ratio=p4_ratio,
         )
+        recipe["optimal_ratio_basis"] = p4_ratio_basis
+
+        # ── BENCH SAFETY GATE ──────────────────────────────────────
+        # This recipe is a wet-lab instruction. A monomer ratio derived from an
+        # MD that never converged or never equilibrated must not reach a bench
+        # unlabelled. Phase 4 publishes `accepted` per leg; Phase 5 propagates
+        # `provisional`. Either one taints the recipe.
+        _p5_provisional = bool((rebinding or {}).get("provisional"))
+        # p4_lookup_missed is included because "no verdict" must taint the
+        # recipe as surely as "failed verdict" does — see the else branch above.
+        if (p4_accepted is False or _p5_provisional or p4_lookup_missed
+                or p4_ratio_unavailable):
+            recipe["status"] = "PROVISIONAL — NOT VALIDATED"
+            recipe["provisional"] = True
+            recipe["provisional_reason"] = {
+                "phase4_accepted": p4_accepted,
+                "phase4_quality_failures": p4_quality_failures,
+                "phase4_leg_not_found": p4_lookup_missed,
+                "phase4_ratio_unavailable": p4_ratio_unavailable,
+                "phase4_leg_requested": best_pc_id if p4_lookup_missed else None,
+                "phase4_legs_available": sorted(p4) if p4_lookup_missed else None,
+                "phase5_provisional": _p5_provisional,
+                "phase5_reason": (rebinding or {}).get("provisional_reason"),
+                "meaning": (
+                    "The monomer ratio below was derived from a Phase 4 MD that "
+                    "failed its acceptance criteria (convergence / RMSD "
+                    "equilibration), and/or from Phase 5 rebinding built on such "
+                    "an MD, and/or from NO Phase 4 leg at all (the composition "
+                    "Phase 3 selected was never simulated). Do NOT synthesise "
+                    "from these numbers without re-running the failed leg."),
+            }
+            logger.error(
+                f"[{target}] RECIPE MARKED PROVISIONAL — phase4 accepted="
+                f"{p4_accepted} (failures={p4_quality_failures}), "
+                f"phase4 leg not found={p4_lookup_missed}, "
+                f"phase5 provisional={_p5_provisional}")
+        else:
+            recipe["provisional"] = False
+
         recipes[target] = recipe
 
         # A7: NIP (Non-Imprinted Polymer) control recipe — same as MIP minus template
         from .config import PHASE6_GENERATE_NIP
         if PHASE6_GENERATE_NIP:
             nip_recipe = _generate_nip_recipe(recipe)
+            # The NIP is the MIP minus the template, so it inherits the MIP's
+            # provenance: if the MIP ratio is provisional, so is the control's.
+            nip_recipe["provisional"] = recipe.get("provisional", False)
+            if recipe.get("provisional"):
+                nip_recipe["status"] = "PROVISIONAL — NOT VALIDATED"
+                nip_recipe["provisional_reason"] = recipe.get("provisional_reason")
             recipes[target + "_NIP"] = nip_recipe
 
         # Log recipe
@@ -142,6 +245,12 @@ def run_phase5(phase3_results: dict = None,
     logger.info(f"\nCombined protocol → {protocol_path}")
 
     return recipes
+
+
+# Semantic alias — this module IS Phase 6 (recipe generation) in the pipeline.
+# `run_phase5` is the historical name; `run_phase6_recipe` is what new callers
+# should reach for. Both bind the same object.
+run_phase6_recipe = run_phase5
 
 
 def _generate_nip_recipe(mip_recipe: dict) -> dict:
@@ -202,22 +311,58 @@ def _select_best_pc(p3_data: dict, p4_data: dict) -> dict:
     if not top_pcs:
         return None
 
-    # If Phase 4 results available, rank by MM-PBSA
-    if p4_data:
-        best_dg = float("inf")
-        best_pc = None
-        for pc in top_pcs:
-            pc_id = pc["pc_id"]
-            md_data = p4_data.get(pc_id, {})
-            dg = md_data.get("mmpbsa", {}).get("delta_total_kcal", 0)
-            if dg < best_dg:
-                best_dg = dg
-                best_pc = pc
-        if best_pc:
-            return best_pc
+    # A MISSING ΔG IS NOT A ΔG OF ZERO (REVIEW FINDING 14).
+    #
+    # This was `dg = md_data.get("mmpbsa", {}).get("delta_total_kcal", 0)`.
+    # 0 kcal/mol sits in the middle of the real ΔG range, so a leg whose
+    # MM-GBSA never ran outranked a leg measured to be repulsive (+3.5
+    # kcal/mol), and when EVERY leg's MM-GBSA failed the loop silently
+    # returned top_pcs[0] while claiming to have ranked by MM-PBSA. Nothing
+    # was logged and best_dg was never recorded.
+    #
+    # run_mmpbsa returns {"error": ...} without raising for "No results file
+    # produced", "gmx_MMPBSA not found", a non-zero exit and a timeout, so
+    # these are the live shapes — not hypotheticals.
+    usable = []
+    skipped = {}
+    for pc in top_pcs:
+        pc_id = pc.get("pc_id")
+        mm = (p4_data or {}).get(pc_id, {}).get("mmpbsa")
+        if not isinstance(mm, dict):
+            skipped[pc_id] = "no mmpbsa block"
+        elif mm.get("error"):
+            skipped[pc_id] = f"mmpbsa error: {mm['error']}"
+        elif not isinstance(mm.get("delta_total_kcal"), (int, float)):
+            skipped[pc_id] = "mmpbsa has no delta_total_kcal"
+        else:
+            usable.append((float(mm["delta_total_kcal"]), pc))
 
-    # Fallback: Phase 3 best MMSD sum
-    return top_pcs[0]
+    if usable:
+        best_dg, best_pc = min(usable, key=lambda t: t[0])
+        best_pc = dict(best_pc)
+        best_pc["selection_basis"] = "phase4_mmpbsa"
+        best_pc["selection_dg_kcal"] = best_dg
+        best_pc["selection_n_candidates_with_dg"] = len(usable)
+        best_pc["selection_skipped"] = skipped
+        if skipped:
+            logger.warning(
+                f"MM-PBSA ranking used {len(usable)}/{len(top_pcs)} candidates; "
+                f"skipped (no usable ΔG): {skipped}")
+        return best_pc
+
+    # No candidate has a usable ΔG. Fall through to the Phase 3 MMSD ranking
+    # EXPLICITLY and record that, so the report cannot imply an MM-PBSA
+    # ranking that never happened.
+    if p4_data:
+        logger.error(
+            f"NO candidate has a usable MM-GBSA ΔG ({skipped}) — falling back "
+            f"to the Phase 3 MMSD ranking. This selection was NOT made on "
+            f"binding free energy, despite Phase 4 results being present.")
+    best_pc = dict(top_pcs[0])
+    best_pc["selection_basis"] = "phase3_mmsd_rank_fallback"
+    best_pc["selection_dg_kcal"] = None
+    best_pc["selection_skipped"] = skipped
+    return best_pc
 
 
 def _generate_recipe(target: str, monomers: list,

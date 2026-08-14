@@ -21,9 +21,11 @@ T3  IMPORT CONTRACT    — every name any module imports from config must exist
 T4  BSA ISOLATED       — output tree, pinned libraries, the TEOS-crosslinker-
                          record SMILES trap, DI water, pH recommendation.
 T5  BAD SELECTOR       — a typo'd MIP_EXPERIMENT must raise, never fall back.
-T6  BLOCKED SPECIES    — SILANE_SPECIES="hydrolyzed" must be refused at import
-                         (no measurable Si-OH donor on this engine, §11(i)) and
-                         the MIP_ALLOW_BLOCKED_SPECIES opt-in must still work.
+T6  BLOCKED SPECIES    — the SILANE_SPECIES_BLOCKED guard must refuse at import,
+                         and the MIP_ALLOW_BLOCKED_SPECIES opt-in must still
+                         work.  Tests the MECHANISM against whichever species §1
+                         selects; the blocked SET is policy and is now empty
+                         (the three §11(i) defects were fixed in 2026-08).
 T7  GUARD 1 WIDTH      — a CD-tree path injected into OUTPUT_DIRS *after*
                          _rederive() must be rejected; consumers read OUTPUT_DIRS
                          via get_output_path (which mkdirs), never OUTPUT_DIR.
@@ -55,6 +57,41 @@ from config_baseline import snapshot, BASELINE_JSON  # noqa: E402
 # may appear, disappear, or change value.
 _NEW_NAMES = {
     "EXPERIMENT", "KNOWN_EXPERIMENTS", "EXPERIMENT_LABEL", "UNCONSUMED_KEYS",
+    # Protonation-rule knobs added 2026-08-13. CD-neutral BY VALUE, not merely
+    # by intent: PH_CHARGE_ASSIGNMENT defaults to "majority", which is the rule
+    # the code already implemented unconditionally, and PH_USE_PROPKA defaults
+    # to False, which is the behaviour when propka is absent. The BSA
+    # experiment overrides both. This whitelist entry is therefore a
+    # declaration that CD's RESOLVED VALUES are unchanged — the test still
+    # fails if any existing symbol moves.
+    "PH_CHARGE_ASSIGNMENT", "PH_USE_PROPKA",
+    # Vesicle provenance recorded 2026-08-13. Declarations only — nothing reads
+    # them yet, so no CD value can move; they exist so the glycan assumption is
+    # written down where a later contradiction becomes visible.
+    "EV_SOURCE_CELL_LINE", "EV_SOURCE_CATALOGUE",
+    "EV_GLYCAN_TYPE", "EV_GLYCAN_SIALYLATED",
+    # Opt-in hooks for the membrane-template and glycan work (Route P). Added by
+    # the 2026-08 repair pass, not by hand, and admitted here only because their
+    # DEFAULTS reproduce current behaviour exactly: PHASE1_GLYCAN_MODE "none",
+    # PHASE4_MEMBRANE_MODE False, PHASE4_TEMPLATE_MODE still "ecl2". The value
+    # check below is what actually guarantees CD is unchanged; this list only
+    # permits the names to exist.
+    "PHASE1_GLYCAN_MODE", "PHASE1_GLYCAN_INPUT_DIR", "PHASE1_GLYCAN_SEQUON_REGEX",
+    "PHASE4_MEMBRANE_MODE", "PHASE4_MEMBRANE_INPUT_DIR", "PHASE4_MEMBRANE_LIPIDS",
+    "PHASE4_MEMBRANE_POSRES_LIPID_K", "PHASE4_MEMBRANE_RESTRAIN_TM",
+    "SELECTIVITY_MEMBRANE_CALIBRATION",
+    # 2026-08-14: HMR + EV-templated Phase 5 rebinding (Triton lysis).
+    # Values chosen to reproduce current OFF-mode behaviour when the caller
+    # hasn't wired the CHARMM-GUI membrane inputs — PHASE5_TRITON_REMOVAL_MODE
+    # is only consumed by the new utils_triton_removal path (guarded), and
+    # PHASE5_FRESH_EV_* are only read by the fresh-EV builder (not yet on
+    # the default Phase 5 code path). PHASE4_HMR_MODE = True is the deliberate
+    # exception: it flips MD_TIMESTEP_FS 2.0 → 4.0. This is the intended
+    # behaviour change for the membrane runs and is documented in the
+    # config.py HMR override block.
+    "PHASE4_HMR_MODE",
+    "PHASE5_TRITON_REMOVAL_MODE", "PHASE5_FRESH_EV_PLACEMENTS",
+    "PHASE5_FRESH_EV_APPROACH_GAP_NM", "PHASE5_BOX_Z_EXTEND_NM",
 }
 
 
@@ -87,7 +124,15 @@ def test_cd_unchanged():
 
     added = set(got) - set(want)
     removed = set(want) - set(got)
-    changed = sorted(k for k in set(got) & set(want) if got[k] != want[k])
+    # UNCONSUMED_KEYS is metadata ABOUT the config, not a config value: it is
+    # the set of keys declared but not yet read, and it legitimately shrinks as
+    # machinery lands and grows as declarations are added. Diffing it against a
+    # frozen baseline would force a baseline regeneration on every such change,
+    # which is churn that buys no safety — and a regenerated baseline is exactly
+    # how a real drift would slip through. Everything else is still compared.
+    _METADATA = {"UNCONSUMED_KEYS"}
+    changed = sorted(k for k in (set(got) & set(want)) - _METADATA
+                     if got[k] != want[k])
 
     assert not removed, f"symbols DISAPPEARED from CD: {sorted(removed)}"
     assert added <= _NEW_NAMES, f"unexpected new CD symbols: {sorted(added - _NEW_NAMES)}"
@@ -159,6 +204,8 @@ out = {
  "output_dir": c.OUTPUT_DIR,
  "cd_tree": str((c.PROJECT_ROOT / "results").resolve()),
  "all_monomers": sorted(c.ALL_MONOMERS),
+ "speciation_parents": {k: v.get("protonated_form_of")
+                        for k, v in c.ALL_MONOMERS.items()},
  "functional": sorted(c.FUNCTIONAL_MONOMERS),
  "crosslinkers": sorted(c.CROSSLINKERS),
  "teos_smiles": c.ALL_MONOMERS["TEOS"]["smiles"],
@@ -183,7 +230,22 @@ print("@@" + json.dumps(out))
     mine = Path(d["output_dir"]).resolve()
     assert mine != cd and cd not in mine.parents, \
         f"BSA OUTPUT_DIR {mine} is inside the CD tree {cd}"
-    assert d["all_monomers"] == ["APTES", "TEOS"], d["all_monomers"]
+    # THE PIN IS ON THE REAGENT SET, NOT ON ALL_MONOMERS' cardinality.
+    # ALL_MONOMERS may additionally carry pH-SPECIATION forms of a pinned
+    # reagent (2026-08: APTESH, the ammonium form of APTES, which is what the
+    # box actually holds at pH 9.5 — same bottle, different protonation state).
+    # Every such extra entry MUST declare `protonated_form_of` pointing at a
+    # pinned reagent, and it must NOT reach FUNCTIONAL_MONOMERS or CROSSLINKERS
+    # — those are what Phase 3 enumerates combinations from, and a molecule must
+    # never be screened against itself.
+    _PINNED = {"APTES", "TEOS"}
+    extra = [m for m in d["all_monomers"] if m not in _PINNED]
+    assert set(d["all_monomers"]) >= _PINNED, d["all_monomers"]
+    for m in extra:
+        parent = d["speciation_parents"].get(m)
+        assert parent in _PINNED, \
+            f"{m} is in ALL_MONOMERS but is not a speciation form of a pinned " \
+            f"reagent (protonated_form_of={parent!r})"
     assert d["functional"] == ["APTES"], d["functional"]
     assert d["crosslinkers"] == ["TEOS"], d["crosslinkers"]
     # THE trap: TEOS lives in both SILANE_MONOMERS and CROSSLINKER_LIBRARY and
@@ -216,16 +278,28 @@ print("@@" + json.dumps(out))
 
 # ── T6 ──────────────────────────────────────────────────────────
 def test_blocked_species_refused():
-    """SILANE_SPECIES in SILANE_SPECIES_BLOCKED must raise, not warn."""
+    """SILANE_SPECIES in SILANE_SPECIES_BLOCKED must raise, not warn.
+
+    This tests the GUARD MECHANISM, not the guard's current POLICY.  It used to
+    hardcode 'hydrolyzed' as the blocked species and assert that config_BSA.py
+    defaults to 'intact'.  Both facts changed in 2026-08 — the three engine
+    defects that blocked the silanol were fixed, so 'hydrolyzed' is now the
+    default and SILANE_SPECIES_BLOCKED is empty — but the mechanism must stay
+    alive for the next species that outruns the engine (the protonated ammonium
+    form, which acpype's hardcoded '-n 0' still cannot parameterise).  So the
+    test now arms the guard against WHATEVER §1 currently selects.
+    """
     src = _CODE_DIR / "pipeline" / "config_BSA.py"
     original = src.read_text(encoding="utf-8")
-    marker = 'SILANE_SPECIES = "intact"'
-    assert marker in original, "config_BSA.py no longer defaults to intact"
+    marker = "SILANE_SPECIES_BLOCKED = frozenset("
+    assert marker in original, "config_BSA.py no longer declares the guard"
+    line = next(l for l in original.splitlines() if l.startswith(marker))
+    armed = 'SILANE_SPECIES_BLOCKED = frozenset({"intact", "hydrolyzed"})'
     try:
-        src.write_text(original.replace(marker, 'SILANE_SPECIES = "hydrolyzed"', 1),
-                       encoding="utf-8")
+        src.write_text(original.replace(line, armed, 1), encoding="utf-8")
         r = _run_probe("import pipeline.config", "BSA")
-        assert r.returncode != 0, "hydrolyzed loaded without the opt-in — guard dead"
+        assert r.returncode != 0, \
+            "a blocked species loaded without the opt-in — guard dead"
         assert "BLOCKED-ON-ENGINE-FIX" in r.stderr, r.stderr
         # …and the documented opt-in must actually work.
         env = _fresh_env(MIP_EXPERIMENT="BSA", MIP_ALLOW_BLOCKED_SPECIES="1")
@@ -234,8 +308,12 @@ def test_blocked_species_refused():
              "import pipeline.config as c;print('@@'+c.SILANE_SPECIES+'|'+c.OUTPUT_DIR)"],
             env=env, capture_output=True, text=True, cwd=str(_REPO_ROOT))
         assert r2.returncode == 0, r2.stderr
-        assert "@@hydrolyzed|" in r2.stdout and "results_BSA_hydrolyzed" in r2.stdout, \
-            r2.stdout
+        assert "@@" in r2.stdout, r2.stdout
+        species = r2.stdout.split("@@", 1)[1].split("|", 1)[0]
+        assert species in ("intact", "hydrolyzed"), species
+        # The output tree must stay species-tagged even on the opt-in path, or
+        # the acpype/PolCA .itp cache silently serves the other species' files.
+        assert f"results_BSA_{species}" in r2.stdout, r2.stdout
     finally:
         src.write_text(original, encoding="utf-8")
     assert src.read_text(encoding="utf-8") == original

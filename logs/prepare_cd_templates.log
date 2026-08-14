@@ -1,0 +1,117 @@
+[18:14:55] === building CD63_open_v1 ===
+[18:14:57]     restrained minimisation (CD63_open_v1); 12 residues released, stretched bonds before: none
+[18:15:22]     minimisation FAILED: Particle coordinate is NaN.  For more information, see https://github.com/openmm/openmm/wiki/Frequently-Asked-Questions#nan
+[18:15:22]     wrote /home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD63_open_v1.pdb
+[18:15:22]     span=(1, 238) n=238 gaps=[] chains=['A'] seq_mismatch=NONE SS={'145-191': 2.026, '146-169': 2.018, '170-177': 2.048}
+[18:15:22] === building CD81_open_v1 ===
+[18:15:24]     restrained minimisation (CD81_open_v1); 27 residues released, stretched bonds before: {'140-141': 1.69}
+[18:16:55]     OpenMM restrained minimisation, 10 kJ/mol/A^2 on every atom this script did not invent (1162 atoms held; 27 residues released, namely the de novo ones and the two residues flanking each splice junction); E 80068 -> -20158 kJ/mol; 1225 heavy atoms moved > 0.1 A; stretched backbone bonds {'140-141': 1.69} -> none.
+[18:16:55]     wrote /home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD81_open_v1.pdb
+[18:16:55]     span=(9, 226) n=213 gaps=[(83, 89)] chains=['A'] seq_mismatch=NONE SS={'156-190': 2.036, '157-175': 2.031}
+[18:16:55] === building CD81_closed_5tcx_v1 ===
+[18:16:56]     restrained minimisation (CD81_closed_5tcx_v1); 0 residues released, stretched bonds before: none
+[18:17:41]     OpenMM restrained minimisation, 10 kJ/mol/A^2 on every atom this script did not invent (1585 atoms held; 0 residues released, namely the de novo ones and the two residues flanking each splice junction); E -15934 -> -20803 kJ/mol; 998 heavy atoms moved > 0.1 A; stretched backbone bonds none -> none.
+[18:17:41]     wrote /home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD81_closed_5tcx_v1.pdb
+[18:17:41]     span=(6, 232) n=208 gaps=[(37, 55), (85, 88)] chains=['A'] seq_mismatch=NONE SS={'156-190': 2.025, '157-175': 2.045}
+[18:17:41] === building CD9_open_v1 ===
+[18:17:43]     restrained minimisation (CD9_open_v1); 12 residues released, stretched bonds before: {'113-114': 2.16, '190-191': 2.16}
+[18:18:47]     OpenMM restrained minimisation, 10 kJ/mol/A^2 on every atom this script did not invent (1624 atoms held; 12 residues released, namely the de novo ones and the two residues flanking each splice junction); E 27446 -> -23892 kJ/mol; 1022 heavy atoms moved > 0.1 A; stretched backbone bonds {'113-114': 2.16, '190-191': 2.16} -> none.
+[18:18:47]     wrote /home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD9_open_v1.pdb
+[18:18:47]     span=(1, 225) n=225 gaps=[] chains=['A'] seq_mismatch=NONE SS={'152-181': 2.043, '153-167': 2.027}
+[18:18:47] === building CD9_open_v1b ===
+[18:18:48]     restrained minimisation (CD9_open_v1b); 12 residues released, stretched bonds before: {'113-114': 2.23, '190-191': 2.7}
+[18:20:01]     OpenMM restrained minimisation, 10 kJ/mol/A^2 on every atom this script did not invent (1636 atoms held; 12 residues released, namely the de novo ones and the two residues flanking each splice junction); E 64996851 -> -23592 kJ/mol; 1017 heavy atoms moved > 0.1 A; stretched backbone bonds {'113-114': 2.23, '190-191': 2.7} -> none.
+[18:20:01]     wrote /home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD9_open_v1b.pdb
+[18:20:01]     span=(1, 225) n=225 gaps=[] chains=['A'] seq_mismatch=NONE SS={'152-181': 2.044, '153-167': 2.035}
+{
+  "CD63_open_v1": {
+    "span": [
+      1,
+      238
+    ],
+    "gaps": [],
+    "seq_mismatches": [],
+    "ss": {
+      "145-191": 2.026,
+      "146-169": 2.018,
+      "170-177": 2.048
+    },
+    "chains": [
+      "A"
+    ]
+  },
+  "CD81_open_v1": {
+    "span": [
+      9,
+      226
+    ],
+    "gaps": [
+      [
+        83,
+        89
+      ]
+    ],
+    "seq_mismatches": [],
+    "ss": {
+      "156-190": 2.036,
+      "157-175": 2.031
+    },
+    "chains": [
+      "A"
+    ]
+  },
+  "CD81_closed_5tcx_v1": {
+    "span": [
+      6,
+      232
+    ],
+    "gaps": [
+      [
+        37,
+        55
+      ],
+      [
+        85,
+        88
+      ]
+    ],
+    "seq_mismatches": [],
+    "ss": {
+      "156-190": 2.025,
+      "157-175": 2.045
+    },
+    "chains": [
+      "A"
+    ]
+  },
+  "CD9_open_v1": {
+    "span": [
+      1,
+      225
+    ],
+    "gaps": [],
+    "seq_mismatches": [],
+    "ss": {
+      "152-181": 2.043,
+      "153-167": 2.027
+    },
+    "chains": [
+      "A"
+    ]
+  },
+  "CD9_open_v1b": {
+    "span": [
+      1,
+      225
+    ],
+    "gaps": [],
+    "seq_mismatches": [],
+    "ss": {
+      "152-181": 2.044,
+      "153-167": 2.035
+    },
+    "chains": [
+      "A"
+    ]
+  }
+}

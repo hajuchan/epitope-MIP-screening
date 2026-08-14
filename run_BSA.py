@@ -17,6 +17,18 @@ import os
 import pathlib
 import sys
 
+# Re-exec in UTF-8 mode BEFORE anything else.  .mdp/.top/.itp/report files are
+# written with Python text I/O, which encodes using the *ambient locale*.  Under
+# LC_ALL=C with PYTHONUTF8=0 and PYTHONCOERCECLOCALE=0 that resolves to ASCII,
+# and then a single non-ASCII character in any template aborts the run mid-MD.
+# That is exactly how a full 6-point Stage 0 sweep died after NPT.  Fixing the
+# ~235 individual write sites is unreliable; forcing the interpreter default is
+# not.  The sentinel makes the re-exec strictly once, so it cannot loop.
+if not sys.flags.utf8_mode and not os.environ.get("_MIP_UTF8_REEXEC"):
+    os.environ["_MIP_UTF8_REEXEC"] = "1"
+    os.execve(sys.executable,
+              [sys.executable, "-X", "utf8", *sys.argv], os.environ)
+
 # Must be set BEFORE the first pipeline import — config.py reads it at import
 # time and 7 sites bind config values at module scope (run_pipeline.py:27 bakes
 # OUTPUT_DIR into the --output-dir argparse default), so it is far too late by
@@ -27,4 +39,5 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "code"))
 
 from pipeline.run_pipeline import main  # noqa: E402
 
-main()
+# PROPAGATE THE EXIT CODE — see run_CD.py for the full note.
+sys.exit(main() or 0)

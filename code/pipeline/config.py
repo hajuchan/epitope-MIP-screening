@@ -77,7 +77,11 @@ PHASE1_COMPUTE_GRAVY = True            # B2: hydrophobicity balance
 EPITOPE_SASA_MIN_A2 = 50.0
 EPITOPE_GRAVY_MIN = -2.0
 EPITOPE_GRAVY_MAX = +2.0
-EPITOPE_RMSD_MAX = 3.0
+# REMOVED (REVIEW FINDING 18): EPITOPE_RMSD_MAX = 3.0 lived here as a dead
+# exact duplicate of EPITOPE_RMSD_THRESHOLD (also 3.0, defined below and
+# ACTUALLY enforced in phase1_epitope_prep.py:831 and verify_phase.py:363).
+# Two names for one concept means an editor can tighten the inert one and
+# believe the pipeline got stricter. Use EPITOPE_RMSD_THRESHOLD.
 
 # A2: K-medoids clustering for conformer extraction (DEFAULT ON)
 ENSEMBLE_CLUSTERING_METHOD = "kmedoids"  # "uniform" (legacy) or "kmedoids"
@@ -108,6 +112,15 @@ MMSD_OPTIMIZER_FALLBACK = ["nsga2", "bayesian", "greedy"]
 MMSD_SELECTIVITY_AWARE = True       # If True, run cross-MMSD per evaluation (3x cost)
 SELECTIVITY_WEIGHT = 0.5            # Penalty coefficient (Garcia-Ortegon 2022 ≈ affinity)
 SELECTIVITY_DDG_THRESHOLD = -1.0    # kcal/mol — own must be ≤ other-mean by this much
+
+# ── A3 · Membrane calibration factor (2026-08) ────────────────
+# Reported literature comparison of isolated-ECL2 MD vs full-length in-membrane
+# MD (Zimmerman 2016 CD81; Umeda 2020 CD9; TEM cluster effect) predicts a 20-
+# 30% down-adjust in selectivity metrics when the cavity is challenged with
+# actual membrane-embedded target. Verify_phase5 displays BOTH raw and
+# calibrated PCSI so the reader sees the honest expected experimental value.
+# Set to 1.0 to disable (raw only).
+SELECTIVITY_MEMBRANE_CALIBRATION = 0.75
 
 # A5/B7: Polymerization solvent variation (DEFAULT ON)
 PHASE4_SOLVENT_SWEEP = True     # If True, run Phase 4 in multiple solvents
@@ -191,23 +204,27 @@ SILANE_MONOMERS = {
                "name": "Phenyltriethoxysilane",
                "polymerization": "silane",
                "interaction": "π-π stacking, hydrophobic"},
-    "APTES":  {"smiles": "NCCCO[Si](OCC)(OCC)OCC",
+    # NOTE: alkyl-substituted silanes must bond the linker carbon DIRECTLY to Si
+    # (Si-C), not through an ether oxygen. Writing "...CO[Si]" makes a
+    # tetraalkoxysilane whose organic group hydrolyses off — the functional
+    # group would never stay tethered to the silica network.
+    "APTES":  {"smiles": "NCCC[Si](OCC)(OCC)OCC",
                "name": "(3-Aminopropyl)triethoxysilane",
                "polymerization": "silane",
                "interaction": "H-bond donor, electrostatic"},
-    "APTMS":  {"smiles": "NCCCO[Si](OC)(OC)OC",
+    "APTMS":  {"smiles": "NCCC[Si](OC)(OC)OC",
                "name": "(3-Aminopropyl)trimethoxysilane",
                "polymerization": "silane",
                "interaction": "H-bond, electrostatic"},
-    "UPTMS":  {"smiles": "O=C(N)NCCCO[Si](OC)(OC)OC",
+    "UPTMS":  {"smiles": "O=C(N)NCCC[Si](OC)(OC)OC",
                "name": "3-Ureidopropyltrimethoxysilane",
                "polymerization": "silane",
                "interaction": "Multi H-bond (urea D+A)"},
-    "MPTMS":  {"smiles": "SCCCO[Si](OC)(OC)OC",
+    "MPTMS":  {"smiles": "SCCC[Si](OC)(OC)OC",
                "name": "(3-Mercaptopropyl)trimethoxysilane",
                "polymerization": "silane",
                "interaction": "Thiol-Cys, H-bond"},
-    "IBTES":  {"smiles": "CC(C)CO[Si](OCC)(OCC)OCC",
+    "IBTES":  {"smiles": "CC(C)C[Si](OCC)(OCC)OCC",
                "name": "Isobutyltriethoxysilane",
                "polymerization": "silane",
                "interaction": "Hydrophobic, alkyl"},
@@ -219,11 +236,11 @@ SILANE_MONOMERS = {
                "name": "Tetraethyl orthosilicate",
                "polymerization": "silane",
                "interaction": "Cross-linker"},
-    "EDTMS":  {"smiles": "NCCNCCCO[Si](OC)(OC)OC",
+    "EDTMS":  {"smiles": "NCCNCCC[Si](OC)(OC)OC",
                "name": "N-[3-(Trimethoxysilyl)propyl]ethylenediamine",
                "polymerization": "silane",
                "interaction": "Chelate-type H-bond"},
-    "ICTES":  {"smiles": "O=C=NCCCO[Si](OCC)(OCC)OCC",
+    "ICTES":  {"smiles": "O=C=NCCC[Si](OCC)(OCC)OCC",
                "name": "3-(Triethoxysilyl)propyl isocyanate",
                "polymerization": "silane",
                "interaction": "Covalent (Lys ε-NH₂)"},
@@ -231,7 +248,7 @@ SILANE_MONOMERS = {
                "name": "Vinyltrimethoxysilane",
                "polymerization": "silane",  # Si-OR dominant; vinyl can crosslink with radical comonomer
                "interaction": "Hydrophobic + crosslinkable"},
-    "GPTMS":  {"smiles": "C(CO[Si](OC)(OC)OC)C1CO1",
+    "GPTMS":  {"smiles": "C1OC1COCCC[Si](OC)(OC)OC",
                "name": "(3-Glycidyloxypropyl)trimethoxysilane",
                "polymerization": "silane",  # silane primary; epoxy is covalent side group
                "interaction": "Epoxy covalent (nucleophile)"},
@@ -239,7 +256,7 @@ SILANE_MONOMERS = {
                "name": "Dimethyldimethoxysilane",
                "polymerization": "silane",
                "interaction": "Strong hydrophobic"},
-    "CETES":  {"smiles": "N#CCCCO[Si](OCC)(OCC)OCC",
+    "CETES":  {"smiles": "N#CCCC[Si](OCC)(OCC)OCC",
                "name": "3-Cyanopropyltriethoxysilane",
                "polymerization": "silane",
                "interaction": "Weak H-bond acceptor (CN)"},
@@ -291,7 +308,11 @@ VINYL_MONOMERS = {
                "name": "N-tert-Butylacrylamide",
                "polymerization": "vinyl",
                "interaction": "Hydrophobic"},
-    "APBA":   {"smiles": "Nc1ccc(B(O)O)cc1",
+    # meta (3-) substitution, per the name. The para isomer here previously made
+    # this 4-aminophenylboronic acid — a different molecule with a different
+    # boronic-acid pKa and diol-binding geometry. Molecular formula cannot catch
+    # this: isomers share it. Verified by ring substitution pattern.
+    "APBA":   {"smiles": "Nc1cccc(B(O)O)c1",
                "name": "3-Aminophenylboronic acid",
                "polymerization": "surface",  # NOT polymerizable; surface-grafted via NH2 to aldehyde
                "interaction": "Glycan (diol) recognition; ONLY usable as surface anchor"},
@@ -303,7 +324,7 @@ VINYL_MONOMERS = {
                "name": "4-Formylphenylboronic acid",
                "polymerization": "surface",  # surface anchor via aldehyde-amine Schiff base
                "interaction": "Glycan recognition; Liu 2017 standard for NP grafting"},
-    "AAPBA":  {"smiles": "C=CC(=O)Nc1ccc(B(O)O)cc1",
+    "AAPBA":  {"smiles": "C=CC(=O)Nc1cccc(B(O)O)c1",   # meta, per the name (was para)
                "name": "N-Acryloyl-3-aminophenylboronic acid",
                "polymerization": "vinyl",
                "interaction": "Glycan recognition + radical polymerization (APBA-acrylate)"},
@@ -336,7 +357,9 @@ CROSSLINKER_LIBRARY = {
               "name": "Divinylbenzene",
               "type": "vinyl", "polymerization": "vinyl", "functionality": 2,
               "interaction": "Free-radical, rigid aromatic"},
-    "TRIM":  {"smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+    # Trimethylolpropane has THREE CH2-O arms; the third was written without its
+    # CH2, giving C17H24O6 for a compound that is C18H26O6.
+    "TRIM":  {"smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)COC(=O)C(=C)C",
               "name": "Trimethylolpropane trimethacrylate",
               "type": "vinyl", "polymerization": "vinyl", "functionality": 3,
               "interaction": "Free-radical, tri-functional high crosslink"},
@@ -550,6 +573,39 @@ EPITOPE_STABILITY_MD = True       # Sehit 2024: mandatory stability MD
 ENSEMBLE_DOCKING = True           # dock to multiple receptor conformations
 ENSEMBLE_N_CONFORMERS = 5         # number of MD snapshots to extract
 
+# ── Ensemble symmetry (cross-target comparability) ─────────────
+# Conformer extraction used to be gated on the epitope passing the RMSD
+# stability check. That made the ENSEMBLE SIZE TARGET-DEPENDENT: in the
+# 2026-05-13 CD run CD81 missed the 3.0 Å threshold by 0.02 Å (0.3019 nm vs
+# CD63 0.2773 and CD9 0.1934) and so was docked against 1 receptor while the
+# other two got 6 each. Since Phase 2 kept the best score across conformers,
+# the own-vs-cross contrast partly measured ensemble size: re-parsed from the
+# .dlg files the ensemble gain was CD63 -0.072, CD9 -0.139, CD81 0.000
+# kcal/mol, i.e. 22% of the CD63 contrast and 53% of the CD9 contrast, with
+# 4/27 monomers changing sign on CD63-vs-CD81 once removed.
+ENSEMBLE_EXTRACT_REQUIRES_STABLE = False  # False: every target gets an ensemble
+ENSEMBLE_REQUIRE_EQUAL_N = True   # hard-fail Phase 2 if targets differ in N
+ENSEMBLE_MERGE = "boltzmann"      # "boltzmann" | "mean" | "min" (min = legacy,
+                                  # best-of-N, biased under unequal N)
+ENSEMBLE_BOLTZMANN_T_K = 298.15   # K, for the Boltzmann-weighted merge
+
+# Minimum fraction of a conformer's atoms that must lie inside the docking
+# box for that conformer to be docked at all.
+# THIS GUARDS A BUG THAT SILENTLY RUINED EVERY ENSEMBLE DOCKING SO FAR.
+# `gmx trjconv -pbc mol` emits frames in the simulation-box frame, and the
+# extracted conformers were never superposed back onto the crystal structure
+# the AutoGrid box was built from. Measured on the committed CD run:
+#   CD63 conf_0..conf_4  48-70 Å from the grid centre,  0%, 0%, 0%, 0%, 5%
+#                        of atoms inside the box
+#   CD9  conf_0..conf_4  21-35 Å from the grid centre, 81%, 52%, 48%, 17%, 50%
+# CD63's md_conf1-3 consequently returned IDENTICAL statistics over all 27
+# monomers (mean +1.61 kcal/mol — POSITIVE, i.e. no binding at all), because
+# all three were docking into empty solvent. Phase 1 now superposes each
+# frame onto the reference and drops any conformer that still fails this
+# check. min-over-conformers hid the damage by always falling back to the
+# crystal pose; any averaging estimator would have propagated it.
+ENSEMBLE_MIN_BOX_COVERAGE = 0.90
+
 # ── Phase 2: Single Monomer Docking (SMD) — AutoDock4 ──────────
 AUTODOCK4_GA_RUNS = 50            # Lamarckian GA runs per docking
 AUTODOCK4_GA_POP_SIZE = 150       # GA population size
@@ -558,6 +614,130 @@ AUTODOCK4_NPTS = (60, 60, 60)     # grid points (x, y, z)
 AUTODOCK4_SPACING = 0.375         # grid spacing (Å)
 SMD_BE_THRESHOLD = -2.0           # kcal/mol — minimum meaningful binding
 SMD_TOP_N_FOR_PHASE3 = 12         # pass top N monomers by BE to Phase 3 (per target)
+
+# ── Docking reproducibility and receptor-prep policy (2026-08 audit) ──
+# AUTODOCK_SEED
+#   Consumed by utils_autodock._resolve_seed(), which mixes it with the job name
+#   to give each docking its own deterministic AutoDock-GPU seed. Without a seed
+#   AD-GPU seeds from time+pid: three repeats of ONE identical docking measured
+#   -3.89 / -3.49 / -3.68 kcal/mol, a 0.40 kcal/mol spread on a scale where the
+#   whole selectivity signal is ~1 kcal/mol.
+AUTODOCK_SEED = 20260812
+# RECEPTOR_PDBQT_ALLOW_NEUTRAL_FALLBACK
+#   Consumed by utils_structure._allow_neutral_receptor_fallback(). Receptor
+#   PDBQTs are built by ADFR prepare_receptor4 at pH 7.4. obabel has NO pH model
+#   and produces a NEUTRAL protein (measured +0.058 / +0.044 / +0.048 e against
+#   formal charges of +4 / -2 / -1), so a silent fallback would erase exactly the
+#   target-asymmetric electrostatics the screen is trying to measure.
+#   True = accept the obabel receptor anyway; results are then NOT comparable
+#   across targets. Keep False.
+RECEPTOR_PDBQT_ALLOW_NEUTRAL_FALLBACK = False
+# PHASE2_REQUIRE_FRESH_DLG
+#   Consumed by phase2_smd._validate_dock_result(). The .dlg path is deterministic
+#   and was never cleaned, and "success" used to be inferred from the file merely
+#   existing — so a crashed docking silently returned the PREVIOUS run's DLG and it
+#   was scored as a fresh measurement of a different receptor conformer. True
+#   rejects a DLG older than the current docking batch. False downgrades to a
+#   warning.
+PHASE2_REQUIRE_FRESH_DLG = True
+# PHASE2_EF_THRESHOLD
+#   Consumed by phase2_smd.run_phase2()'s enrichment block. Enrichment factor of
+#   real monomers over the decoy set. The decoy baseline never actually docked
+#   anything before the audit (decoy_be was a None placeholder), so this criterion
+#   had never executed on any target.
+PHASE2_EF_THRESHOLD = 1.5
+# PROTONATION_APPLY_STATES
+#   Consumed by utils_structure._protonation_apply_enabled(). When True, the
+#   HIP/CYM renames PROPKA predicts are WRITTEN INTO the structure; when False
+#   they are predicted, logged at ERROR, recorded in the *_protonation.json
+#   sidecar, and NOT applied.
+#   Default False on purpose: the same PDB is the docking receptor, and nobody has
+#   yet verified what ADFR prepare_receptor4 does with a HIP residue. Turning this
+#   on shifts the receptor net charge by +1 per HIP, which verify_receptor_charge
+#   WILL flag — that is the intended way to validate it before trusting it.
+#   NOTE: propka is NOT installed in the MIPscreen environment as of 2026-08-12,
+#   so this flag is currently moot and the sidecar reports
+#   status="propka_not_installed".
+PROTONATION_APPLY_STATES = False
+
+# ── Fixed-charge protonation: how discrete states are chosen ───────────
+# A fixed-charge force field must give each titratable site an INTEGER charge,
+# but at a pH near several side-chain pKa values the true states are
+# fractional. Two defensible rules, and they disagree:
+#
+#   "majority"    each site independently takes its more probable state
+#                 (pKa > pH -> protonated). Maximum-likelihood per site, but
+#                 the per-site errors do NOT cancel: most lysines sit above the
+#                 working pH so every one rounds the same way. On BSA at pH 9.5
+#                 this leaves the protein ~7 e too positive.
+#   "net_charge"  flip the least-confident sites (fraction nearest 0.5) until
+#                 the TOTAL matches the Henderson-Hasselbalch expectation.
+#                 Reproduces the net charge and hence the long-range field, at
+#                 the cost of putting a few surface sites in their MINORITY
+#                 state, where their local charge is then wrong.
+#
+# Which is right depends on the physics: long-range Coulomb (a charged monomer
+# drawn to a polyanion across nanometres, especially in low salt where the
+# Debye length is long) is governed by the net charge; contact-level
+# recognition is governed by the local charge. Only sites whose flipped state
+# the force field can actually BUILD are eligible, so e.g. tyrosinate is never
+# used to balance the books.
+PH_CHARGE_ASSIGNMENT = "majority"   # "majority" | "net_charge"
+# Site-specific pKa from PROPKA 3 instead of the textbook table. Degrades to
+# the table with a log line when propka3 is not installed.
+PH_USE_PROPKA = False
+
+# ── Selectivity metric ─────────────────────────────────────────
+# NEVER compare a raw docking score across targets. The three receptors
+# differ in size (SASA), in provenance (one predicted, two crystallographic)
+# and in evidential quality, and each of those shifts a target's whole energy
+# scale; a raw own-minus-cross subtraction passes the shift through
+# undiluted. What survives a per-target monotone rescaling is RANK ORDER, so
+# the primary metric is rank-based and the raw ΔΔG is kept only as a flagged
+# diagnostic. One of:
+#   "rank_delta"   mean(cross rank) - own rank; positive = selective  [default]
+#   "z_ddg"        own-vs-cross after per-target standardisation
+#   "own_cross_ratio"  BE(own)/mean(BE(cross)); >1 = selective
+#   "ddg_raw"      LEGACY absolute difference — only valid when the receptor
+#                  exchangeability check in Phase 2 reports exchangeable=True
+SELECTIVITY_METRIC = "rank_delta"
+
+# Define the docking box on the polymer-accessible surface (config key
+# `scored_surface`) rather than on the whole ECL2, when the target declares
+# one. Membrane-occluded residues face lipid on an intact vesicle and the
+# amount of such surface is target-dependent (CD81-closed 25/89 vs CD9 9/79),
+# so leaving it in the box is a cross-target confound. Targets without a
+# `scored_surface` key (e.g. BSA) keep the legacy head-centred box.
+RECEPTOR_BOX_ON_SCORED_SURFACE = True
+# ── Membrane-accessibility filter on DOCKED POSES ──────────────
+# Consumed by phase2_smd.apply_membrane_accessibility_filter().
+#
+# RECEPTOR_BOX_ON_SCORED_SURFACE above centres and sizes the AutoGrid box on the
+# polymer-accessible surface, and that was believed to keep the membrane-facing
+# residues out of the search. IT DOES NOT. Measured on the prepared templates,
+# an axis-aligned box around `scored_surface` still contains
+#     CD63 100/100, CD81 92/97, CD9 96/96
+# membrane-occluded atoms, because those residues sit at the BASE of the same
+# LEL, interleaved with the scored ones. A rectangular envelope cannot separate
+# them — only a per-residue test can, and that has to happen per POSE.
+#
+# PHASE2_ENFORCE_MEMBRANE_ACCESSIBILITY
+#   True: after docking, re-score each monomer from its best pose cluster whose
+#   contacts are NOT predominantly with membrane-occluded (or unscored-EC1)
+#   residues; a monomer with no accessible cluster is recorded as MISSING rather
+#   than credited with binding it cannot do on an intact vesicle. Every decision
+#   is logged at ERROR and recorded per monomer (pose_occlusion,
+#   occluded_fraction_best_pose, binding_energy_occluded_pose).
+#   False: measure and record the occluded fraction but change no score.
+PHASE2_ENFORCE_MEMBRANE_ACCESSIBILITY = True
+# Fraction of a pose's receptor contacts that may be with occluded residues
+# before the pose is rejected. 0.5 = "more than half its contacts are on lipid".
+# A STATED DEFAULT, NOT FITTED — results/ is archived, so there is nothing to
+# calibrate against; the continuous occluded_fraction is always recorded so this
+# can be re-cut later without re-docking.
+PHASE2_MAX_OCCLUDED_POSE_FRACTION = 0.5
+# Heavy-atom distance defining a ligand-receptor contact for the filter above.
+PHASE2_POSE_CONTACT_CUTOFF_A = 4.0
 # Sullivan 2019: use fpocket/SiteMap to identify binding pockets first
 USE_BINDING_SITE_PREDICTION = True  # focused docking per site vs blind
 BINDING_SITE_TOOL = "fpocket"       # "fpocket" (free) or "sitemap" (Schrödinger)
@@ -585,11 +765,47 @@ MMSD_PENALIZE_COMPETITION = False # disabled — competition info recorded but n
 # to avoid generating chemically non-synthesizable recipes.
 MMSD_ENFORCE_POLYMERIZATION_COMPATIBILITY = True
 
+# ── MMSD docking order and Pareto selection (2026-08 audit, BLOCKER 05) ──
+# MMSD_DOCKING_ORDER
+#   Consumed by phase3_mmsd._order_policy() / _canonical_mmsd_order().
+#   Sequential MMSD docks monomers one at a time into a growing cavity, so the
+#   result DEPENDS ON THE ORDER — measured spread up to 2.02 kcal/mol for one
+#   monomer across step positions (CD81/APBA). The cache used to be keyed on the
+#   SORTED SET while the docking used the genotype's arbitrary gene order, so
+#   exactly one arbitrary order per combination was ever measured and the
+#   protocol asymmetry was read as chemistry.
+#     "smd_rank"  dock strongest Phase 2 binder first, ties alphabetical. A pure
+#                 function of the SET, so the measurement is reproducible and the
+#                 cache entry corresponds to the order actually docked. [default]
+#     "as_given"  keep the genotype order, but key the cache on the ORDERED tuple
+#                 so different orders get separate measurements.
+#   This is an APPROXIMATION of the order-averaged quantity, labelled as such in
+#   every result record (order_dependence_note).
+MMSD_DOCKING_ORDER = "smd_rank"
+# MMSD_ORDER_REPLICATES
+#   K > 1 docks K deterministic distinct orders and AVERAGES them, publishing
+#   mmsd_sum_std_over_orders. Multiplies Phase 3 docking cost by K. Default 1.
+MMSD_ORDER_REPLICATES = 1
+# MMSD_ORDER_SEED
+#   Seed for choosing the K distinct orders when MMSD_ORDER_REPLICATES > 1.
+MMSD_ORDER_SEED = 42
+# MMSD_PARETO_WEIGHTS
+#   Consumed by phase3_mmsd._rank_pareto_front(): (affinity, selectivity,
+#   synthesizability) weights applied AFTER min-max normalising each objective
+#   across the front. The pre-audit code summed the three in RAW UNITS —
+#   kcal/mol (spread ~1) plus a 0-5 score plus a 0-10 score — so synthesizability
+#   dominated the ordering purely by unit mismatch. Equal weighting is a stated
+#   value judgement, not a neutral choice; it lives here so it is reviewable.
+MMSD_PARETO_WEIGHTS = (1.0, 1.0, 1.0)
+
 # ── Phase 4: MD Validation — GROMACS ───────────────────────────
 # Trial mode for whole-ECL2 imprinting validation: 100 ns is sufficient for
 # protein-surface cavity equilibration (smaller system relative to head-template).
 # Set back to 350 ns for production after method validation.
 MD_PRODUCTION_NS = 350            # pre-polymerization MD (full production; trial mode was 100 ns)
+# Integration timestep. Set to 2 fs for standard H mass (1.008 Da) or 4 fs
+# under HMR (H mass 4.032 Da). PHASE4_HMR_MODE at module scope overrides:
+# when HMR is on, we set 4 fs here so downstream mdp writers pick it up.
 MD_TIMESTEP_FS = 2.0              # integration timestep
 MD_TEMPERATURE_K = 300.0          # K
 MD_PRESSURE_BAR = 1.0             # bar
@@ -600,11 +816,35 @@ MD_BOX_TYPE = "dodecahedron"
 MD_BOX_DISTANCE = 1.2             # nm — minimum distance to box edge
 MD_IONIC_STRENGTH = 0.15          # mol/L — PBS condition (0.15 M NaCl)
 MD_SOLVENT_PH = 7.4               # PBS pH (for protonation state reference)
-MD_MMPBSA_START_NS = 30           # MM-GBSA window start (last 20ns of 50ns)
-MD_MMPBSA_END_NS = 50             # MM-GBSA window end
+# MM-GBSA ANALYSIS WINDOW — CHANGED (REVIEW FINDING 7): was 30-50 ns.
+#
+# The old values, and their comment "(last 20ns of 50ns)", were written when
+# MD_PRODUCTION_NS was 50. Production is now 350 ns, so 30-50 ns covered only
+# 8.6%-14.3% of the trajectory — the EQUILIBRATION transient, not the
+# equilibrated tail — and the binding free energy was computed there. The
+# BLOCKER fix that made the frame arithmetic correct did not help: 30-50 lies
+# comfortably inside 0-350, so the range assertion passed and the number was
+# stamped window_valid=True.
+#
+# These must be re-derived whenever MD_PRODUCTION_NS changes. They are the
+# LAST 50 ns of the production run. utils_gromacs._mmpbsa_frame_window now
+# refuses a window that starts in the first half of the trajectory, so a stale
+# pair fails loudly instead of silently reporting the transient.
+MD_MMPBSA_START_NS = 300          # last 50 ns of the 350 ns production run
+MD_MMPBSA_END_NS = 350            # == MD_PRODUCTION_NS (end of trajectory)
 MD_MMPBSA_INTERVAL = 100          # number of frames for MM-GBSA
 MD_GPU_ID = "0"                   # GROMACS GPU device ID
 MD_QUICK_NS = 20                  # quick mode for debugging (20ns)
+# MD_NSTXOUT_COMPRESSED — production trajectory write rate, in STEPS.
+#   Consumed by utils_gromacs.run_production_md() (read via getattr, default
+#   50000; values below 1000 are rejected with a ValueError).
+#   CHANGED DEFAULT (2026-08 audit): was 5000 steps = 10 ps/frame at dt=2 fs.
+#   50000 = 100 ps/frame. Measured effect, same system and length: md.xtc went
+#   from 1158.5 kB / 51 frames to 136.3 kB / 6 frames, which scales to
+#   11.33 GB -> ~1.1 GB for a 350 ns leg. A 350 ns run still yields 3,500 frames,
+#   ~17x what any downstream analysis reads (analyze_trajectory strides to ~500,
+#   occupancy to ~200). Lower this only if sub-100 ps kinetics are needed.
+MD_NSTXOUT_COMPRESSED = 50000
 # Sullivan 2019: MM-GBSA is faster and more suitable for protein-monomer
 MMPBSA_METHOD = "GBSA"            # "PBSA" or "GBSA" — Sullivan used GBSA
 # Sullivan 2019 / Sehit 2024: DSSP 2° structure analysis (computational CD)
@@ -615,12 +855,153 @@ DSSP_ANALYSIS = True              # track helix/sheet/coil changes during MD
 # whole protein is used. Protein backbone heavy atoms restrained during MD
 # to mimic solid-phase / surface immobilization (Pluhar/Battaglia 2021 review,
 # adenovirus eIP PMC11059108 protocol).
-PHASE4_TEMPLATE_MODE = "ecl2"     # "head" (16-mer, legacy) | "ecl2" (whole loop)
+PHASE4_TEMPLATE_MODE = "ecl2"     # "head" (16-mer, legacy) | "ecl2" (whole loop) | "membrane"
 PHASE4_PROTEIN_RESTRAINT_K = 1000 # kJ/mol/nm² — Cα/heavy-atom restraint during MD
+
+# ── A1 · MEMBRANE MODE (2026-08 methodology extension) ────────
+# Realistic tetraspanin condition: full-length CD (TM1-4 + ECL2 + ECL1) embedded
+# in a POPC/POPS/cholesterol lipid bilayer built by CHARMM-GUI. When enabled
+# and template mode == "membrane", Phase 4 skips its own box-build/solvate step
+# and consumes the CHARMM-GUI Membrane Builder output (step5_input.{gro,top,pdb}).
+#
+# User workflow:
+#   1. Upload each target's full-length PDB (or ECL1+TM1..TM4+ECL2 chimera)
+#      to CHARMM-GUI Membrane Builder → OPM oriented → POPC bilayer (or your
+#      lipid mix) → run through step5.
+#   2. Copy step5_input.gro / step5_input.top / step5_input.pdb into
+#      PHASE4_MEMBRANE_INPUT_DIR/<target>/ (or symlink).
+#   3. Set PHASE4_MEMBRANE_MODE = True and PHASE4_TEMPLATE_MODE = "membrane".
+#   4. Run --phase 4.
+#
+# Phase 4 will:
+#   - Fail cleanly if any target's step5_input.gro is missing.
+#   - Use CHARMM-GUI's box + solvation as-is (no re-solvate).
+#   - Attach the monomer swarm around the ECL2 face (extracellular half of
+#     the bilayer).
+#   - Add lipid position restraints (POSRES_LIPID) at k = LIPID_POSRES_K
+#     during equilibration; release them for production.
+PHASE4_MEMBRANE_MODE = False       # opt-in — Off by default (fresh runs stay ECL2)
+PHASE4_MEMBRANE_INPUT_DIR = "structures/membrane"  # per-target subdirs expected
+PHASE4_MEMBRANE_POSRES_LIPID_K = 200  # kJ/mol/nm² on lipid P atoms during eq
+# HEK293T EV lipidome mimic (Skotland 2020). Names match CHARMM-GUI toppar
+# residue codes 1:1 so utils_vesicle can recognise them without translation.
+PHASE4_MEMBRANE_LIPIDS = ("POPC", "POPE", "PSM", "POPS", "CHL1")
+# When True, add ECL1 + TM helices to the restraint set so only ECL2 loop
+# fluctuates (matches solid-phase MIP + membrane composite condition).
+PHASE4_MEMBRANE_RESTRAIN_TM = True
+
+# ── HMR (Hydrogen Mass Repartitioning) — 4 fs timestep ────────
+# CHARMM-GUI's "Hydrogen mass repartitioning" checkbox rebalances H → 4 Da /
+# heavy → correspondingly reduced, allowing dt = 4 fs (vs standard 2 fs) with
+# LINCS-all-bonds constraints. Set True ONLY if the CHARMM-GUI outputs at
+# structures/membrane/<target>/ were generated with HMR on — otherwise the
+# topology H masses stay 2 Da and 4 fs will fly apart.
+# When True this forces MD_TIMESTEP_FS=4.0 downstream and the mdp templates
+# switch `constraints = h-bonds` → `all-bonds` (required for HMR stability).
+PHASE4_HMR_MODE = True
+
+# ── Phase 5 · EV-templated MIP with Triton lysis ──────────────
+# Between Phase 4 (CD-in-EV + monomers polymerised) and Phase 5 (fresh EV
+# rebinding), an explicit removal step deletes lipids + template CD from the
+# system, leaving the monomer cavity in aqueous phase — this models Triton
+# X-100 detergent lysis of the template EV.
+PHASE5_TRITON_REMOVAL_MODE = True
+# Number of independent fresh-EV placements per snapshot (each with a
+# different z-axis rotation seed). N=3 gives feasibility-priority first-run
+# statistics; bootstrap CI needs N>=3, publication rigour prefers N=5.
+PHASE5_FRESH_EV_PLACEMENTS = 3
+# Extracellular gap (nm) between the top of the MIP cavity and the bottom of
+# the incoming fresh EV at t=0. Small gap → faster approach kinetics but risks
+# initial-condition bias; large gap → longer simulation before contact.
+PHASE5_FRESH_EV_APPROACH_GAP_NM = 4.0
+# Z-extension (nm) added to the simulation box to accommodate fresh EV +
+# solvation slab above the cavity. Applied via `gmx editconf -box` before
+# `gmx solvate` fills the new volume.
+PHASE5_BOX_Z_EXTEND_NM = 15.0
+
+# ── A2 · N-GLYCAN TREE (2026-08 methodology extension) ────────
+# Attach Man3GlcNAc2 core (or user-supplied glycan) to N-X-S/T sequons
+# in each target's ECL2/full structure.
+#
+# Modes:
+#   "none"     — no glycan (default, current behaviour)
+#   "external" — Phase 1 reads a pre-glycosylated PDB from
+#                PHASE1_GLYCAN_INPUT_DIR/<target>_glyco.pdb (user builds via
+#                CHARMM-GUI Glycan Reader & Modeler, GLYCAM, or similar).
+#                Fails cleanly if the file is missing.
+#   "auto"     — future stub: attach Man3GlcNAc2 automatically from RDKit +
+#                a rotamer library. Not yet implemented → falls back to
+#                "external" with a warning if selected.
+PHASE1_GLYCAN_MODE = "none"
+PHASE1_GLYCAN_INPUT_DIR = "structures/glycosylated"
+# Which residues to consider as glycosylation sites — dropdown mirroring
+# properties.n_glycan_sites_known. Overridden per target via
+# TARGETS[t]["glycan_sites"] if present.
+PHASE1_GLYCAN_SEQUON_REGEX = r"N[^P][ST]"
+
+# ── Phase 4: replicas, acceptance and box composition (2026-08 audit) ──
+# All consumed via phase4_md_validation._cfg(), which falls back LOUDLY (an
+# ERROR log naming the key) if any of them is absent.
+#
+# SOLGEL_Q_MOLE_FRACTION
+#   Mole fraction of Q units (tetraalkoxysilane crosslinker: TEOS/TMOS) in a
+#   sol-gel pre-polymerisation box. The old formula
+#   `copies = total // (n_functional + 1)` produced 72 mol% organosilane T units
+#   where the closest published APTES/TEOS protein-imprinted sol-gel uses ~60
+#   mol% Q. total_monomers is UNCHANGED, so atom count, box size and GPU cost
+#   are unchanged — only the composition moves.
+SOLGEL_Q_MOLE_FRACTION = 0.60
+# RADICAL_CROSSLINKER_MOLE_FRACTION
+#   Same quantity for free-radical (vinyl/catechol) systems. 0.50 reproduces the
+#   pre-audit hardcoded behaviour EXACTLY, so radical boxes are unchanged.
+RADICAL_CROSSLINKER_MOLE_FRACTION = 0.50
+# PHASE4_N_REPLICAS
+#   Independent trajectories per (target, pc_id), each with its own deterministic
+#   seed for monomer placement AND velocity generation, written to
+#   <target>/<pc_id>/rep_<i>/md/. Phase 5 spreads its snapshots across them:
+#   within ONE trajectory the snapshot observable has lag-1 autocorrelation
+#   rho1 = 0.23 (10 snapshots = 6.3 effective samples), so extra snapshots from a
+#   single leg are nearly free of information while extra replicas are not.
+#   MULTIPLIES PHASE 4 GPU COST BY THIS FACTOR.
+# 3, per the user's decision (2026-08-12): "keep 10 snapshots, run Phase 4 as
+# 2-3 independent replicas". A repair pass had moved this to 5 with
+# REBINDING_N_SNAPSHOTS dropped to 5 ("one per replica"); that alternative is
+# defensible — for a cluster bootstrap the number of REPLICAS is what carries
+# the degrees of freedom, so 5x5 gives 5 independent clusters against 3x10's 3 —
+# but it was not what was asked for, and it silently halved the snapshot count.
+# Restored. Revisit deliberately if the variance pilot argues for it.
+PHASE4_N_REPLICAS = 3
+# PHASE4_CONVERGENCE_TOL_PCT
+#   Max Q3→Q4 block-averaged contact-frequency difference for a replica to be
+#   ACCEPTED. This number was computed and then acted on by nothing: every leg
+#   reported success while window differences ran up to 73%.
+PHASE4_CONVERGENCE_TOL_PCT = 10.0
+# PHASE4_RMSD_DRIFT_TOL_NM
+#   Max |mean backbone RMSD(Q4) - mean(Q3)| for a replica to be ACCEPTED.
+PHASE4_RMSD_DRIFT_TOL_NM = 0.05
+# PHASE4_ALLOW_STALE_RESUME
+#   Each replica writes md/phase4_inputs.json fingerprinting its epitope hash,
+#   monomer SMILES, copy numbers and seed. Resumption requires a MATCH. True (or
+#   the PHASE4_ALLOW_STALE_RESUME env var) downgrades the refusal to a warning —
+#   only for a deliberate one-off recovery.
+PHASE4_ALLOW_STALE_RESUME = False
+# PHASE4_KEEP_CENTERED_TRAJECTORY
+#   md_centered.xtc is a full-size duplicate of md.xtc (measured 11.19 GB against
+#   11.33 GB on one 350 ns leg) consumed by a single analysis pass. False deletes
+#   it once _analyze_monomer_occupancy has read it. True retains it for manual
+#   inspection at ~1 GB per leg per replica.
+PHASE4_KEEP_CENTERED_TRAJECTORY = False
 
 # ── Phase 5/6: VIP Cavity Rebinding (Zink 2018, two-tier restraint) ───────
 REBINDING_MD_NS = 50              # rebinding simulation time per snapshot (extended from 20ns)
-REBINDING_N_SNAPSHOTS = 10        # top contact frames (n=10 for statistical power)
+# A4 (2026-08): switch from 10-snap-per-replica × 1 replica statistics to
+# 1-snap-per-replica × N_REPLICAS. Within one 350-ns trajectory the snapshot
+# observable has lag-1 autocorrelation rho1 ≈ 0.23 → 10 correlated snapshots ≈
+# 6.3 effective samples, whereas N replicas each seeded independently gives N
+# genuinely independent draws. Set both to 5 for a balanced N × 1 layout;
+# earlier trial with N_SNAPSHOTS=10 remains valid data but confounds intra-
+# trajectory correlation with real variance.
+REBINDING_N_SNAPSHOTS = 10        # per replica; user decision 2026-08-12
 REBINDING_RMSD_THRESHOLD = 5.0    # Å — template stays in cavity if RMSD < this
 REBINDING_RESTRAINT_K = 1000      # kJ/mol/nm² — position restraint on FUNCTIONAL monomers
 # Two-tier restraint (Yuan 2024, adenovirus eIP protocol):
@@ -639,6 +1020,56 @@ REBINDING_TRIAL_MODE = False      # if True: N_SNAPSHOTS=1, MD_NS=30 (override a
 # heavy-atom clashes after rigid placement: high clash = REJECTED = selective.
 REBINDING_CLASH_CUTOFF_A = 2.0    # Å — heavy-atom pair below this = clash
 REBINDING_CLASH_THRESHOLD = 30    # >this many clashes → size-excluded (selective)
+
+# ── Phase 5: symmetric placement and the CONTACT observable (2026-08 audit) ──
+# All consumed via phase5_rebinding._cfg(name, default).
+#
+# REBINDING_SYMMETRIC_PLACEMENT
+#   BLOCKER 07. The own and cross legs used to be DIFFERENT PROTOCOLS: the own
+#   leg continued from the equilibrated Phase 4 pose while the cross leg was
+#   COM-shifted in, and waters were deleted around the OLD protein's position —
+#   the one place guaranteed to be empty. True runs ONE procedure for both legs
+#   (strip template -> isolated pdb2gmx -> principal-axis placement scored by
+#   Chamfer distance to the vacated volume -> clash-based solvent deletion ->
+#   topology surgery -> genion charge rebalance -> EM with a convergence gate).
+#   CHANGED DEFAULT: own-leg numbers WILL move relative to results_v1; that is
+#   the point. False restores the old asymmetric path and stamps results
+#   `legacy_continuation`, whose SI is not a valid comparison.
+REBINDING_SYMMETRIC_PLACEMENT = True
+# The persistent-contact observable. These four define "bound" for Phase 5 AND
+# must stay in step with code/pipeline/utils_pcsi_star.py — the whole reason Phase 5 switched to
+# this statistic is so the two cannot disagree.
+REBINDING_CONTACT_CUTOFF_A = 6.0        # Å — residue-monomer heavy-atom contact
+REBINDING_CONTACT_PERSISTENCE = 0.5     # fraction of analysed frames in contact
+REBINDING_CONTACT_LAST_FRAC = 0.5       # analyse the last 50% of the trajectory
+# Minimum persistent residues for a leg to count as `rebound`. 1 is exactly
+# pcsi_star's gate (c). DELIBERATELY PERMISSIVE — it means "formed at least one
+# persistent contact", NOT "bound well". The continuous fraction_persistent is
+# what feeds SI, the contrast D and the statistics.
+REBINDING_MIN_PERSISTENT_RESIDUES = 1
+# REBINDING_EM_FMAX_TOL
+#   kJ/mol/nm. A rebinding leg whose EM stalls above this without GROMACS
+#   reporting convergence is ABORTED with status EM_NOT_CONVERGED rather than
+#   silently producing a number. Equal to MDP_EM's emtol, deliberately strict.
+REBINDING_EM_FMAX_TOL = 1000.0
+# REBINDING_WATER_CLASH_CUTOFF_A
+#   Å. Solvent/ion residues within this of the PLACED template are deleted whole.
+#   2.4 is phase5_rebinding's own built-in default and the value its build was
+#   verified against (89 waters removed on the own leg, 98 on the cross leg, both
+#   reaching EM convergence). It is deliberately LARGER than
+#   REBINDING_CLASH_CUTOFF_A = 2.0, which is a heavy-atom clash test on the
+#   protein; this one must also clear a water's hydrogens.
+REBINDING_WATER_CLASH_CUTOFF_A = 2.4
+# REBINDING_REMOVAL_CONTACT_DROP_FRAC
+#   Template-removal verdict: escaped if k_persistent(Q4) == 0 OR
+#   k_persistent(Q4)/k_persistent(Q1) <= this. Replaces `rmsd_end > 5.0 Å`, which
+#   made every target read STUCK BY CONSTRUCTION — the observed range of that
+#   statistic across all completed legs was 2.04-3.87 Å against a 5.0 Å threshold,
+#   so `escaped` was False for every leg that ever ran.
+#   A STATED DEFAULT, NOT FITTED: results/ is archived cold storage, so there is
+#   no data to calibrate against. The k_q4 == 0 branch is knob-independent and the
+#   continuous `retention` is always reported. Calibrate on the first replica set.
+REBINDING_REMOVAL_CONTACT_DROP_FRAC = 0.25
 # Crosslinker ratio sweep (Phase 4 supplementary; Phase 6 default 5%)
 CROSSLINKER_RATIO_SWEEP = [0.03, 0.05, 0.08, 0.10]
 CROSSLINKER_SWEEP_MD_NS = 30      # short MD per ratio for cavity stability check (reduced for faster sweep)
@@ -733,3 +1164,213 @@ PREPARE_LIGAND = (_shutil.which("prepare_ligand4")
 # Use GROMACS GPU build (2025.2) — /usr/bin/gmx is old 2021.4
 GMX_BIN = "/usr/local/gromacs-gpu/bin/gmx"
 ACPYPE_BIN = _shutil.which("acpype") or "acpype"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ── EXPERIMENT OVERRIDE LAYER ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# 여기 윗줄까지가 CD(tetraspanin ECL2) baseline 이고, results/ 를 만들어 낸
+# 바로 그 코드다. 새 실험을 추가할 때 위쪽을 고치지 말 것 —
+# code/pipeline/config_<NAME>.py 를 새로 만들고 KNOWN_EXPERIMENTS 에 등록한다.
+#
+#     MIP_EXPERIMENT=BSA python3 -m pipeline.run_pipeline --target BSA --phase 4
+#     (unset  ->  "CD"  ->  today's behaviour, object for object)
+#
+# WHY exec() AND NOT `from .config_BSA import *`:
+#   1. CLOSURE TRAP. The five functions above (get_output_path, resolve_path,
+#      is_polymerization_compatible, synthesis_pH_window,
+#      reactivity_ratio_product — 30 of the ~115 import sites) read OUTPUT_DIRS /
+#      PROJECT_ROOT / ALL_MONOMERS / PH_STABILITY / QE_PARAMS as bare globals
+#      through __globals__, i.e. THIS dict. exec(..., globals()) means rebinding
+#      those tables below redirects the functions. A star-import copies the
+#      function OBJECT, whose __globals__ still points here, so
+#      is_polymerization_compatible would keep reading CD's 24-monomer library
+#      while every constant around it said BSA — and get_output_path would
+#      return CD paths and then mkdir them.
+#   2. _Path / _shutil / _os / _GROMACS_BIN / _ADGPU_SEARCH are already bound and
+#      usable by override files. `import *` silently drops all five.
+#   3. __file__ inside the exec'd code is THIS file, so the PROJECT_ROOT
+#      three-.parent-hop cannot break on an override file's directory depth.
+#   4. Override files are DELTAS. All 148 public symbols are already bound, so a
+#      name an override forgets keeps its baseline value. The "config_BSA is
+#      missing a symbol -> ImportError six hours into an MD run" failure class
+#      cannot occur.
+# The tool-detection block (L706-739) and its NON-IDEMPOTENT PATH prepend run
+# exactly ONCE, above, in original order. Both experiments inherit identical
+# binary paths.
+#
+# pipeline.config stays an ordinary module with ordinary attributes: no
+# __getattr__, no sys.modules swap, no proxy. So
+#     import pipeline.config as cfg; cfg.SELECTIVITY_WEIGHT = w
+# (run_selectivity_sweep.py:30) keeps working, and the deferred
+# `from .config import SELECTIVITY_WEIGHT` at phase3_mmsd.py:406 keeps seeing the
+# mutation across the `del sys.modules["pipeline.phase3_mmsd"]` reload at
+# run_selectivity_sweep.py:69.
+
+
+def _rederive():
+    """Recompute every import-time-derived symbol from its CURRENT inputs.
+
+    Call as the LAST statement of an override file that touched any of:
+        SILANE_MONOMERS | VINYL_MONOMERS | CROSSLINKER_LIBRARY
+        OUTPUT_DIR | USE_GPU
+    Anything that must override a DERIVED value goes AFTER the call.
+
+    Mirrors, in order, config.py lines 492 / 539 / 542 / 670-678 / 728.
+    >>> IF YOU EDIT THOSE FIVE PLACES, EDIT THIS FUNCTION. <<<
+    Idempotent. test_config_regression.py asserts it is a no-op for CD, which is
+    what catches drift — the CD path never calls it, so a divergence would break
+    only BSA, silently.
+    """
+    g = globals()
+    g["CROSSLINKERS"] = set(g["CROSSLINKER_LIBRARY"].keys())                 # L492
+    g["ALL_MONOMERS"] = {**g["SILANE_MONOMERS"],                             # L539
+                         **g["VINYL_MONOMERS"],
+                         **g["CROSSLINKER_LIBRARY"]}
+    g["FUNCTIONAL_MONOMERS"] = {k: v for k, v in g["ALL_MONOMERS"].items()   # L542
+                                if k not in g["CROSSLINKERS"]}
+    g["OUTPUT_DIRS"] = {k: f"{g['OUTPUT_DIR']}/{k}" for k in                 # L670-678
+                        ("phase1", "phase2", "phase3",
+                         "phase4", "phase5", "phase6", "reports")}
+    g["USE_AUTODOCK_GPU"] = (g["USE_GPU"]                                    # L728
+                             and g["AUTODOCK_GPU_BIN"] is not None)
+
+
+KNOWN_EXPERIMENTS = ("CD", "BSA")
+EXPERIMENT = _os.environ.get("MIP_EXPERIMENT", "CD").strip()
+_EXPERIMENT_SOURCE = "MIP_EXPERIMENT" if _os.environ.get("MIP_EXPERIMENT") else "default"
+
+if EXPERIMENT not in KNOWN_EXPERIMENTS:
+    # Fail LOUD, never fall back. warn-and-continue would run CD and write into
+    # results/. `MIP_EXPERIMENT=bsa` is a typo, not a request for CD, and a
+    # stderr warning is invisible in a multi-hour GROMACS log.
+    raise ImportError(
+        f"MIP_EXPERIMENT={EXPERIMENT!r} is not one of {KNOWN_EXPERIMENTS} "
+        f"(case-sensitive). Unset MIP_EXPERIMENT for the default CD run.")
+
+_OVERRIDE = _Path(__file__).resolve().parent / f"config_{EXPERIMENT}.py"
+
+__CONFIG_DISPATCH__ = True          # sentinel the override files assert on
+if _OVERRIDE.is_file():
+    # compile(..., str(_OVERRIDE), ...) keeps tracebacks pointing at the real
+    # file and line inside config_BSA.py rather than at "<string>".
+    exec(compile(_OVERRIDE.read_text(encoding="utf-8"), str(_OVERRIDE), "exec"),
+         globals())
+elif EXPERIMENT == "CD":
+    # PACKAGING RESILIENCE. config_CD.py is a PURE DOCUMENTATION delta — it
+    # contains zero value assignments, because config.py's own body IS the CD
+    # experiment (see that file's docstring). Making it mandatory would give the
+    # baseline experiment a hard runtime dependency on a file that a
+    # `git commit -am`, a fresh clone, `git worktree add`, `git clean -fd` or any
+    # tracked-files-only deploy can leave behind — and CD would then fail to
+    # import AT ALL. So a missing CD delta degrades to an empty delta.
+    # Every other experiment still hard-fails: their deltas carry OUTPUT_DIR and
+    # the pinned libraries, so silently running them without their delta would
+    # execute CD's values under their name and write into results/.
+    EXPERIMENT_LABEL = "CD63/CD81/CD9 tetraspanin ECL2 epitope imprinting"
+    UNCONSUMED_KEYS = frozenset()
+    import sys as _sys
+    print(f"[config] NOTE: {_OVERRIDE.name} is absent; CD is running from "
+          f"config.py's own body (this is a safe, fully-equivalent fallback, "
+          f"but the file should be restored/committed).", file=_sys.stderr)
+else:
+    raise ImportError(
+        f"experiment {EXPERIMENT!r} selected but {_OVERRIDE} is missing. Only the "
+        f"CD baseline may run without its delta file (config.py's body IS CD); "
+        f"every other experiment's OUTPUT_DIR and monomer libraries live in its "
+        f"delta, so running without it would execute CD's values.")
+
+# ── GUARD 1 (STRUCTURAL, the important one) ────────────────────────────────
+# Any non-CD experiment MUST write outside the CD tree. This is the single
+# mechanical block on the ~500 GB data-loss scenario: it does not depend on env
+# var hygiene, on stamp files, or on anyone remembering to set OUTPUT_DIR.
+#
+# IT CHECKS OUTPUT_DIRS, NOT JUST OUTPUT_DIR. Consumers never read the scalar —
+# they call get_output_path(key), which indexes OUTPUT_DIRS (and mkdirs). An
+# override file that follows the documented "derived-symbol overrides go AFTER
+# the _rederive() call" recipe can therefore retarget any individual phase dir
+# into results/ while OUTPUT_DIR still points somewhere harmless. Validate every
+# path this module can hand out.
+if EXPERIMENT != "CD":
+    _cd_tree = (PROJECT_ROOT / "results").resolve()
+
+    def _reject_cd_tree(_label, _value):
+        _p = _Path(_value).resolve()
+        if _p == _cd_tree or _cd_tree in _p.parents:
+            raise ImportError(
+                f"experiment {EXPERIMENT!r} resolved {_label}={str(_value)!r}, which is "
+                f"inside the CD results tree {str(_cd_tree)!r}. Refusing to start: this "
+                f"would overwrite the existing CD results. Fix the path in "
+                f"{_OVERRIDE.name}.")
+        return _p
+
+    _reject_cd_tree("OUTPUT_DIR", OUTPUT_DIR)
+    for _k in sorted(OUTPUT_DIRS):
+        _reject_cd_tree(f"OUTPUT_DIRS[{_k!r}]", OUTPUT_DIRS[_k])
+    del _k, _reject_cd_tree
+
+# ── GUARD 2 (READ-ONLY, defense in depth) ──────────────────────────────────
+# Never creates or writes anything — config.py has no import-time writes today
+# and must keep none. Create stamps deliberately:
+#     python3 code/tools/stamp_experiment.py
+# Same widening as Guard 1: check the stamp of every distinct tree this config
+# can write into, not only OUTPUT_DIR's.
+for _root in dict.fromkeys([str(OUTPUT_DIR)] + [str(v) for v in OUTPUT_DIRS.values()]):
+    _stamp = _Path(_root) / ".experiment"
+    if _stamp.is_file():
+        _owner = _stamp.read_text().strip()
+        if _owner != EXPERIMENT:
+            raise ImportError(
+                f"{_root} is stamped experiment={_owner!r} but this process "
+                f"resolved {EXPERIMENT!r}. Refusing to mix result trees.")
+del _root
+
+# ── GUARD 3 (ENTRY-POINT PINNING) ──────────────────────────────────────────
+# Some top-level scripts import config (so they silently adopt the ACTIVE
+# experiment's monomer libraries and chemistry tables) but write to their own
+# HARDCODED `results/...` literals that Guards 1 and 2 structurally cannot see.
+# Under a leaked MIP_EXPERIMENT they would run the wrong experiment's values
+# straight into the protected CD tree — e.g. make_process_figures.py applies
+# PRIMARY_CHEM_CLASS to CD's phase3 JSONs and overwrites results/presentation.
+#
+# Enforced HERE, in config, so that not one line of those scripts is edited
+# (the user's hard constraint). sys.argv[0] is the only thing readable this
+# early: run_pipeline.py:27 and verify_phase.py:24 bind config values at module
+# scope, long before any parse_args().
+#
+# NOT LISTED, and correctly so: code/analyze_*.py and code/midrun_pcsi_check.py
+# hardcode results/ too but import NOTHING from config, so MIP_EXPERIMENT cannot
+# change what they compute. Verified with
+#     grep -L "pipeline.config" code/analyze_*.py code/midrun_pcsi_check.py
+_CD_PINNED_SCRIPTS = frozenset({
+    "make_presentation_figures.py",   # writes results/presentation/*.png
+    "make_process_figures.py",        # writes results/presentation/*.png
+    "run_membrane_bacteria.py",       # writes results/membrane_bacteria/
+    "run_validation.py",              # writes results/validation/ (+ sullivan/)
+})
+if EXPERIMENT != "CD":
+    import sys as _sys
+    _argv0 = _Path(_sys.argv[0]).name if _sys.argv and _sys.argv[0] else ""
+    if _argv0 in _CD_PINNED_SCRIPTS:
+        raise ImportError(
+            f"{_argv0} is CD-PINNED: it imports config (so it would pick up "
+            f"experiment {EXPERIMENT!r}'s monomer libraries) but writes to hardcoded "
+            f"'results/...' paths inside the CD tree. Refusing to run it under "
+            f"MIP_EXPERIMENT={EXPERIMENT!r}. Unset MIP_EXPERIMENT (do not `export` "
+            f"it — use `python3 run_BSA.py ...` or a one-shot `VAR=x cmd` prefix).")
+    del _argv0
+
+# ── HMR override — MUST be after all symbol definitions ──────
+# When PHASE4_HMR_MODE=True the H atoms are 4 Da (repartitioned) and dt=4 fs
+# is safe with LINCS all-bonds. Consumers that write mdp files (utils_gromacs
+# _write_production_mdp) branch on both MD_TIMESTEP_FS and the constraint
+# keyword; here we set the timestep alone — constraint switch lives in the
+# mdp writer.
+if globals().get("PHASE4_HMR_MODE", False):
+    MD_TIMESTEP_FS = 4.0
+
+if not _os.environ.get("MIP_CONFIG_QUIET"):
+    import sys as _sys
+    print(f"[config] experiment={EXPERIMENT} ({_EXPERIMENT_SOURCE})  "
+          f"output={OUTPUT_DIR}  "
+          f"unconsumed_keys={len(globals().get('UNCONSUMED_KEYS', ()))}",
+          file=_sys.stderr)

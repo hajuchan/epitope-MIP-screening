@@ -140,16 +140,27 @@ def _geometric_sites(pdb_path: Path, n_sites: int = 5) -> list:
 
 # ── H-bond Analysis (backbone vs sidechain) ───────────────────
 
-def analyze_hbond_types(dlg_path: Path, receptor_pdb: Path) -> dict:
+def analyze_hbond_types(dlg_path: Path, receptor_pdb: Path,
+                        max_backbone_ratio: float = None) -> dict:
     """
     Analyze whether docked monomer H-bonds are with protein
     backbone or sidechain atoms.
 
     Sullivan 2019: high backbone H-bond ratio → 2° structure disruption.
 
+    `max_backbone_ratio` is the disruption threshold. It defaults to
+    config.MAX_BACKBONE_HBOND_RATIO — it used to be the bare literal 0.3 here
+    while phase2_smd imported MAX_BACKBONE_HBOND_RATIO and never used it, so
+    changing the config knob did nothing (REVIEW FINDING 19).
+
     Returns dict with backbone_count, sidechain_count, ratio,
-    helical_backbone_count.
+    helical_backbone_count. helical_backbone_count is None when secondary
+    structure could not be determined (see REVIEW FINDING 15) — it is NOT a
+    count in that case and must not be treated as one.
     """
+    if max_backbone_ratio is None:
+        from .config import MAX_BACKBONE_HBOND_RATIO
+        max_backbone_ratio = MAX_BACKBONE_HBOND_RATIO
     from Bio.PDB import PDBParser
     from Bio.PDB.DSSP import dssp_dict_from_pdb_file
 
@@ -171,17 +182,60 @@ def analyze_hbond_types(dlg_path: Path, receptor_pdb: Path) -> dict:
                 sc.add(atom.get_name())
         residue_info[resid] = {"backbone": bb, "sidechain": sc}
 
-    # Get DSSP secondary structure
+    # Get DSSP secondary structure.
+    #
+    # NEVER FABRICATE SECONDARY STRUCTURE (REVIEW FINDING 15).
+    #
+    # This except branch used to assign "H" to EVERY residue with the comment
+    # "DSSP not available, assume all helix for epitope", and logged nothing at
+    # any level. mkdssp is NOT installed in this environment, so the branch
+    # fired every time: helical_backbone_contacts came out exactly equal to
+    # backbone_contacts, for every monomer against every target, and that
+    # fabricated number was reported into the Phase 2 JSON and the report as a
+    # measurement.
+    #
+    # ss is now left as None on failure, which propagates to
+    # helical_backbone_contacts = None below — a missing measurement, not a
+    # count that happens to equal another one.
+    ss_available = False
+    ss_error = None
+    ss_source = None
     try:
         dssp = dssp_dict_from_pdb_file(str(receptor_pdb))
         for key, val in dssp[0].items():
             resid = key[1][1]
             if resid in residue_info:
                 residue_info[resid]["ss"] = val[2]  # H, E, C, etc.
-    except Exception:
-        # DSSP not available, assume all helix for epitope
-        for resid in residue_info:
-            residue_info[resid]["ss"] = "H"
+        ss_available = True
+        ss_source = "mkdssp"
+    except Exception as e:
+        # FALLBACK: mdtraj ships its OWN DSSP implementation and needs no
+        # external binary. mkdssp is not installed in this environment, and
+        # mdtraj is already a hard dependency (analyze_dssp_changes uses
+        # md.compute_dssp), so this is real secondary structure — not the
+        # fabricated all-helix the retired except branch produced.
+        first_err = f"{type(e).__name__}: {e}"
+        try:
+            import mdtraj as _md
+            _t = _md.load(str(receptor_pdb))
+            _ss = _md.compute_dssp(_t, simplified=False)[0]
+            for _res, _code in zip(_t.topology.residues, _ss):
+                if _res.resSeq in residue_info:
+                    residue_info[_res.resSeq]["ss"] = str(_code).strip() or "C"
+            ss_available = True
+            ss_source = "mdtraj"
+            logger.info(
+                f"    secondary structure from mdtraj's built-in DSSP "
+                f"(mkdssp unavailable: {first_err})")
+        except Exception as e2:
+            ss_error = (f"mkdssp: {first_err}; "
+                        f"mdtraj fallback: {type(e2).__name__}: {e2}")
+            logger.error(
+                f"SECONDARY STRUCTURE UNAVAILABLE for {receptor_pdb}: "
+                f"{ss_error}. helical_backbone_contacts will be reported as "
+                f"None, NOT as a count — the retired code assigned 'H' to "
+                f"every residue here, which made helical_backbone_contacts "
+                f"identically equal to backbone_contacts for every monomer.")
 
     # Parse docked pose contacts
     from .utils_autodock import parse_dlg, _extract_best_pose
@@ -203,7 +257,9 @@ def analyze_hbond_types(dlg_path: Path, receptor_pdb: Path) -> dict:
                 resid = rec_info["resid"]
                 if rec_info["atom_name"] in backbone_atoms:
                     bb_contacts += 1
-                    ss = residue_info.get(resid, {}).get("ss", "C")
+                    # `.get("ss")` with NO default: an unresolved residue must
+                    # not silently inherit a structure it was never assigned.
+                    ss = residue_info.get(resid, {}).get("ss")
                     if ss in ("H", "G", "I"):  # helical
                         helical_bb_contacts += 1
                 else:
@@ -217,8 +273,15 @@ def analyze_hbond_types(dlg_path: Path, receptor_pdb: Path) -> dict:
         "sidechain_contacts": sc_contacts,
         "total_contacts": total,
         "backbone_ratio": round(ratio, 3),
-        "helical_backbone_contacts": helical_bb_contacts,
-        "structural_disruption_risk": ratio > 0.3,  # Sullivan threshold
+        # None, not a count, when DSSP could not run — otherwise this field
+        # silently equalled backbone_contacts and read as a real measurement.
+        "helical_backbone_contacts": (helical_bb_contacts if ss_available
+                                      else None),
+        "secondary_structure_available": ss_available,
+        "secondary_structure_source": ss_source,
+        "secondary_structure_error": ss_error,
+        "structural_disruption_risk": ratio > max_backbone_ratio,
+        "backbone_ratio_threshold": max_backbone_ratio,  # Sullivan threshold
     }
 
 
@@ -296,6 +359,22 @@ def analyze_dssp_changes(traj_path: Path, top_path: Path) -> dict:
 
         traj = md.load(str(traj_path), top=str(top_path))
 
+        # ── PROTEIN ONLY ────────────────────────────────────────────
+        # BEHAVIOUR CHANGE (2026-08 audit). This used to run compute_dssp on the
+        # WHOLE system — 28,785 residues, almost all of them water — and then
+        # divide the helix/sheet counts by that total. mdtraj marks every
+        # non-protein residue "NA", and "NA" was being counted into the COIL
+        # bucket, so CD63 read 99.8% coil for a protein that is ~52% helix.
+        # With helix pinned near zero in both frames, helix_change was always
+        # ~0 and `structure_preserved` was mathematically incapable of ever
+        # being False: the check could not fail, so it was not a check.
+        sel = traj.topology.select("protein")
+        if sel is None or len(sel) == 0:
+            return {"error": "no protein atoms in trajectory for DSSP",
+                    "selection": None}
+        traj = traj.atom_slice(sel)
+        n_protein_residues = traj.topology.n_residues
+
         # DSSP at first and last frames
         dssp_first = md.compute_dssp(traj[0])
         dssp_last = md.compute_dssp(traj[-1])
@@ -303,22 +382,40 @@ def analyze_dssp_changes(traj_path: Path, top_path: Path) -> dict:
         # Compute fraction over entire trajectory
         dssp_all = md.compute_dssp(traj)  # (n_frames, n_residues)
 
-        # Count fractions
+        # Count fractions.
+        # "NA" is NOT coil — it is "mdtraj could not assign this residue".
+        # Counting it as coil is what produced the 99.8% figure. Any residue
+        # still marked NA after the protein slice is excluded from the
+        # denominator and reported separately.
         def _count_ss(dssp_array):
-            total = dssp_array.size
+            unassigned = int(np.sum(dssp_array == "NA"))
+            total = int(dssp_array.size) - unassigned
+            if total <= 0:
+                return {"helix": None, "sheet": None, "coil": None,
+                        "n_unassigned": unassigned}
             return {
                 "helix": float(np.sum(dssp_array == "H")) / total,
                 "sheet": float(np.sum(dssp_array == "E")) / total,
-                "coil": float(np.sum(np.isin(dssp_array, ["C", " ", "NA"]))) / total,
+                "coil": float(np.sum(np.isin(dssp_array, ["C", " "]))) / total,
+                "n_unassigned": unassigned,
             }
 
         ss_initial = _count_ss(dssp_first)
         ss_final = _count_ss(dssp_last)
         ss_average = _count_ss(dssp_all)
 
+        if ss_final["helix"] is None or ss_initial["helix"] is None:
+            return {"error": "DSSP assigned no protein residues",
+                    "selection": "protein",
+                    "n_residues": n_protein_residues}
+
         helix_change = ss_final["helix"] - ss_initial["helix"]
 
         return {
+            # These two markers are what phase4 checks before it will trust
+            # `structure_preserved` (acceptance.warnings.dssp_protein_only).
+            "selection": "protein",
+            "n_residues": n_protein_residues,
             "initial": ss_initial,
             "final": ss_final,
             "average": ss_average,
@@ -570,19 +667,89 @@ def check_epitope_quality(sequence: str, pdb_path=None,
 # Conformer Clustering (A2) — K-medoids on RMSD matrix
 # ════════════════════════════════════════════════════════════════
 
+def _kmedoids_pam(dist, k, seed=42, max_iter=100):
+    """Partitioning Around Medoids on a precomputed distance matrix.
+
+    Implemented here rather than imported (REVIEW FINDING 20).
+    sklearn_extra.cluster.KMedoids was the only k-medoids in the stack and
+    sklearn_extra does not import in this environment at all — it raises
+    `ValueError: numpy.dtype size changed, may indicate binary
+    incompatibility` from its compiled _cyfht extension. That made
+    ENSEMBLE_CLUSTERING_METHOD="kmedoids" — the DEFAULT, and a headline Phase 1
+    feature — impossible to execute: every target silently degraded to
+    uniform-time sampling.
+
+    PAM is small and deterministic, so removing the fragile compiled
+    dependency is cheaper than pinning a numpy/sklearn-extra ABI pair.
+    BUILD (k-medoids++ style greedy seeding) then SWAP, per Kaufman &
+    Rousseeuw 1990. Returns (medoid_indices, labels).
+    """
+    import numpy as np
+    n = dist.shape[0]
+    k = int(min(k, n))
+    rng = np.random.default_rng(seed)
+
+    # BUILD: first medoid minimises total distance; each next one maximises
+    # the reduction in total distance to the nearest chosen medoid.
+    medoids = [int(np.argmin(dist.sum(axis=1)))]
+    while len(medoids) < k:
+        nearest = dist[:, medoids].min(axis=1)
+        gain = np.maximum(nearest[None, :] - dist, 0.0).sum(axis=1)
+        gain[medoids] = -np.inf
+        best = int(np.argmax(gain))
+        if not np.isfinite(gain[best]) or best in medoids:
+            # Degenerate (duplicate frames): fill deterministically.
+            remaining = [i for i in range(n) if i not in medoids]
+            if not remaining:
+                break
+            best = int(rng.choice(remaining))
+        medoids.append(best)
+    medoids = sorted(medoids)
+
+    # SWAP: accept any medoid<->non-medoid exchange that lowers the total cost.
+    def cost(ms):
+        return float(dist[:, ms].min(axis=1).sum())
+
+    current = cost(medoids)
+    for _ in range(max_iter):
+        improved = False
+        for mi in range(len(medoids)):
+            for cand in range(n):
+                if cand in medoids:
+                    continue
+                trial = list(medoids)
+                trial[mi] = cand
+                c = cost(sorted(trial))
+                if c < current - 1e-12:
+                    medoids = sorted(trial)
+                    current = c
+                    improved = True
+        if not improved:
+            break
+
+    labels = np.argmin(dist[:, medoids], axis=1)
+    return np.array(medoids, dtype=int), labels
+
+
 def cluster_conformers_kmedoids(traj_path, top_path, n_clusters: int = 5,
                                   stride: int = 10):
     """A2: K-medoids clustering of MD frames by pairwise RMSD.
 
     Returns list of medoid frame indices and per-cluster info.
-    Reference: Shao 2007 JCTC; Daura 1999 Angew Chem.
+    Reference: Shao 2007 JCTC; Daura 1999 Angew Chem; Kaufman & Rousseeuw 1990.
+
+    Honours its documented {'error': ..., 'frames': None} contract for ANY
+    failure. The import guard used to be `except ImportError`, but the real
+    failure in this environment is a ValueError raised from sklearn_extra's
+    compiled extension, so the function RAISED instead of returning — breaking
+    the contract every caller was written against (REVIEW FINDING 20).
     """
     try:
         import mdtraj as md
-        from sklearn_extra.cluster import KMedoids
         import numpy as np
-    except ImportError as e:
-        return {'error': f'Missing dependency: {e}', 'frames': None}
+    except Exception as e:
+        return {'error': f'Missing dependency: {type(e).__name__}: {e}',
+                'frames': None}
 
     try:
         traj = md.load(str(traj_path), top=str(top_path))
@@ -602,22 +769,21 @@ def cluster_conformers_kmedoids(traj_path, top_path, n_clusters: int = 5,
         for i in range(n):
             rmsd_matrix[i] = md.rmsd(traj_ca, traj_ca, i) * 10  # nm → Å
 
-        # K-medoids
-        km = KMedoids(n_clusters=n_clusters, metric='precomputed',
-                       method='pam', random_state=42).fit(rmsd_matrix)
-        medoid_strided = km.medoid_indices_
+        # K-medoids (local PAM — see _kmedoids_pam for why not sklearn_extra)
+        medoid_strided, labels = _kmedoids_pam(rmsd_matrix, n_clusters, seed=42)
         medoid_frames = [int(i * stride) for i in medoid_strided]
-        # Cluster sizes
-        cluster_sizes = [int(sum(km.labels_ == k)) for k in range(n_clusters)]
+        cluster_sizes = [int((labels == k).sum())
+                         for k in range(len(medoid_strided))]
         return {
             'frames': medoid_frames,
             'cluster_sizes': cluster_sizes,
             'method': 'kmedoids_PAM',
+            'implementation': 'builtin_pam',
             'n_total_frames': traj.n_frames,
             'n_stride_frames': n,
         }
     except Exception as e:
-        return {'error': str(e), 'frames': None}
+        return {'error': f'{type(e).__name__}: {e}', 'frames': None}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -639,7 +805,17 @@ def cluster_docking_poses(pdbqt_lines_list, rmsd_cutoff: float = 2.0,
         cb = np.array(coords_b)
         return float(np.sqrt(np.mean((ca - cb) ** 2)))
 
-    sorted_poses = sorted(pdbqt_lines_list, key=lambda p: p.get('binding_energy', 0))
+    # `.get(k, default)` returns None when the key EXISTS with value None, which
+    # is what every DLG-parsed pose used to carry (the two-space/four-space DLG
+    # prefix mismatch meant no binding energy was ever parsed). Sorting None
+    # against None raises TypeError, so this line failed on every call and A3
+    # pose clustering silently produced nothing while reporting as enabled.
+    # Poses without an energy are now dropped upstream in
+    # parse_autodock_dlg_poses; this is defence in depth for any other caller.
+    sorted_poses = sorted(
+        pdbqt_lines_list,
+        key=lambda p: (p.get('binding_energy')
+                       if p.get('binding_energy') is not None else 0.0))
     clusters = []  # each: list of poses
     for pose in sorted_poses:
         added = False

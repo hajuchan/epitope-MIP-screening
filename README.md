@@ -715,15 +715,113 @@ python3 -m pipeline.run_pipeline --phase 5 --target CD63 CD81 CD9
 python3 -m pipeline.run_pipeline --phase 4 --quick-md --target CD63
 ```
 
+### 11.1a 상태 관리 — resume / fresh (2026-08 감사 이후 변경됨)
+
+**이전 문서의 재실행 명령은 실제로 0개의 phase를 실행했습니다.** `--resume`이
+"파일이 존재하는가"만 확인했기 때문에, 낡은 결과 트리에 대해 6개 phase 전부를
+"완료됨"으로 판정하고 건너뛰었습니다. `--fresh`는 argparse에만 존재했고 단 1
+바이트도 삭제하지 않았습니다. 두 가지 모두 수정되었으며, 이제 **의심스러우면
+거부**합니다.
+
+```bash
+# --fresh: 실행할 phase 디렉토리를 먼저 처분한다 (기본: os.rename 아카이브)
+python3 -m pipeline.run_pipeline --target CD63 --fresh
+#   → <output-dir>.archive_<UTC>/ 로 이동. 500 GB 라도 즉시(atomic).
+#   → --archive-dir 는 반드시 같은 파일시스템이어야 함 (cross-device 는 exit 4)
+
+# 진짜 삭제는 명시적 확인이 필요하다
+python3 -m pipeline.run_pipeline --target CD63 --fresh --fresh-mode delete --yes-delete
+
+# 낡은 트리를 그대로 이어받기 (manifest 없는 트리)
+python3 -m pipeline.run_pipeline --target CD63 --adopt-existing-tree
+
+# 입력이 바뀌었는데도 resume 강행 (구조/모노머 SMILES/config 지문 불일치)
+python3 -m pipeline.run_pipeline --target CD63 --accept-input-drift
+```
+
+거부되는 조합과 이유:
+
+| 상황 | 결과 |
+|---|---|
+| `results/reports/run_manifest.json` 없는 트리를 resume | **거부** — `--adopt-existing-tree` 로 명시적 opt-in |
+| 입력 지문 불일치 (구조 sha256 / SMILES / config 키) | **거부** — 어떤 키가 바뀌었는지 이름을 찍고 `--accept-input-drift` 요구 |
+| `--no-resume` 단독 | **거부** — 최상위 skip만 끄고 Phase 3/4/5 는 자체 per-target JSON 에서 계속 resume 하므로 |
+| `--fresh` + `--resume` | **거부** (모순) |
+| `--fresh` + `--report` / `--extend-drifters` / `--multirestart` / `--reanalyze` | **거부** — 예전에는 조용히 무시됨 |
+| `--fresh --fresh-mode delete` 인데 `--yes-delete` 없음 | **거부**, 트리는 그대로 |
+| 디렉토리 처분 실패 | **거부**, 아무것도 지우지 않음 |
+
+`--fresh` 는 이제 Phase 3/4/5 함수 자체에도 `fresh=True` 로 전달됩니다
+(디렉토리를 아카이브했다는 사실에만 의존하지 않음).
+
+### 11.1b 종료 코드
+
+`verify_phase.py` 가 **모든 phase 이후 자동 실행**되며, 차단되면 파이프라인이
+거기서 멈춥니다 (이전에는 verifier 가 호출조차 되지 않았고 항상 exit 0 이었음).
+
+| 코드 | 의미 |
+|---|---|
+| 0 | 정상 완료 |
+| 2 | **검증 차단** — 해당 phase 가 blocking 기준을 위반, 이후 phase 미실행 |
+| 3 | resume 거부 (manifest 없음 / 입력 drift / `--no-resume` 단독) |
+| 4 | `--fresh` 거부 (상태 처분 실패 또는 플래그 충돌) |
+
+`--skip-verify` 로 검증을 우회할 수 있으나, 그 phase 는
+`manifest["unverified_phases"]` 에 기록되어 "검사된 적 없음" 사실이 트리에
+남습니다. `run_CD.py` / `run_BSA.py` / `run_pipeline.py` 모두 이 코드를
+전파하므로 `python3 run_CD.py && 다음단계` 가 이제 올바르게 동작합니다.
+
 ### 11.2 검증 호출
 
 ```bash
-# Phase N 완료 후 자동 검증
+# Phase N 완료 후 자동 검증 (run_pipeline 이 매 phase 후 자동 호출함)
 python3 verify_phase.py 1    # Level 1 + 2 + 3 보고서 생성
 python3 verify_phase.py 3
+python3 verify_phase.py all              # 전체 phase
+python3 verify_phase.py 4 --targets CD63 CD9
+python3 verify_phase.py --criteria       # 차단 기준 전체 목록 출력
 # → results/reports/phase{N}_verification.json
 # → results/reports/phase{N}_summary.md
+#
+# 종료 코드: 0 = 통과, 1 = 차단(blocking issue 존재), 2 = 사용법 오류.
+# 모든 decision 은 report["issues"] 의 함수로 _finalize() 한 곳에서만 결정됨
+# (예전에는 "proceed_to_phase_4" 등이 무조건 참인 리터럴로 박혀 있었음).
 ```
+
+**Phase 5 는 자체 결정 지표를 계산하지 않습니다.** verify_phase5 는 그 실행
+트리의 `reports/pcsi_star_summary.json` 을 읽으며, 없으면 **차단**합니다.
+따라서 새 트리에서는 Phase 5 → Phase 6 사이에 다음이 필요합니다:
+
+```bash
+python3 code/run_pcsi_star.py
+# → <results_root>/reports/pcsi_star_summary.json  (verify_phase5 가 읽는 바로 그 경로)
+```
+
+`--out-dir` 의 기본값은 **현재 experiment 의 reports 디렉토리**입니다
+(CD → `results/reports`, BSA → `results_BSA_intact/reports`).
+예전 기본값은 `reports_v2/` 였는데, 이는 (a) verify_phase5 가 보지 않는
+디렉토리이고 (b) 동결된 PCSI* 재계산 산출물이라 문서화된 명령이 게이트를
+통과시키지도 못하면서 보호 대상 파일을 덮어쓰고 있었습니다.
+
+다른 트리에서 계산한 요약본을 쓰려면 명시적으로 지정합니다:
+
+```bash
+MIP_PCSI_STAR_JSON=/path/to/pcsi_star_summary.json python3 code/verify_phase.py 5
+```
+
+verify_phase5 는 이 환경변수를 최우선으로 읽고, 그 다음 실행 트리의
+`reports/pcsi_star_summary.json` 만 봅니다 — 다른 트리를 **자동으로 뒤지지
+않습니다**. 다른 results 트리에서 계산된 선택성 판정을 조용히 끌어오는 것이
+이 파일이 막으려는 바로 그 오류이기 때문입니다.
+
+이는 의도된 loud failure 입니다 — `--phase all` 이 이 단계 없이 Phase 6 까지
+무인 실행되지 않습니다.
+
+**단일 타깃 experiment (BSA):** PCSI* 는 교차 타깃 비율이므로 off-target 이
+없으면 정의 자체가 불가능합니다. `len(TARGETS) < 2` 인 experiment 에서는
+verify_phase5 가 PCSI* 를 요구하지 않고 (충족 불가능한 차단이 되므로)
+재결합 여부만으로 판정하며, `selectivity NOT EVALUATED` 경고를 남깁니다.
+그 실행에 대해서는 선택성 주장을 인용하면 안 됩니다.
 
 ### 11.3 디렉토리 구조
 

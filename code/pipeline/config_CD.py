@@ -22,8 +22,50 @@ if "__CONFIG_DISPATCH__" not in globals():
         "the default experiment.")
 
 EXPERIMENT_LABEL = "CD63/CD81/CD9 tetraspanin ECL2 epitope imprinting"
-UNCONSUMED_KEYS = frozenset()
+# Declared here, read by nothing yet. The startup banner prints the count so a
+# declaration is never mistaken for a live setting — the 2026-08 audit found 16
+# such keys on the BSA side alone, several of which read as configured when the
+# machinery behind them did not exist. The EV_* group is vesicle provenance and
+# the glycan assumption that follows from it; they become consumed when Route P
+# (glycan modelling) is implemented.
+UNCONSUMED_KEYS = frozenset({
+    "EV_SOURCE_CELL_LINE", "EV_SOURCE_CATALOGUE",
+    "EV_GLYCAN_TYPE", "EV_GLYCAN_SIALYLATED",
+})
 # OUTPUT_DIR stays PROJECT_ROOT/"results" exactly as defined at config.py:669.
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE 2026-08 AUDIT KEYS LIVE IN config.py's BODY, NOT HERE — AND WHY
+# ═══════════════════════════════════════════════════════════════════════════
+# The audit added 25 configuration symbols (docking seed, receptor-charge
+# policy, MMSD docking order and Pareto weights, Phase 4 replicas and
+# acceptance tolerances, box composition, the Phase 5 contact observable,
+# trajectory write rate, protonation policy). Every one of them is consumed by
+# a SHARED module — utils_gromacs, utils_autodock, utils_structure,
+# phase3_mmsd, phase4_md_validation, phase5_rebinding — that both experiments
+# execute. A key defined only in this file would be invisible under
+# MIP_EXPERIMENT=BSA, and the consuming modules would silently fall back to
+# their built-in defaults on the BSA path only: the single worst failure mode
+# this dispatch design exists to prevent, because it is invisible in CD testing.
+#
+# So they are in config.py's body, grouped under the phase that consumes them,
+# each with a comment naming the consuming function and the measurement that
+# justifies its value. CD therefore inherits them, exactly as it inherits every
+# other baseline value, and this file stays what its header promises: a delta.
+#
+# ONE experiment-specific override was needed, and it is in config_BSA.py, not
+# here: MD_NSTXOUT_COMPRESSED. The baseline 50000 steps (100 ps/frame) is sized
+# for CD's 350 ns legs (3,500 frames); BSA's 30 ns legs would get 300, which is
+# too thin for the Q3-vs-Q4 convergence gate. BSA overrides it to 5000.
+#
+# If a CD-only value is ever needed for one of these keys, override it BELOW
+# this block — not by editing config.py, which is the shared baseline.
+#
+# REGRESSION NOTE: those 25 additions change the CD namespace, so
+# code/tests/test_config_regression.py::test_cd_unchanged (T1) required
+# config_baseline_CD.json to be regenerated:
+#     python3 code/tools/config_baseline.py --write
+# T2-T10 are unaffected.
 
 # ═══════════════════════════════════════════════════════════════════════════
 # STATE OF results/phase2 — READ BEFORE QUOTING ANY CD PHASE-2 NUMBER
@@ -466,3 +508,53 @@ del _t, _extra
 #   binding and currently has no computational one. A bare-lipid reference
 #   would separate "binds CD63" from "binds membrane" — a different question
 #   from own-vs-cross, and one none of these three templates answers.
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SOURCE OF THE VESICLES, AND WHAT IT FIXES ABOUT THE GLYCANS
+# ═══════════════════════════════════════════════════════════════════════════
+# The templates are no longer synthetic peptides. The lab receives nanovesicles
+# from a collaborating lab, each CD protein overexpressed in a lipid bilayer,
+# and imprints the intact vesicle.
+#
+# PROVENANCE OF THIS ENTRY: a project DECISION taken 2026-08-13, not a
+# measurement and not a document from the producing lab. The line was given
+# verbally, first as "G293T" and then settled as HEK293T; no catalogue number
+# was supplied. Recorded as an ASSUMPTION so that a later contradiction is
+# visible rather than silently absorbed. If the producing lab ever supplies an
+# ATCC/supplier number, replace this block with it.
+EV_SOURCE_CELL_LINE = "HEK293T"           # ASSUMED — see provenance note above
+EV_SOURCE_CATALOGUE = None                # not supplied; HEK293T is ATCC CRL-3216
+#
+# WHY THE LINE DECIDES THE GLYCAN CHEMISTRY. The "T" in 293T is SV40 large T
+# antigen — an episomal-replication marker that has nothing to do with
+# glycosylation. It is NOT GnTI, and 293T is NOT a glyco-mutant. The glyco-
+# engineered line is a different cell, HEK293S GnTI-minus (Reeves et al., PNAS
+# 2002), in which N-acetylglucosaminyltransferase I is knocked out so processing
+# stalls at Man5GlcNAc2. On HEK293T the pathway runs to completion:
+#     HEK293T          complex-type biantennary, commonly sialylated
+#     HEK293S GnTI-    Man5GlcNAc2 only, neutral, small
+EV_GLYCAN_TYPE = "complex_biantennary"    # follows from HEK293T
+EV_GLYCAN_SIALYLATED = True               # ASSUMED; degree not measured
+#
+# CONSEQUENCE FOR THE SCREEN, and it is the largest discriminator this project
+# has. CD63 carries three N-glycan sequons on the imprinted face (N130/N150/
+# N172); CD81 carries ZERO extracellular sequons; CD9 carries two, and both sit
+# on EC1 down at the membrane collar. With complex sialylated glycans that is
+# not a subtle difference in residue composition — it is three bulky, ANIONIC,
+# diol-rich trees present on one target and absent on another. Boronate
+# monomers (APBA/AAPBA/VPBA/FPBA) bind cis-diols, so this is presence-versus-
+# absence of their binding partner, not a few percent of contact frequency.
+# It is why the recommended reframing is CD63 versus a pooled off-target rather
+# than three-way discrimination.
+#
+# STILL UNMODELLED. glycans_modelled is False on all three targets and no
+# available structure supplies coordinates. Complex biantennary glycans are
+# large and conformationally heterogeneous, so building them is real work — see
+# Route P in the plan. Until then the boronate monomers score identically on
+# three aglycosyl templates and a null result from that class is uninformative.
+#
+# CAVEATS TO CARRY. EV-surface glycosylation can differ from the parent cell
+# surface, and an overexpressed protein may be incompletely processed, so the
+# real vesicle may present a mixture rather than uniform complex biantennary.
+# Resolving that needs lectin blotting or glycan analysis and is out of scope
+# now; it is recorded here so the assumption is not mistaken for a measurement.

@@ -173,10 +173,23 @@ def _build_phase3(out: Path) -> str:
             mono_str = " + ".join(pc["monomers"])
             cls = "highlight" if pc.get("synergy") else ""
             ddg = pc.get("DDG_selectivity")
-            ddg_str = f"{ddg:.2f}" if ddg is not None else "—"
-            ddg_color = "green" if ddg is not None and ddg < -1.0 else (
-                "red" if ddg is not None and ddg > 0 else "")
-            sel_pen = pc.get("selectivity_penalty", 0)
+            # REVIEW FINDING 16: a bare "—" read the same for "selectivity was
+            # measured and is unremarkable" and "every cross-target MMSD
+            # crashed". Phase 3 now publishes selectivity_status, so say which.
+            _sel_status = pc.get("selectivity_status")
+            if ddg is not None:
+                ddg_str = f"{ddg:.2f}"
+                if _sel_status == "measured_partial":
+                    ddg_str += " <sup title='measured against fewer off-targets " \
+                               "than configured'>partial</sup>"
+                ddg_color = "green" if ddg < -1.0 else ("red" if ddg > 0 else "")
+            elif _sel_status in ("all_cross_target_mmsd_failed",
+                                 "own_mmsd_unusable"):
+                ddg_str = "NOT MEASURED"
+                ddg_color = "orange"
+            else:
+                ddg_str = "—"
+                ddg_color = ""
             rows += f"""<tr class="{cls}">
                 <td>{pc['pc_id']}</td>
                 <td>{mono_str}</td>
@@ -236,12 +249,20 @@ def _build_phase4(out: Path) -> str:
             occ = md.get('occupancy_analysis', {})
             contact_freq = occ.get('contact_freq_6A', occ.get('occupancy', {}))
             min_dist = occ.get('mean_min_dist_A', {})
-            residence = occ.get('residence_frames', {})
+            # residence_ns is the REAL time. `residence_frames` is a count of
+            # ANALYSED frames (i.e. stride units), which the old report
+            # displayed under a heading that read as a duration.
+            residence = occ.get('residence_ns', occ.get('residence_frames', {}))
+            residence_is_ns = 'residence_ns' in occ
             ratio = md.get('optimal_ratio', {})
 
             ebn_data = occ.get('EBN', {})
             hbnmax_data = occ.get('HBNMax', {})
-            hb_life = occ.get('hbond_lifetime_avg', {})
+            # hbond_lifetime_avg is a MEAN COUNT PER FRAME, never a lifetime.
+            # hbond_lifetime_ps is the real one (mean consecutive-frame run
+            # length per donor-H-acceptor triple).
+            hb_life = occ.get('hbond_lifetime_ps', occ.get('hbond_lifetime_avg', {}))
+            hb_life_is_ps = 'hbond_lifetime_ps' in occ
 
             contact_rows = ""
             for m in sorted(contact_freq.keys()):
@@ -257,25 +278,48 @@ def _build_phase4(out: Path) -> str:
                 hbl_str = f"{hbl:.1f}" if isinstance(hbl, (int, float)) else hbl
                 contact_rows += f"""<tr>
                     <td>{m}</td><td>{cf:.3f}</td><td>{md_dist_str} Å</td>
-                    <td>{res_str}</td><td>{e}</td><td>{hbn}</td>
-                    <td>{hbl_str}</td><td>{r}</td></tr>"""
+                    <td>{res_str}{' ns' if residence_is_ns else ' frames'}</td>
+                    <td>{e}</td><td>{hbn}</td>
+                    <td>{hbl_str}{' ps' if hb_life_is_ps else ' /frame'}</td>
+                    <td>{r}</td></tr>"""
 
             # Embed RMSD/RMSF/H-bond/Rg plots
-            md_dir = out / "phase4" / target / pc_id / "md"
+            # Phase 4 writes <target>/<pc>/rep_<i>/md now. Prefer the
+            # representative replica the pooled result names.
+            md_dir = Path(md.get("md_dir") or (out / "phase4" / target / pc_id / "md"))
             rmsd_img = _embed_image(md_dir / "rmsd.xvg.png") if (md_dir / "rmsd.xvg.png").exists() \
                 else _xvg_to_inline_plot(md_dir / "rmsd.xvg", "RMSD", "Time (ps)", "RMSD (nm)")
             rmsf_img = _xvg_to_inline_plot(md_dir / "rmsf.xvg", "RMSF", "Residue", "RMSF (nm)")
             hbond_img = _xvg_to_inline_plot(md_dir / "hbond.xvg", "H-bonds", "Time (ps)", "H-bonds")
             rg_img = _xvg_to_inline_plot(md_dir / "gyrate.xvg", "Radius of Gyration", "Time (ps)", "Rg (nm)")
 
+            # A rejected leg is RED, not orange: the report is where a reader
+            # decides whether Phase 4 succeeded, and the old layout showed
+            # "Not converged" in orange next to a row marked OK.
+            n_rep = md.get("n_replicas", "?")
+            n_acc = md.get("n_replicas_accepted", "?")
+            _accepted = md.get("accepted")
+            acc_badge = "" if _accepted is not False else \
+                ' <span style="color:#c00;">— REJECTED</span>'
+            acc_banner = ""
+            if _accepted is False:
+                acc_banner = (
+                    f'<p style="background:#fdd;border:2px solid #c00;padding:8px;'
+                    f'font-weight:bold;color:#900;">LEG REJECTED by Phase 4 '
+                    f'acceptance — {md.get("quality_failures")}. Any ratio or '
+                    f'cavity derived from it is NOT VALIDATED.</p>')
+
             sections += f"""
             <div class="card">
-                <h3>{target} / {pc_id}</h3>
+                <h3>{target} / {pc_id}{acc_badge}</h3>
+                {acc_banner}
                 <table>
                     <tr><th>RMSD (nm)</th><th>RMSF (nm)</th><th>H-bonds</th>
-                        <th>Rg (nm)</th><th>ΔG (kcal/mol)</th><th>DSSP</th><th>Status</th></tr>
+                        <th>Rg (nm)</th><th>ΔG (kcal/mol)</th><th>DSSP</th>
+                        <th>Replicas accepted</th><th>Status</th></tr>
                     <tr><td>{rmsd_str}</td><td>{rmsf_str}</td><td>{hbond_str}</td>
                         <td>{rg_str}</td><td>{dg_str}</td><td>{dssp_str}</td>
+                        <td>{n_acc}/{n_rep}</td>
                         <td>{'✓' if md.get('success') else '✗'}</td></tr>
                 </table>
 
@@ -285,10 +329,16 @@ def _build_phase4(out: Path) -> str:
                 </div>
 
                 <h4>Monomer-Epitope Contact Analysis (6Å cutoff)</h4>
+                <p><small>Residence is real time (ns) when the analysis reported
+                   it; "frames" means the run predates that fix and the number is
+                   a COUNT OF ANALYSED FRAMES, i.e. stride units, not a duration.
+                   Likewise "/frame" under H-bond lifetime is a mean count per
+                   frame — never a lifetime — while "ps" is the real mean
+                   consecutive-contact duration.</small></p>
                 <table>
                     <tr><th>Monomer</th><th>Contact Freq</th><th>Mean Min Dist</th>
                         <th>Residence</th><th>EBN</th><th>HBNMax</th>
-                        <th>H-bond Life</th><th>Ratio (EBN)</th></tr>
+                        <th>H-bond lifetime</th><th>Ratio (EBN)</th></tr>
                     {contact_rows}
                 </table>
 """
@@ -642,7 +692,16 @@ def _build_phase5_rebinding(out: Path) -> str:
             own_str = f"{own_r:.2f} Å" if own_r else "N/A"
             own_dg = own.get("mmpbsa_dG")
             own_dg_str = f"{own_dg:.1f}" if own_dg is not None else "—"
-            rebound = "✓" if own_r and own_r < 5.0 else "✗" if own_r else "—"
+            # The leg's OWN verdict, not a threshold re-applied here.
+            # `rebound` is contact-based (>=1 persistent residue over the last
+            # 50% of the run). The hardcoded 5.0 A test that stood here was
+            # wrong in BOTH basis and calibration: rmsd_mean_A now carries a
+            # FIT-FREE displacement, whose scale is larger than the self-fitted
+            # number 5.0 was chosen against, and the self-fitted statistic
+            # ranked an ESCAPED leg (contacts 4 -> 0) as the best-bound of its set.
+            rebound = {True: "✓", False: "✗"}.get(own.get("rebound"), "—")
+            own_fp = own.get("fraction_persistent")
+            own_fp_str = f"{own_fp:.2f}" if own_fp is not None else "—"
 
             other_cells = ""
             for key, val in snap.items():
@@ -656,19 +715,39 @@ def _build_phase5_rebinding(out: Path) -> str:
 
             # Removal test result
             removal = snap.get("removal_test", {})
-            if isinstance(removal, dict) and removal.get("escaped") is not None:
+            removal = removal if isinstance(removal, dict) else {}
+            if removal.get("verdict_basis") == "persistent_contacts_q1_vs_q4":
+                # Show the EVIDENCE the verdict is actually computed from.
+                # rmsd_start_A/rmsd_end_A are still populated but are now only
+                # diagnostics; presenting them as the reasoning misattributes it.
+                q = removal.get("contacts_q1_q4") or {}
+                k1, k4 = q.get("k_persistent_q1", "?"), q.get("k_persistent_q4", "?")
+                if removal.get("escaped") is None:
+                    rm_color, rm_status = "orange", "UNDEFINED (never bound)"
+                    rm_str = f"{k1}→{k4} contacts"
+                else:
+                    rm_color = "green" if removal["escaped"] else "red"
+                    rm_status = "Removable" if removal["escaped"] else "Stuck"
+                    rm_str = f"{k1}→{k4} contacts"
+            elif removal.get("escaped") is not None:
                 rm_color = "green" if removal["escaped"] else "red"
                 rm_str = f'{removal.get("rmsd_start_A","?")}→{removal.get("rmsd_end_A","?")} Å'
                 rm_status = "Removable" if removal["escaped"] else "Stuck"
+            elif removal:
+                # escaped is None WITH a removal record now has a specific
+                # meaning: the template never made contact, so "removable" is
+                # not a question the cavity earned. Not the same as "no data".
+                rm_color, rm_str, rm_status = "orange", "—", "UNDEFINED (never bound)"
             else:
-                rm_color = "gray"
-                rm_str = "—"
-                rm_status = "N/A"
+                rm_color, rm_str, rm_status = "gray", "—", "N/A"
 
+            _rep = snap.get("replica")
+            _rep_str = f"rep{_rep} " if _rep is not None else ""
             snap_rows += f"""<tr>
-                <td>{i+1} (frame {snap.get('frame_idx', '?')})</td>
+                <td>{_rep_str}#{i+1} (frame {snap.get('frame_idx', '?')})</td>
                 <td>{snap.get('total_contacts', '?')}</td>
                 <td style="color:{rm_color};">{rm_str} ({rm_status})</td>
+                <td>{own_fp_str}</td>
                 <td>{own_str}</td>
                 <td>{own_dg_str}</td>
                 <td>{rebound}{other_cells}</td>
@@ -707,8 +786,16 @@ def _build_phase5_rebinding(out: Path) -> str:
             ct_own = s.get("own_contact_mean", "—")
             ct_other = s.get("other_contact_mean", "—")
 
+            f_own = s.get("own_fraction_persistent_mean")
+            f_other = s.get("other_fraction_persistent_mean")
+            f_own_str = f"{f_own:.3f}" if f_own is not None else "—"
+            f_other_str = f"{f_other:.3f}" if f_other is not None else "—"
+            dcon = s.get("contrast_D")
+            d_str = f"{dcon:+.3f}" if dcon is not None else "—"
             sel_rows += f"""<tr>
                 <td>{other_t}</td>
+                <td>{f_own_str} / {f_other_str}</td>
+                <td>{d_str}</td>
                 <td>{other_rmsd_str2}{other_std_str} Å</td>
                 <td style="color:{si_color};font-weight:bold;">{si_str} ({label})</td>
                 <td>{p_str}</td>
@@ -723,7 +810,7 @@ def _build_phase5_rebinding(out: Path) -> str:
                 if key.startswith("other_") and key.endswith("_rmsd_mean"):
                     other_t = key.replace("other_", "").replace("_rmsd_mean", "")
                     sel_rows += f"""<tr>
-                        <td>{other_t}</td><td>{val:.2f} Å</td>
+                        <td>{other_t}</td><td>—</td><td>—</td><td>{val:.2f} Å</td>
                         <td colspan="5">—</td></tr>"""
 
         own_std = result.get("own_rmsd_std")
@@ -736,28 +823,64 @@ def _build_phase5_rebinding(out: Path) -> str:
         if own_ct is not None:
             extra_metrics += f"<p>Own contacts (avg): {own_ct}</p>"
 
+        # PROVISIONAL BANNER — these numbers came from a Phase 4 MD that failed
+        # its acceptance criteria. The reader must see that before the numbers.
+        prov_banner = ""
+        if result.get("provisional"):
+            prov_banner = (
+                f'<p style="background:#fdd;border:2px solid #c00;padding:8px;'
+                f'font-weight:bold;color:#900;">PROVISIONAL — NOT VALIDATED. '
+                f'{result.get("provisional_reason", "")}</p>')
+        _nrep = result.get("n_source_replicas")
+        rep_note = ""
+        if _nrep:
+            rep_note = (f'<p><small>Snapshots drawn from {_nrep} independent '
+                        f'Phase 4 replica(s): '
+                        f'{result.get("snapshots_per_replica")}. Snapshots from '
+                        f'ONE trajectory are correlated (rho1 = 0.23); across '
+                        f'replicas they are not.</small></p>')
+        _npart = result.get("n_snapshots_partial") or 0
+        part_note = ""
+        if _npart:
+            part_note = (f'<p style="color:#b60;"><small>{_npart} of '
+                         f'{result.get("n_snapshots")} analysed snapshots had at '
+                         f'least one FAILED leg; their surviving legs are still '
+                         f'counted.</small></p>')
+
         sections += f"""
         <div class="card">
             <h3>{target} — Cavity Rebinding</h3>
+            {prov_banner}
             <p>Success rate: <span style="color:{rate_color};font-weight:bold;font-size:1.2em;">
-                {success_rate}</span> (≥3/5 = reliable)</p>
-            <p>Own template RMSD: {own_rmsd_str}{own_std_str}</p>
+                {success_rate}</span> (≥3/5 = reliable; "rebound" = at least one
+                persistent contact, NOT an RMSD threshold)</p>
+            <p>Own template fit-free RMSD (diagnostic): {own_rmsd_str}{own_std_str}</p>
+            {rep_note}
+            {part_note}
             {extra_metrics}
 
             <h4>Per-Snapshot Results</h4>
             <table>
-                <tr><th>Snapshot</th><th>Contacts</th><th>Removal Test</th><th>Rebind RMSD</th><th>ΔG (kcal/mol)</th><th>Result</th></tr>
+                <tr><th>Snapshot</th><th>Contacts</th><th>Removal Test</th>
+                    <th>Persistent fraction</th>
+                    <th>fit-free RMSD (diagnostic)</th>
+                    <th>ΔG (kcal/mol)</th><th>Rebound</th></tr>
                 {snap_rows}
             </table>
 """
         if sel_rows:
             sections += f"""
             <h4>Selectivity Analysis</h4>
-            <p><small>SI = RMSD<sub>other</sub> / RMSD<sub>own</sub> —
-               SI &gt; 1.5: selective, 1.0–1.5: weak, &lt; 1.0: cross-reactive.
-               H-bonds/Contacts: own / other (higher own = better selectivity)</small></p>
+            <p><small><b>SI = mean f<sub>own</sub> / mean f<sub>other</sub></b>, where f is the
+               PERSISTENT-CONTACT FRACTION (cutoff 6 Å, persistence &gt; 0.5, last 50% of
+               the run) — the same statistic PCSI* is built on, so Phase 5 and PCSI*
+               cannot disagree about what "bound" means. SI &gt; 1.5: selective,
+               1.0–1.5: weak, &lt; 1.0: cross-reactive. <b>D</b> is the bounded
+               contrast. SI is NO LONGER derived from the RMSD column, which is a
+               fit-free diagnostic and gates nothing.</small></p>
             <table>
-                <tr><th>Other Target</th><th>RMSD</th><th>SI (label)</th>
+                <tr><th>Other Target</th><th>f persistent (own/other)</th><th>contrast D</th>
+                    <th>fit-free RMSD (diagnostic)</th><th>SI (label)</th>
                     <th>p-value</th><th>Significant?</th>
                     <th>H-bonds (own/other)</th><th>Contacts (own/other)</th></tr>
                 {sel_rows}

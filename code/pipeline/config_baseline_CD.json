@@ -64,7 +64,7 @@
    "interaction": "Glycan recognition + radical polymerization (APBA-acrylate)",
    "name": "N-Acryloyl-3-aminophenylboronic acid",
    "polymerization": "vinyl",
-   "smiles": "C=CC(=O)Nc1ccc(B(O)O)cc1"
+   "smiles": "C=CC(=O)Nc1cccc(B(O)O)c1"
   },
   "AAm": {
    "interaction": "H-bond (D+A)",
@@ -76,7 +76,7 @@
    "interaction": "Glycan (diol) recognition; ONLY usable as surface anchor",
    "name": "3-Aminophenylboronic acid",
    "polymerization": "surface",
-   "smiles": "Nc1ccc(B(O)O)cc1"
+   "smiles": "Nc1cccc(B(O)O)c1"
   },
   "APTES": {
    "interaction": "H-bond donor, electrostatic",
@@ -231,7 +231,7 @@
    "interaction": "Free-radical, tri-functional high crosslink",
    "name": "Trimethylolpropane trimethacrylate",
    "polymerization": "vinyl",
-   "smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+   "smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)COC(=O)C(=C)C",
    "type": "vinyl"
   },
   "TTMS": {
@@ -272,6 +272,7 @@
  },
  "AUTODOCK4_SPACING": 0.375,
  "AUTODOCK_GPU_BIN": "/home/chan/Research/AutoDock-GPU/bin/autodock_gpu_128wi",
+ "AUTODOCK_SEED": 20260812,
  "AUTOGRID4_BIN": "/home/chan/anaconda3/envs/GROMACS/bin/autogrid4",
  "BACKBONE_HBOND_PENALTY": true,
  "BAYESIAN_ACQUISITION": "EI",
@@ -339,7 +340,7 @@
    "interaction": "Free-radical, tri-functional high crosslink",
    "name": "Trimethylolpropane trimethacrylate",
    "polymerization": "vinyl",
-   "smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+   "smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)COC(=O)C(=C)C",
    "type": "vinyl"
   }
  },
@@ -404,10 +405,13 @@
  "EPITOPE_MIN_LENGTH": 9,
  "EPITOPE_MONOMER_MOLAR_RATIO": 25,
  "EPITOPE_PLDDT_THRESHOLD": 70,
- "EPITOPE_RMSD_MAX": 3.0,
  "EPITOPE_RMSD_THRESHOLD": 3.0,
  "EPITOPE_SASA_MIN_A2": 50.0,
  "EPITOPE_STABILITY_MD": true,
+ "EV_GLYCAN_SIALYLATED": true,
+ "EV_GLYCAN_TYPE": "complex_biantennary",
+ "EV_SOURCE_CATALOGUE": null,
+ "EV_SOURCE_CELL_LINE": "HEK293T",
  "EXPERIMENT": "CD",
  "EXPERIMENT_LABEL": "CD63/CD81/CD9 tetraspanin ECL2 epitope imprinting",
  "FEP_ENABLED": false,
@@ -430,7 +434,7 @@
    "interaction": "Glycan recognition + radical polymerization (APBA-acrylate)",
    "name": "N-Acryloyl-3-aminophenylboronic acid",
    "polymerization": "vinyl",
-   "smiles": "C=CC(=O)Nc1ccc(B(O)O)cc1"
+   "smiles": "C=CC(=O)Nc1cccc(B(O)O)c1"
   },
   "AAm": {
    "interaction": "H-bond (D+A)",
@@ -442,7 +446,7 @@
    "interaction": "Glycan (diol) recognition; ONLY usable as surface anchor",
    "name": "3-Aminophenylboronic acid",
    "polymerization": "surface",
-   "smiles": "Nc1ccc(B(O)O)cc1"
+   "smiles": "Nc1cccc(B(O)O)c1"
   },
   "APTES": {
    "interaction": "H-bond donor, electrostatic",
@@ -601,19 +605,21 @@
  "MD_FF_PROTEIN": "amber99sb-ildn",
  "MD_GPU_ID": "0",
  "MD_IONIC_STRENGTH": 0.15,
- "MD_MMPBSA_END_NS": 50,
+ "MD_MMPBSA_END_NS": 350,
  "MD_MMPBSA_INTERVAL": 100,
- "MD_MMPBSA_START_NS": 30,
+ "MD_MMPBSA_START_NS": 300,
+ "MD_NSTXOUT_COMPRESSED": 50000,
  "MD_PRESSURE_BAR": 1.0,
  "MD_PRODUCTION_NS": 350,
  "MD_QUICK_NS": 20,
  "MD_SOLVENT_PH": 7.4,
  "MD_TEMPERATURE_K": 300.0,
- "MD_TIMESTEP_FS": 2.0,
+ "MD_TIMESTEP_FS": 4.0,
  "MD_WATER_MODEL": "tip3p",
  "MMPBSA_METHOD": "GBSA",
  "MMSD_CHEMISTRY_ENTROPY_WEIGHT": 0.3,
  "MMSD_COMPETITION_DISTANCE": 5.0,
+ "MMSD_DOCKING_ORDER": "smd_rank",
  "MMSD_ENFORCE_POLYMERIZATION_COMPATIBILITY": true,
  "MMSD_HIGH_AFFINITY_THRESHOLD": -11.0,
  "MMSD_MAX_COMBO_SIZE": 6,
@@ -626,6 +632,15 @@
    "nsga2",
    "bayesian",
    "greedy"
+  ]
+ },
+ "MMSD_ORDER_REPLICATES": 1,
+ "MMSD_ORDER_SEED": 42,
+ "MMSD_PARETO_WEIGHTS": {
+  "__seq__": [
+   1.0,
+   1.0,
+   1.0
   ]
  },
  "MMSD_PENALIZE_COMPETITION": false,
@@ -657,8 +672,34 @@
  "PHASE1_COMPUTE_GRAVY": true,
  "PHASE1_COMPUTE_SASA": true,
  "PHASE1_EVALUATE_MULTI_EPITOPE": true,
+ "PHASE1_GLYCAN_INPUT_DIR": "structures/glycosylated",
+ "PHASE1_GLYCAN_MODE": "none",
+ "PHASE1_GLYCAN_SEQUON_REGEX": "N[^P][ST]",
  "PHASE2_DECOY_BASELINE": true,
+ "PHASE2_EF_THRESHOLD": 1.5,
+ "PHASE2_ENFORCE_MEMBRANE_ACCESSIBILITY": true,
+ "PHASE2_MAX_OCCLUDED_POSE_FRACTION": 0.5,
  "PHASE2_POSE_CLUSTERING": true,
+ "PHASE2_POSE_CONTACT_CUTOFF_A": 4.0,
+ "PHASE2_REQUIRE_FRESH_DLG": true,
+ "PHASE4_ALLOW_STALE_RESUME": false,
+ "PHASE4_CONVERGENCE_TOL_PCT": 10.0,
+ "PHASE4_HMR_MODE": true,
+ "PHASE4_KEEP_CENTERED_TRAJECTORY": false,
+ "PHASE4_MEMBRANE_INPUT_DIR": "structures/membrane",
+ "PHASE4_MEMBRANE_LIPIDS": {
+  "__seq__": [
+   "POPC",
+   "POPE",
+   "PSM",
+   "POPS",
+   "CHL1"
+  ]
+ },
+ "PHASE4_MEMBRANE_MODE": false,
+ "PHASE4_MEMBRANE_POSRES_LIPID_K": 200,
+ "PHASE4_MEMBRANE_RESTRAIN_TM": true,
+ "PHASE4_N_REPLICAS": 3,
  "PHASE4_PROTEIN_RESTRAINT_K": 1000,
  "PHASE4_RATIO_PRESETS": {
   "__seq__": [
@@ -705,6 +746,7 @@
   ]
  },
  "PHASE4_RATIO_SWEEP": false,
+ "PHASE4_RMSD_DRIFT_TOL_NM": 0.05,
  "PHASE4_SOLVENTS": {
   "acetonitrile": {
    "dielectric": 36.6,
@@ -746,7 +788,12 @@
  },
  "PHASE4_SOLVENT_SWEEP": true,
  "PHASE4_TEMPLATE_MODE": "ecl2",
+ "PHASE5_BOX_Z_EXTEND_NM": 15.0,
+ "PHASE5_FRESH_EV_APPROACH_GAP_NM": 4.0,
+ "PHASE5_FRESH_EV_PLACEMENTS": 3,
+ "PHASE5_TRITON_REMOVAL_MODE": true,
  "PHASE6_GENERATE_NIP": true,
+ "PH_CHARGE_ASSIGNMENT": "majority",
  "PH_STABILITY": {
   "4VIm": {
    "__seq__": [
@@ -947,6 +994,7 @@
    ]
   }
  },
+ "PH_USE_PROPKA": false,
  "POLYMERIZATION_COMPATIBILITY": {
   "catechol": {
    "__set__": [
@@ -1024,6 +1072,7 @@
   "VTMS": "covalent"
  },
  "PROJECT_ROOT": "/home/chan/Research/Monomer_screening_in_Bio",
+ "PROTONATION_APPLY_STATES": false,
  "QE_PARAMS": {
   "4VIm": {
    "__seq__": [
@@ -1116,19 +1165,30 @@
    ]
   }
  },
+ "RADICAL_CROSSLINKER_MOLE_FRACTION": 0.5,
  "REBINDING_CLASH_CUTOFF_A": 2.0,
  "REBINDING_CLASH_THRESHOLD": 30,
+ "REBINDING_CONTACT_CUTOFF_A": 6.0,
+ "REBINDING_CONTACT_LAST_FRAC": 0.5,
+ "REBINDING_CONTACT_PERSISTENCE": 0.5,
  "REBINDING_CROSSLINKER_RESTRAINT_K": 5000,
+ "REBINDING_EM_FMAX_TOL": 1000.0,
  "REBINDING_MD_NS": 50,
+ "REBINDING_MIN_PERSISTENT_RESIDUES": 1,
  "REBINDING_MULTI_POSE": true,
  "REBINDING_N_HEAD_CONFORMERS": 5,
  "REBINDING_N_SNAPSHOTS": 10,
  "REBINDING_PROTEIN_RESTRAINED": true,
+ "REBINDING_REMOVAL_CONTACT_DROP_FRAC": 0.25,
  "REBINDING_RESTRAINT_K": 1000,
  "REBINDING_RMSD_THRESHOLD": 5.0,
+ "REBINDING_SYMMETRIC_PLACEMENT": true,
  "REBINDING_TRIAL_MODE": false,
+ "REBINDING_WATER_CLASH_CUTOFF_A": 2.4,
  "RECEPTOR_BOX_ON_SCORED_SURFACE": true,
+ "RECEPTOR_PDBQT_ALLOW_NEUTRAL_FALLBACK": false,
  "SELECTIVITY_DDG_THRESHOLD": -1.0,
+ "SELECTIVITY_MEMBRANE_CALIBRATION": 0.75,
  "SELECTIVITY_METRIC": "rank_delta",
  "SELECTIVITY_WEIGHT": 0.5,
  "SILANE_MONOMERS": {
@@ -1225,6 +1285,7 @@
  },
  "SMD_BE_THRESHOLD": -2.0,
  "SMD_TOP_N_FOR_PHASE3": 12,
+ "SOLGEL_Q_MOLE_FRACTION": 0.6,
  "TARGETS": {
   "CD63": {
    "ccg_position": 145,
@@ -1977,7 +2038,12 @@
  "TARGET_KD_NM": 50,
  "TEMPERATURE": 298.15,
  "UNCONSUMED_KEYS": {
-  "__set__": []
+  "__set__": [
+   "EV_GLYCAN_SIALYLATED",
+   "EV_GLYCAN_TYPE",
+   "EV_SOURCE_CATALOGUE",
+   "EV_SOURCE_CELL_LINE"
+  ]
  },
  "USE_AUTODOCK_GPU": true,
  "USE_BINDING_SITE_PREDICTION": true,
@@ -2002,7 +2068,7 @@
    "interaction": "Glycan recognition + radical polymerization (APBA-acrylate)",
    "name": "N-Acryloyl-3-aminophenylboronic acid",
    "polymerization": "vinyl",
-   "smiles": "C=CC(=O)Nc1ccc(B(O)O)cc1"
+   "smiles": "C=CC(=O)Nc1cccc(B(O)O)c1"
   },
   "AAm": {
    "interaction": "H-bond (D+A)",
@@ -2014,7 +2080,7 @@
    "interaction": "Glycan (diol) recognition; ONLY usable as surface anchor",
    "name": "3-Aminophenylboronic acid",
    "polymerization": "surface",
-   "smiles": "Nc1ccc(B(O)O)cc1"
+   "smiles": "Nc1cccc(B(O)O)c1"
   },
   "DA": {
    "interaction": "Multi H-bond, catechol",

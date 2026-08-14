@@ -1,0 +1,8 @@
+[config] experiment=BSA (MIP_EXPERIMENT)  output=/home/chan/Research/Monomer_screening_in_Bio/results_BSA_hydrolyzed  unconsumed_keys=8
+2026-08-14 18:01:08,014 [Pipeline] Targets: ['BSA']
+2026-08-14 18:01:08,014 [Pipeline] Output: /home/chan/Research/Monomer_screening_in_Bio/results_BSA_hydrolyzed
+2026-08-14 18:01:08,016 [Pipeline] --accept-input-drift: /home/chan/Research/Monomer_screening_in_Bio/results_BSA_hydrolyzed was built from DIFFERENT inputs:
+2026-08-14 18:01:08,016 [Pipeline] --accept-input-drift:     - config: changed=['BSA_PROTOCOL_MEASURED', 'BSA_RATIO_GRID_PROVISIONAL']
+2026-08-14 18:01:08,018 [Pipeline] Phase 4: will RUN — produced under a different input fingerprint
+2026-08-14 18:01:08,018 [Pipeline] phase(s) [4] consume Phase 1's results, but they are not usable: produced under a different input fingerprint.
+2026-08-14 18:01:08,018 [Pipeline] Run Phase 1 first (e.g. --phase all), or point --output-dir at the tree that has it.

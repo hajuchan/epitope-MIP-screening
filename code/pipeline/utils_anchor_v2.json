@@ -1,0 +1,235 @@
+{
+  "schema": "pcsi_star_anchor/2",
+  "status": "FROZEN",
+  "frozen_at": "2026-08-12T15:48:41",
+  "frozen_by": "code/freeze_anchor.py --freeze",
+  "git_commit": "58141d665f8e19d7c26873e3dddd77f784955357",
+  "env": {
+    "python": "3.11.15",
+    "numpy": "2.4.2",
+    "mdanalysis": "2.10.0",
+    "platform": "linux"
+  },
+  "cavity": "CD63",
+  "mode": "dual",
+  "snapshot": 0,
+  "anchor_dir": "results/phase5/CD63/snapshot_0/dual_imprinting",
+  "params": {
+    "cutoff_A": 6.0,
+    "persistence_frac": 0.5,
+    "last_frac": 0.5,
+    "protein_sel": "protein",
+    "monomer_sel": "not protein and not resname SOL HOH NA CL TIP3 WAT",
+    "method": "capped",
+    "predicate": "residue is in contact iff min over (all its atoms) x (all monomer atoms) < cutoff_A, STRICT '<'",
+    "persistence_predicate": "persistent iff contact_freq > persistence_frac, STRICT '>'",
+    "window": "start = int(n_frames * (1 - last_frac)); denominator = n_frames - start (the legacy off-by-one is preserved: 5001 frames gives 2501 analysed, i.e. 50.01%)",
+    "selections_are_all_atom": true
+  },
+  "legs": {
+    "CD63": {
+      "role": "own",
+      "expect": "present",
+      "md_dir": "results/phase5/CD63/snapshot_0/dual_imprinting/rebind_own/md",
+      "provenance": {
+        "md.xtc": {
+          "path": "results/phase5/CD63/snapshot_0/dual_imprinting/rebind_own/md/md.xtc",
+          "bytes": 1619970464,
+          "mtime_epoch": 1781410708,
+          "mtime": "2026-06-14T13:18:28",
+          "sha256": "2298414aa76f8390cd4192979e6e5f6a8c155ee1c66108c5d670765de26c73a9",
+          "hash_wall_s": 0.73
+        },
+        "md.tpr": {
+          "path": "results/phase5/CD63/snapshot_0/dual_imprinting/rebind_own/md/md.tpr",
+          "bytes": 2634600,
+          "mtime_epoch": 1781396070,
+          "mtime": "2026-06-14T09:14:30",
+          "sha256": "d75ef10fa3d502abc04586eaeded919c64bfa3c4b065af5df56c7dbb2e0f746a",
+          "hash_wall_s": 0.0
+        }
+      },
+      "counts": {
+        "k": 7,
+        "n": 101,
+        "f": 0.06930693069306931,
+        "mean_contact_freq": 0.12929877553928923
+      },
+      "persistent_resids": [
+        40,
+        41,
+        80,
+        92,
+        93,
+        96,
+        100
+      ],
+      "window": {
+        "n_frames": 5001,
+        "start_frame": 2500,
+        "n_analyzed": 2501,
+        "dt_ps": 10.0,
+        "t_first_ps": 25000.0,
+        "t_last_ps": 50000.0,
+        "window_ns": 25.0
+      },
+      "system": {
+        "n_protein_atoms": 1575,
+        "n_protein_residues": 101,
+        "n_monomer_atoms": 831,
+        "monomer_resnames": [
+          "APBA",
+          "IBTES",
+          "PTES",
+          "TMOS",
+          "TTMS"
+        ],
+        "n_atoms_total": 88017
+      },
+      "wall_s": 8.87
+    },
+    "CD81": {
+      "role": "cross",
+      "expect": "absent",
+      "absence_evidence": {
+        "md_dir": "results/phase5/CD63/snapshot_0/dual_imprinting/rebind_CD81/md",
+        "exists": true,
+        "has_md_xtc": false,
+        "has_md_tpr": false,
+        "has_em_gro": true,
+        "has_nvt_log": true,
+        "zero_byte_files": [
+          "#nvt.edr.1#",
+          "#nvt.edr.2#",
+          "#nvt.edr.3#",
+          "#nvt.xtc.1#",
+          "#nvt.xtc.2#",
+          "#nvt.xtc.3#",
+          "nvt.edr",
+          "nvt.xtc"
+        ],
+        "n_files": 51,
+        "nvt_xtc_bytes": 0,
+        "classification": "md_failed_nvt_crash"
+      }
+    },
+    "CD9": {
+      "role": "cross",
+      "expect": "present",
+      "md_dir": "results/phase5/CD63/snapshot_0/dual_imprinting/rebind_CD9/md",
+      "provenance": {
+        "md.xtc": {
+          "path": "results/phase5/CD63/snapshot_0/dual_imprinting/rebind_CD9/md/md.xtc",
+          "bytes": 1591831476,
+          "mtime_epoch": 1781623746,
+          "mtime": "2026-06-17T00:29:06",
+          "sha256": "3a6e331b78af33e7fd48a33872f71cd1898ded87d2380a397bb570a5dd4126fa",
+          "hash_wall_s": 0.74
+        },
+        "md.tpr": {
+          "path": "results/phase5/CD63/snapshot_0/dual_imprinting/rebind_CD9/md/md.tpr",
+          "bytes": 2525620,
+          "mtime_epoch": 1781609864,
+          "mtime": "2026-06-16T20:37:44",
+          "sha256": "48a78bb3f905d980bf232256d11127ce3e1d54f72b0d6d918685a3b9a70f23c6",
+          "hash_wall_s": 0.0
+        }
+      },
+      "counts": {
+        "k": 10,
+        "n": 79,
+        "f": 0.12658227848101267,
+        "mean_contact_freq": 0.17693682020862542
+      },
+      "persistent_resids": [
+        10,
+        48,
+        49,
+        51,
+        52,
+        72,
+        73,
+        77,
+        78,
+        79
+      ],
+      "window": {
+        "n_frames": 5001,
+        "start_frame": 2500,
+        "n_analyzed": 2501,
+        "dt_ps": 10.0,
+        "t_first_ps": 25000.0,
+        "t_last_ps": 50000.0,
+        "window_ns": 25.0
+      },
+      "system": {
+        "n_protein_atoms": 1267,
+        "n_protein_residues": 79,
+        "n_monomer_atoms": 831,
+        "monomer_resnames": [
+          "APBA",
+          "IBTES",
+          "PTES",
+          "TMOS",
+          "TTMS"
+        ],
+        "n_atoms_total": 86488
+      },
+      "wall_s": 8.27
+    }
+  },
+  "derived_headline": {
+    "arms_used": [
+      "CD9"
+    ],
+    "arms_missing_no_data": [
+      "CD81"
+    ],
+    "pcsi_star_per_arm": {
+      "CD9": -0.2923864363403711
+    },
+    "pcsi_star_worst_case": -0.2923864363403711,
+    "legacy_pcsi_counts": 0.7,
+    "caveat": "worst-case is over 1 of 2 off-target arms; ['CD81'] has no trajectory, so this is NOT a complete selectivity statement and gate (e) must fail."
+  },
+  "known_dependents_on_the_dead_v1_value": {
+    "note": "advisory only -- these are hardcoded literals, not computed from the trajectories, and they still carry the dead v1 value",
+    "hits": [
+      {
+        "file": "code/make_presentation_figures.py",
+        "line": 119,
+        "source": "\"CD63_dual\":         2.00,  # from trial dual pcsi"
+      }
+    ]
+  },
+  "superseded_anchor_v1": {
+    "source": "results/reports/phase5_persistent_contacts_trial.json",
+    "counts": {
+      "CD63": {
+        "k": 6,
+        "n": 101,
+        "f": 0.0594059405940594
+      },
+      "CD81": {
+        "k": 0,
+        "n": 89,
+        "f": 0.0
+      },
+      "CD9": {
+        "k": 3,
+        "n": 79,
+        "f": 0.0379746835443038
+      }
+    },
+    "status": "DEAD -- describes trajectories that no longer exist on disk"
+  },
+  "verification": {
+    "command": "python code/validate_pcsi_star.py anchor",
+    "stages": [
+      "provenance sha256",
+      "recomputed counts + resid set",
+      "absent arms still absent"
+    ],
+    "on_failure": "STOP. Do not launch the 88-leg run and do not edit the reference to match the code. Determine whether the trajectory changed (stage 1) or the code changed (stage 2), then re-freeze deliberately."
+  }
+}
