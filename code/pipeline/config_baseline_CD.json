@@ -1,0 +1,2080 @@
+{
+ "@gop": {
+  "phase1": "/home/chan/Research/Monomer_screening_in_Bio/results/phase1",
+  "phase2": "/home/chan/Research/Monomer_screening_in_Bio/results/phase2",
+  "phase3": "/home/chan/Research/Monomer_screening_in_Bio/results/phase3",
+  "phase4": "/home/chan/Research/Monomer_screening_in_Bio/results/phase4",
+  "phase5": "/home/chan/Research/Monomer_screening_in_Bio/results/phase5",
+  "phase6": "/home/chan/Research/Monomer_screening_in_Bio/results/phase6",
+  "reports": "/home/chan/Research/Monomer_screening_in_Bio/results/reports"
+ },
+ "@ipc1": {
+  "__seq__": [
+   true,
+   "silane",
+   {
+    "__seq__": []
+   }
+  ]
+ },
+ "@ipc2": {
+  "__seq__": [
+   true,
+   "radical",
+   {
+    "__seq__": []
+   }
+  ]
+ },
+ "@ipc3": {
+  "__seq__": [
+   false,
+   null,
+   {
+    "__seq__": [
+     "INCOMPATIBLE: silane (APTES) + radical (AA) cannot be polymerized in one pot. Choose one chemistry."
+    ]
+   }
+  ]
+ },
+ "@rp": "/home/chan/Research/Monomer_screening_in_Bio/results/phase1",
+ "@rrp": 0.7942158526165467,
+ "@sph": {
+  "__seq__": [
+   3.0,
+   10.0,
+   6.5
+  ]
+ },
+ "ACPYPE_BIN": "/home/chan/.local/bin/acpype",
+ "ALL_MONOMERS": {
+  "4VIm": {
+   "interaction": "π-π, H-bond, His mimic",
+   "name": "4(5)-Vinylimidazole",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1cnc[nH]1"
+  },
+  "AA": {
+   "interaction": "Electrostatic (Lys, Arg, His)",
+   "name": "Acrylic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)O"
+  },
+  "AAPBA": {
+   "interaction": "Glycan recognition + radical polymerization (APBA-acrylate)",
+   "name": "N-Acryloyl-3-aminophenylboronic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)Nc1ccc(B(O)O)cc1"
+  },
+  "AAm": {
+   "interaction": "H-bond (D+A)",
+   "name": "Acrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(N)=O"
+  },
+  "APBA": {
+   "interaction": "Glycan (diol) recognition; ONLY usable as surface anchor",
+   "name": "3-Aminophenylboronic acid",
+   "polymerization": "surface",
+   "smiles": "Nc1ccc(B(O)O)cc1"
+  },
+  "APTES": {
+   "interaction": "H-bond donor, electrostatic",
+   "name": "(3-Aminopropyl)triethoxysilane",
+   "polymerization": "silane",
+   "smiles": "NCCC[Si](OCC)(OCC)OCC"
+  },
+  "APTMS": {
+   "interaction": "H-bond, electrostatic",
+   "name": "(3-Aminopropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "NCCC[Si](OC)(OC)OC"
+  },
+  "CETES": {
+   "interaction": "Weak H-bond acceptor (CN)",
+   "name": "3-Cyanopropyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "N#CCCC[Si](OCC)(OCC)OCC"
+  },
+  "DA": {
+   "interaction": "Multi H-bond, catechol",
+   "name": "Dopamine hydrochloride",
+   "polymerization": "catechol",
+   "smiles": "NCCc1ccc(O)c(O)c1"
+  },
+  "DIDMS": {
+   "interaction": "Strong hydrophobic",
+   "name": "Dimethyldimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C[Si](C)(OC)OC"
+  },
+  "DVB": {
+   "functionality": 2,
+   "interaction": "Free-radical, rigid aromatic",
+   "name": "Divinylbenzene",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1ccc(C=C)cc1",
+   "type": "vinyl"
+  },
+  "EDTMS": {
+   "interaction": "Chelate-type H-bond",
+   "name": "N-[3-(Trimethoxysilyl)propyl]ethylenediamine",
+   "polymerization": "silane",
+   "smiles": "NCCNCCC[Si](OC)(OC)OC"
+  },
+  "EGDMA": {
+   "functionality": 2,
+   "interaction": "Free-radical, semi-rigid",
+   "name": "Ethylene glycol dimethacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCCOC(=O)C(=C)C",
+   "type": "vinyl"
+  },
+  "FPBA": {
+   "interaction": "Glycan recognition; Liu 2017 standard for NP grafting",
+   "name": "4-Formylphenylboronic acid",
+   "polymerization": "surface",
+   "smiles": "O=Cc1ccc(B(O)O)cc1"
+  },
+  "GPTMS": {
+   "interaction": "Epoxy covalent (nucleophile)",
+   "name": "(3-Glycidyloxypropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C1OC1COCCC[Si](OC)(OC)OC"
+  },
+  "HEMA": {
+   "interaction": "H-bond (OH)",
+   "name": "2-Hydroxyethyl methacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCCO"
+  },
+  "IBTES": {
+   "interaction": "Hydrophobic, alkyl",
+   "name": "Isobutyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "CC(C)C[Si](OCC)(OCC)OCC"
+  },
+  "ICTES": {
+   "interaction": "Covalent (Lys ε-NH₂)",
+   "name": "3-(Triethoxysilyl)propyl isocyanate",
+   "polymerization": "silane",
+   "smiles": "O=C=NCCC[Si](OCC)(OCC)OCC"
+  },
+  "MAA": {
+   "interaction": "Electrostatic + mild hydrophobic",
+   "name": "Methacrylic acid",
+   "polymerization": "vinyl",
+   "smiles": "CC(=C)C(=O)O"
+  },
+  "MBAAm": {
+   "functionality": 2,
+   "interaction": "Free-radical, flexible",
+   "name": "N,N'-Methylenebisacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)NCNC(=O)C=C",
+   "type": "vinyl"
+  },
+  "MPTMS": {
+   "interaction": "Thiol-Cys, H-bond",
+   "name": "(3-Mercaptopropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "SCCC[Si](OC)(OC)OC"
+  },
+  "MTMS": {
+   "interaction": "Hydrophobic",
+   "name": "Methyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C[Si](OC)(OC)OC"
+  },
+  "NE": {
+   "interaction": "DA-like + extra OH",
+   "name": "Norepinephrine",
+   "polymerization": "catechol",
+   "smiles": "NCC(O)c1ccc(O)c(O)c1"
+  },
+  "NIPAm": {
+   "interaction": "H-bond + hydrophobic",
+   "name": "N-Isopropylacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "CC(C)NC(=O)C=C"
+  },
+  "PTES": {
+   "interaction": "π-π stacking, hydrophobic",
+   "name": "Phenyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "CCO[Si](OCC)(OCC)c1ccccc1"
+  },
+  "TBAm": {
+   "interaction": "Hydrophobic",
+   "name": "N-tert-Butylacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)NC(C)(C)C"
+  },
+  "TEOS": {
+   "functionality": 4,
+   "interaction": "Sol-gel Si-O-Si network, slow hydrolysis (~16h)",
+   "name": "Tetraethyl orthosilicate",
+   "polymerization": "silane",
+   "smiles": "CCO[Si](OCC)(OCC)OCC",
+   "type": "silane"
+  },
+  "TMOS": {
+   "functionality": 4,
+   "interaction": "Sol-gel Si-O-Si network, fast hydrolysis (~6x TEOS)",
+   "name": "Tetramethyl orthosilicate",
+   "polymerization": "silane",
+   "smiles": "CO[Si](OC)(OC)OC",
+   "type": "silane"
+  },
+  "TRIM": {
+   "functionality": 3,
+   "interaction": "Free-radical, tri-functional high crosslink",
+   "name": "Trimethylolpropane trimethacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+   "type": "vinyl"
+  },
+  "TTMS": {
+   "interaction": "π-π + mild hydrophobic",
+   "name": "p-Tolyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "Cc1ccc(cc1)[Si](OC)(OC)OC"
+  },
+  "UPTMS": {
+   "interaction": "Multi H-bond (urea D+A)",
+   "name": "3-Ureidopropyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "O=C(N)NCCC[Si](OC)(OC)OC"
+  },
+  "VPBA": {
+   "interaction": "Glycan (diol) recognition + radical polymerization",
+   "name": "4-Vinylphenylboronic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1ccc(B(O)O)cc1"
+  },
+  "VTMS": {
+   "interaction": "Hydrophobic + crosslinkable",
+   "name": "Vinyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C=C[Si](OC)(OC)OC"
+  }
+ },
+ "AUTODOCK4_BIN": "/home/chan/anaconda3/envs/GROMACS/bin/autodock4",
+ "AUTODOCK4_GA_NUM_EVALS": 2500000,
+ "AUTODOCK4_GA_POP_SIZE": 150,
+ "AUTODOCK4_GA_RUNS": 50,
+ "AUTODOCK4_NPTS": {
+  "__seq__": [
+   60,
+   60,
+   60
+  ]
+ },
+ "AUTODOCK4_SPACING": 0.375,
+ "AUTODOCK_GPU_BIN": "/home/chan/Research/AutoDock-GPU/bin/autodock_gpu_128wi",
+ "AUTOGRID4_BIN": "/home/chan/anaconda3/envs/GROMACS/bin/autogrid4",
+ "BACKBONE_HBOND_PENALTY": true,
+ "BAYESIAN_ACQUISITION": "EI",
+ "BAYESIAN_N_CALLS": 30,
+ "BINDING_SITE_TOOL": "fpocket",
+ "BOOTSTRAP_CI": 0.95,
+ "BOOTSTRAP_N_RESAMPLES": 10000,
+ "BO_INTERFERENCE_PENALTY": 0.3,
+ "CD_PREPARED_DIR": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared",
+ "CD_TEMPLATES_WIRED": true,
+ "CD_TEMPLATE_SET_VERSION": "v2-2026-08-12",
+ "CROSSLINKERS": {
+  "__set__": [
+   "DVB",
+   "EGDMA",
+   "MBAAm",
+   "TEOS",
+   "TMOS",
+   "TRIM"
+  ]
+ },
+ "CROSSLINKER_LIBRARY": {
+  "DVB": {
+   "functionality": 2,
+   "interaction": "Free-radical, rigid aromatic",
+   "name": "Divinylbenzene",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1ccc(C=C)cc1",
+   "type": "vinyl"
+  },
+  "EGDMA": {
+   "functionality": 2,
+   "interaction": "Free-radical, semi-rigid",
+   "name": "Ethylene glycol dimethacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCCOC(=O)C(=C)C",
+   "type": "vinyl"
+  },
+  "MBAAm": {
+   "functionality": 2,
+   "interaction": "Free-radical, flexible",
+   "name": "N,N'-Methylenebisacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)NCNC(=O)C=C",
+   "type": "vinyl"
+  },
+  "TEOS": {
+   "functionality": 4,
+   "interaction": "Sol-gel Si-O-Si network, slow hydrolysis (~16h)",
+   "name": "Tetraethyl orthosilicate",
+   "polymerization": "silane",
+   "smiles": "CCO[Si](OCC)(OCC)OCC",
+   "type": "silane"
+  },
+  "TMOS": {
+   "functionality": 4,
+   "interaction": "Sol-gel Si-O-Si network, fast hydrolysis (~6x TEOS)",
+   "name": "Tetramethyl orthosilicate",
+   "polymerization": "silane",
+   "smiles": "CO[Si](OC)(OC)OC",
+   "type": "silane"
+  },
+  "TRIM": {
+   "functionality": 3,
+   "interaction": "Free-radical, tri-functional high crosslink",
+   "name": "Trimethylolpropane trimethacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCC(CC)(COC(=O)C(=C)C)OC(=O)C(=C)C",
+   "type": "vinyl"
+  }
+ },
+ "CROSSLINKER_RATIO_SWEEP": {
+  "__seq__": [
+   0.03,
+   0.05,
+   0.08,
+   0.1
+  ]
+ },
+ "CROSSLINKER_SWEEP_MD_NS": 30,
+ "DECOY_MONOMERS": {
+  "acetate": {
+   "interaction": "small anion (decoy)",
+   "name": "Acetate",
+   "polymerization": "none",
+   "smiles": "CC(=O)O"
+  },
+  "dimethyl_ether": {
+   "interaction": "ether (decoy)",
+   "name": "Dimethyl ether",
+   "polymerization": "none",
+   "smiles": "COC"
+  },
+  "ethane": {
+   "interaction": "small nonpolar (decoy)",
+   "name": "Ethane",
+   "polymerization": "none",
+   "smiles": "CC"
+  },
+  "methanol_dec": {
+   "interaction": "small polar (decoy)",
+   "name": "Methanol (decoy)",
+   "polymerization": "none",
+   "smiles": "CO"
+  },
+  "phenol_dec": {
+   "interaction": "aromatic (decoy)",
+   "name": "Phenol (decoy)",
+   "polymerization": "none",
+   "smiles": "c1ccc(O)cc1"
+  }
+ },
+ "DFT_LEVEL": "M06-2X/def2-TZVP",
+ "DFT_SOLVENT": "water",
+ "DFT_VALIDATION_TOP_N": 3,
+ "DSSP_ANALYSIS": true,
+ "DUAL_EPITOPE_CD63": true,
+ "ENSEMBLE_BOLTZMANN_T_K": 298.15,
+ "ENSEMBLE_CLUSTERING_METHOD": "kmedoids",
+ "ENSEMBLE_DOCKING": true,
+ "ENSEMBLE_EXTRACT_REQUIRES_STABLE": false,
+ "ENSEMBLE_MERGE": "boltzmann",
+ "ENSEMBLE_MIN_BOX_COVERAGE": 0.9,
+ "ENSEMBLE_N_CONFORMERS": 5,
+ "ENSEMBLE_REQUIRE_EQUAL_N": true,
+ "EPITOPE_GRAVY_MAX": 2.0,
+ "EPITOPE_GRAVY_MIN": -2.0,
+ "EPITOPE_MAX_LENGTH": 16,
+ "EPITOPE_MD_TIME_NS": 20,
+ "EPITOPE_MIN_LENGTH": 9,
+ "EPITOPE_MONOMER_MOLAR_RATIO": 25,
+ "EPITOPE_PLDDT_THRESHOLD": 70,
+ "EPITOPE_RMSD_MAX": 3.0,
+ "EPITOPE_RMSD_THRESHOLD": 3.0,
+ "EPITOPE_SASA_MIN_A2": 50.0,
+ "EPITOPE_STABILITY_MD": true,
+ "EXPERIMENT": "CD",
+ "EXPERIMENT_LABEL": "CD63/CD81/CD9 tetraspanin ECL2 epitope imprinting",
+ "FEP_ENABLED": false,
+ "FEP_LAMBDA_WINDOWS": 21,
+ "FEP_NS_PER_WINDOW": 5,
+ "FUNCTIONAL_MONOMERS": {
+  "4VIm": {
+   "interaction": "π-π, H-bond, His mimic",
+   "name": "4(5)-Vinylimidazole",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1cnc[nH]1"
+  },
+  "AA": {
+   "interaction": "Electrostatic (Lys, Arg, His)",
+   "name": "Acrylic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)O"
+  },
+  "AAPBA": {
+   "interaction": "Glycan recognition + radical polymerization (APBA-acrylate)",
+   "name": "N-Acryloyl-3-aminophenylboronic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)Nc1ccc(B(O)O)cc1"
+  },
+  "AAm": {
+   "interaction": "H-bond (D+A)",
+   "name": "Acrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(N)=O"
+  },
+  "APBA": {
+   "interaction": "Glycan (diol) recognition; ONLY usable as surface anchor",
+   "name": "3-Aminophenylboronic acid",
+   "polymerization": "surface",
+   "smiles": "Nc1ccc(B(O)O)cc1"
+  },
+  "APTES": {
+   "interaction": "H-bond donor, electrostatic",
+   "name": "(3-Aminopropyl)triethoxysilane",
+   "polymerization": "silane",
+   "smiles": "NCCC[Si](OCC)(OCC)OCC"
+  },
+  "APTMS": {
+   "interaction": "H-bond, electrostatic",
+   "name": "(3-Aminopropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "NCCC[Si](OC)(OC)OC"
+  },
+  "CETES": {
+   "interaction": "Weak H-bond acceptor (CN)",
+   "name": "3-Cyanopropyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "N#CCCC[Si](OCC)(OCC)OCC"
+  },
+  "DA": {
+   "interaction": "Multi H-bond, catechol",
+   "name": "Dopamine hydrochloride",
+   "polymerization": "catechol",
+   "smiles": "NCCc1ccc(O)c(O)c1"
+  },
+  "DIDMS": {
+   "interaction": "Strong hydrophobic",
+   "name": "Dimethyldimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C[Si](C)(OC)OC"
+  },
+  "EDTMS": {
+   "interaction": "Chelate-type H-bond",
+   "name": "N-[3-(Trimethoxysilyl)propyl]ethylenediamine",
+   "polymerization": "silane",
+   "smiles": "NCCNCCC[Si](OC)(OC)OC"
+  },
+  "FPBA": {
+   "interaction": "Glycan recognition; Liu 2017 standard for NP grafting",
+   "name": "4-Formylphenylboronic acid",
+   "polymerization": "surface",
+   "smiles": "O=Cc1ccc(B(O)O)cc1"
+  },
+  "GPTMS": {
+   "interaction": "Epoxy covalent (nucleophile)",
+   "name": "(3-Glycidyloxypropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C1OC1COCCC[Si](OC)(OC)OC"
+  },
+  "HEMA": {
+   "interaction": "H-bond (OH)",
+   "name": "2-Hydroxyethyl methacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCCO"
+  },
+  "IBTES": {
+   "interaction": "Hydrophobic, alkyl",
+   "name": "Isobutyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "CC(C)C[Si](OCC)(OCC)OCC"
+  },
+  "ICTES": {
+   "interaction": "Covalent (Lys ε-NH₂)",
+   "name": "3-(Triethoxysilyl)propyl isocyanate",
+   "polymerization": "silane",
+   "smiles": "O=C=NCCC[Si](OCC)(OCC)OCC"
+  },
+  "MAA": {
+   "interaction": "Electrostatic + mild hydrophobic",
+   "name": "Methacrylic acid",
+   "polymerization": "vinyl",
+   "smiles": "CC(=C)C(=O)O"
+  },
+  "MPTMS": {
+   "interaction": "Thiol-Cys, H-bond",
+   "name": "(3-Mercaptopropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "SCCC[Si](OC)(OC)OC"
+  },
+  "MTMS": {
+   "interaction": "Hydrophobic",
+   "name": "Methyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C[Si](OC)(OC)OC"
+  },
+  "NE": {
+   "interaction": "DA-like + extra OH",
+   "name": "Norepinephrine",
+   "polymerization": "catechol",
+   "smiles": "NCC(O)c1ccc(O)c(O)c1"
+  },
+  "NIPAm": {
+   "interaction": "H-bond + hydrophobic",
+   "name": "N-Isopropylacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "CC(C)NC(=O)C=C"
+  },
+  "PTES": {
+   "interaction": "π-π stacking, hydrophobic",
+   "name": "Phenyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "CCO[Si](OCC)(OCC)c1ccccc1"
+  },
+  "TBAm": {
+   "interaction": "Hydrophobic",
+   "name": "N-tert-Butylacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)NC(C)(C)C"
+  },
+  "TTMS": {
+   "interaction": "π-π + mild hydrophobic",
+   "name": "p-Tolyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "Cc1ccc(cc1)[Si](OC)(OC)OC"
+  },
+  "UPTMS": {
+   "interaction": "Multi H-bond (urea D+A)",
+   "name": "3-Ureidopropyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "O=C(N)NCCC[Si](OC)(OC)OC"
+  },
+  "VPBA": {
+   "interaction": "Glycan (diol) recognition + radical polymerization",
+   "name": "4-Vinylphenylboronic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1ccc(B(O)O)cc1"
+  },
+  "VTMS": {
+   "interaction": "Hydrophobic + crosslinkable",
+   "name": "Vinyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C=C[Si](OC)(OC)OC"
+  }
+ },
+ "GLYCAN_EPITOPE": "N-acetylneuraminic acid",
+ "GMX_BIN": "/usr/local/gromacs-gpu/bin/gmx",
+ "HARTREE_TO_KCAL": 627.509,
+ "INITIATOR_MOL_PERCENT": 1.0,
+ "INITIATOR_MW": {
+  "AIBN": 164.21,
+  "BPO": 242.23,
+  "Irgacure_2959": 224.25,
+  "KPS": 270.32
+ },
+ "KB_KCAL": 0.001987204,
+ "KNOWN_EXPERIMENTS": {
+  "__seq__": [
+   "CD",
+   "BSA"
+  ]
+ },
+ "MAX_BACKBONE_HBOND_RATIO": 0.3,
+ "MD_BOX_DISTANCE": 1.2,
+ "MD_BOX_TYPE": "dodecahedron",
+ "MD_FF_MONOMER": "gaff2",
+ "MD_FF_PROTEIN": "amber99sb-ildn",
+ "MD_GPU_ID": "0",
+ "MD_IONIC_STRENGTH": 0.15,
+ "MD_MMPBSA_END_NS": 50,
+ "MD_MMPBSA_INTERVAL": 100,
+ "MD_MMPBSA_START_NS": 30,
+ "MD_PRESSURE_BAR": 1.0,
+ "MD_PRODUCTION_NS": 350,
+ "MD_QUICK_NS": 20,
+ "MD_SOLVENT_PH": 7.4,
+ "MD_TEMPERATURE_K": 300.0,
+ "MD_TIMESTEP_FS": 2.0,
+ "MD_WATER_MODEL": "tip3p",
+ "MMPBSA_METHOD": "GBSA",
+ "MMSD_CHEMISTRY_ENTROPY_WEIGHT": 0.3,
+ "MMSD_COMPETITION_DISTANCE": 5.0,
+ "MMSD_ENFORCE_POLYMERIZATION_COMPATIBILITY": true,
+ "MMSD_HIGH_AFFINITY_THRESHOLD": -11.0,
+ "MMSD_MAX_COMBO_SIZE": 6,
+ "MMSD_MAX_PER_CLASS_COUNT": 2,
+ "MMSD_MIN_CHEMISTRY_CLASSES": 2,
+ "MMSD_MIN_COMBO_SIZE": 2,
+ "MMSD_OPTIMIZER": "nsga2",
+ "MMSD_OPTIMIZER_FALLBACK": {
+  "__seq__": [
+   "nsga2",
+   "bayesian",
+   "greedy"
+  ]
+ },
+ "MMSD_PENALIZE_COMPETITION": false,
+ "MMSD_REQUIRE_CHEMISTRY_DIVERSITY": true,
+ "MMSD_SELECTIVITY_AWARE": true,
+ "MMSD_TOP_PC": 1,
+ "MONOMER_CONTACT_MD": true,
+ "MONOMER_CONTACT_MD_NS": 10,
+ "NSGA2_N_GEN": 15,
+ "NSGA2_OBJECTIVES": {
+  "__seq__": [
+   "affinity",
+   "selectivity",
+   "synthesizability"
+  ]
+ },
+ "NSGA2_POP_SIZE": 20,
+ "N_WORKERS": 4,
+ "OUTPUT_DIR": "/home/chan/Research/Monomer_screening_in_Bio/results",
+ "OUTPUT_DIRS": {
+  "phase1": "/home/chan/Research/Monomer_screening_in_Bio/results/phase1",
+  "phase2": "/home/chan/Research/Monomer_screening_in_Bio/results/phase2",
+  "phase3": "/home/chan/Research/Monomer_screening_in_Bio/results/phase3",
+  "phase4": "/home/chan/Research/Monomer_screening_in_Bio/results/phase4",
+  "phase5": "/home/chan/Research/Monomer_screening_in_Bio/results/phase5",
+  "phase6": "/home/chan/Research/Monomer_screening_in_Bio/results/phase6",
+  "reports": "/home/chan/Research/Monomer_screening_in_Bio/results/reports"
+ },
+ "PHASE1_COMPUTE_GRAVY": true,
+ "PHASE1_COMPUTE_SASA": true,
+ "PHASE1_EVALUATE_MULTI_EPITOPE": true,
+ "PHASE2_DECOY_BASELINE": true,
+ "PHASE2_POSE_CLUSTERING": true,
+ "PHASE4_PROTEIN_RESTRAINT_K": 1000,
+ "PHASE4_RATIO_PRESETS": {
+  "__seq__": [
+   {
+    "__seq__": [
+     1,
+     1,
+     1,
+     1
+    ]
+   },
+   {
+    "__seq__": [
+     2,
+     1,
+     1,
+     1
+    ]
+   },
+   {
+    "__seq__": [
+     3,
+     1,
+     1,
+     1
+    ]
+   },
+   {
+    "__seq__": [
+     1,
+     2,
+     1,
+     1
+    ]
+   },
+   {
+    "__seq__": [
+     1,
+     1,
+     2,
+     1
+    ]
+   }
+  ]
+ },
+ "PHASE4_RATIO_SWEEP": false,
+ "PHASE4_SOLVENTS": {
+  "acetonitrile": {
+   "dielectric": 36.6,
+   "template": "acn.gro",
+   "use_for": {
+    "__seq__": [
+     "radical"
+    ]
+   }
+  },
+  "ethanol_water_3_1": {
+   "dielectric": 49.0,
+   "template": "ethanol_water.gro",
+   "use_for": {
+    "__seq__": [
+     "sol-gel"
+    ]
+   }
+  },
+  "methanol": {
+   "dielectric": 32.6,
+   "template": "methanol.gro",
+   "use_for": {
+    "__seq__": [
+     "sol-gel"
+    ]
+   }
+  },
+  "water": {
+   "dielectric": 78.5,
+   "template": "spc216.gro",
+   "use_for": {
+    "__seq__": [
+     "sol-gel",
+     "radical"
+    ]
+   }
+  }
+ },
+ "PHASE4_SOLVENT_SWEEP": true,
+ "PHASE4_TEMPLATE_MODE": "ecl2",
+ "PHASE6_GENERATE_NIP": true,
+ "PH_STABILITY": {
+  "4VIm": {
+   "__seq__": [
+    4.0,
+    8.0
+   ]
+  },
+  "AA": {
+   "__seq__": [
+    2.0,
+    12.0
+   ]
+  },
+  "AAPBA": {
+   "__seq__": [
+    3.0,
+    11.0
+   ]
+  },
+  "AAm": {
+   "__seq__": [
+    3.0,
+    12.0
+   ]
+  },
+  "APBA": {
+   "__seq__": [
+    3.0,
+    11.0
+   ]
+  },
+  "APTES": {
+   "__seq__": [
+    3.0,
+    10.0
+   ]
+  },
+  "APTMS": {
+   "__seq__": [
+    3.0,
+    10.0
+   ]
+  },
+  "CETES": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  },
+  "DA": {
+   "__seq__": [
+    4.0,
+    7.0
+   ]
+  },
+  "DIDMS": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  },
+  "DVB": {
+   "__seq__": [
+    1.0,
+    13.0
+   ]
+  },
+  "EDTMS": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  },
+  "EGDMA": {
+   "__seq__": [
+    3.0,
+    11.0
+   ]
+  },
+  "FPBA": {
+   "__seq__": [
+    3.0,
+    11.0
+   ]
+  },
+  "GPTMS": {
+   "__seq__": [
+    5.5,
+    10.0
+   ]
+  },
+  "HEMA": {
+   "__seq__": [
+    3.0,
+    11.0
+   ]
+  },
+  "IBTES": {
+   "__seq__": [
+    3.0,
+    10.0
+   ]
+  },
+  "ICTES": {
+   "__seq__": [
+    1.0,
+    4.5
+   ]
+  },
+  "MAA": {
+   "__seq__": [
+    2.0,
+    12.0
+   ]
+  },
+  "MBAAm": {
+   "__seq__": [
+    3.0,
+    11.0
+   ]
+  },
+  "MPTMS": {
+   "__seq__": [
+    3.0,
+    9.0
+   ]
+  },
+  "MTMS": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  },
+  "NE": {
+   "__seq__": [
+    4.0,
+    7.0
+   ]
+  },
+  "NIPAm": {
+   "__seq__": [
+    3.0,
+    12.0
+   ]
+  },
+  "PTES": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  },
+  "TBAm": {
+   "__seq__": [
+    3.0,
+    12.0
+   ]
+  },
+  "TEOS": {
+   "__seq__": [
+    3.0,
+    10.0
+   ]
+  },
+  "TMOS": {
+   "__seq__": [
+    3.0,
+    10.0
+   ]
+  },
+  "TRIM": {
+   "__seq__": [
+    3.0,
+    12.0
+   ]
+  },
+  "TTMS": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  },
+  "UPTMS": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  },
+  "VPBA": {
+   "__seq__": [
+    3.0,
+    11.0
+   ]
+  },
+  "VTMS": {
+   "__seq__": [
+    3.0,
+    9.5
+   ]
+  }
+ },
+ "POLYMERIZATION_COMPATIBILITY": {
+  "catechol": {
+   "__set__": [
+    "catechol",
+    "vinyl"
+   ]
+  },
+  "epoxy": {
+   "__set__": [
+    "catechol",
+    "silane",
+    "vinyl"
+   ]
+  },
+  "silane": {
+   "__set__": [
+    "silane"
+   ]
+  },
+  "surface": {
+   "__set__": [
+    "catechol",
+    "silane",
+    "vinyl"
+   ]
+  },
+  "vinyl": {
+   "__set__": [
+    "catechol",
+    "vinyl"
+   ]
+  }
+ },
+ "POLYMERIZATION_SILANE": "sol-gel",
+ "POLYMERIZATION_SOLIDPHASE": "solid-phase",
+ "POLYMERIZATION_VINYL": "free-radical",
+ "POSE_CLUSTERING_MAX_CLUSTERS": 5,
+ "POSE_CLUSTERING_MIN_SIZE": 3,
+ "POSE_CLUSTERING_RMSD_A": 2.0,
+ "PREPARE_LIGAND": "/home/chan/anaconda3/envs/GROMACS/bin/prepare_ligand4.py",
+ "PREPARE_RECEPTOR": "/home/chan/anaconda3/envs/GROMACS/bin/prepare_receptor4.py",
+ "PRIMARY_CHEM_CLASS": {
+  "4VIm": "pi_stack",
+  "AA": "electrostatic",
+  "AAPBA": "boronate",
+  "AAm": "hbond_donor",
+  "APBA": "boronate",
+  "APTES": "hbond_donor",
+  "APTMS": "hbond_donor",
+  "CETES": "hbond_accept",
+  "DA": "catechol",
+  "DIDMS": "hydrophobic",
+  "DVB": "xl_structural",
+  "EDTMS": "hbond_donor",
+  "EGDMA": "xl_structural",
+  "FPBA": "boronate",
+  "GPTMS": "covalent",
+  "HEMA": "hbond_accept",
+  "IBTES": "hydrophobic",
+  "ICTES": "covalent",
+  "MAA": "electrostatic",
+  "MBAAm": "xl_structural",
+  "MPTMS": "covalent",
+  "MTMS": "hydrophobic",
+  "NE": "catechol",
+  "NIPAm": "hbond_donor",
+  "PTES": "pi_stack",
+  "TBAm": "hydrophobic",
+  "TEOS": "xl_structural",
+  "TMOS": "xl_structural",
+  "TRIM": "xl_structural",
+  "TTMS": "pi_stack",
+  "UPTMS": "hbond_donor",
+  "VPBA": "boronate",
+  "VTMS": "covalent"
+ },
+ "PROJECT_ROOT": "/home/chan/Research/Monomer_screening_in_Bio",
+ "QE_PARAMS": {
+  "4VIm": {
+   "__seq__": [
+    2.5,
+    -2.0
+   ]
+  },
+  "AA": {
+   "__seq__": [
+    0.83,
+    0.88
+   ]
+  },
+  "AAPBA": {
+   "__seq__": [
+    0.85,
+    0.85
+   ]
+  },
+  "AAm": {
+   "__seq__": [
+    1.18,
+    1.3
+   ]
+  },
+  "DA": {
+   "__seq__": [
+    1.0,
+    0.3
+   ]
+  },
+  "DVB": {
+   "__seq__": [
+    1.05,
+    -0.8
+   ]
+  },
+  "EGDMA": {
+   "__seq__": [
+    0.78,
+    0.4
+   ]
+  },
+  "HEMA": {
+   "__seq__": [
+    0.74,
+    0.4
+   ]
+  },
+  "MAA": {
+   "__seq__": [
+    2.34,
+    0.65
+   ]
+  },
+  "MBAAm": {
+   "__seq__": [
+    1.2,
+    1.2
+   ]
+  },
+  "NE": {
+   "__seq__": [
+    1.0,
+    0.3
+   ]
+  },
+  "NIPAm": {
+   "__seq__": [
+    0.85,
+    0.79
+   ]
+  },
+  "TBAm": {
+   "__seq__": [
+    1.0,
+    1.0
+   ]
+  },
+  "TRIM": {
+   "__seq__": [
+    0.85,
+    0.4
+   ]
+  },
+  "VPBA": {
+   "__seq__": [
+    1.0,
+    -0.5
+   ]
+  }
+ },
+ "REBINDING_CLASH_CUTOFF_A": 2.0,
+ "REBINDING_CLASH_THRESHOLD": 30,
+ "REBINDING_CROSSLINKER_RESTRAINT_K": 5000,
+ "REBINDING_MD_NS": 50,
+ "REBINDING_MULTI_POSE": true,
+ "REBINDING_N_HEAD_CONFORMERS": 5,
+ "REBINDING_N_SNAPSHOTS": 10,
+ "REBINDING_PROTEIN_RESTRAINED": true,
+ "REBINDING_RESTRAINT_K": 1000,
+ "REBINDING_RMSD_THRESHOLD": 5.0,
+ "REBINDING_TRIAL_MODE": false,
+ "RECEPTOR_BOX_ON_SCORED_SURFACE": true,
+ "SELECTIVITY_DDG_THRESHOLD": -1.0,
+ "SELECTIVITY_METRIC": "rank_delta",
+ "SELECTIVITY_WEIGHT": 0.5,
+ "SILANE_MONOMERS": {
+  "APTES": {
+   "interaction": "H-bond donor, electrostatic",
+   "name": "(3-Aminopropyl)triethoxysilane",
+   "polymerization": "silane",
+   "smiles": "NCCC[Si](OCC)(OCC)OCC"
+  },
+  "APTMS": {
+   "interaction": "H-bond, electrostatic",
+   "name": "(3-Aminopropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "NCCC[Si](OC)(OC)OC"
+  },
+  "CETES": {
+   "interaction": "Weak H-bond acceptor (CN)",
+   "name": "3-Cyanopropyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "N#CCCC[Si](OCC)(OCC)OCC"
+  },
+  "DIDMS": {
+   "interaction": "Strong hydrophobic",
+   "name": "Dimethyldimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C[Si](C)(OC)OC"
+  },
+  "EDTMS": {
+   "interaction": "Chelate-type H-bond",
+   "name": "N-[3-(Trimethoxysilyl)propyl]ethylenediamine",
+   "polymerization": "silane",
+   "smiles": "NCCNCCC[Si](OC)(OC)OC"
+  },
+  "GPTMS": {
+   "interaction": "Epoxy covalent (nucleophile)",
+   "name": "(3-Glycidyloxypropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C1OC1COCCC[Si](OC)(OC)OC"
+  },
+  "IBTES": {
+   "interaction": "Hydrophobic, alkyl",
+   "name": "Isobutyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "CC(C)C[Si](OCC)(OCC)OCC"
+  },
+  "ICTES": {
+   "interaction": "Covalent (Lys ε-NH₂)",
+   "name": "3-(Triethoxysilyl)propyl isocyanate",
+   "polymerization": "silane",
+   "smiles": "O=C=NCCC[Si](OCC)(OCC)OCC"
+  },
+  "MPTMS": {
+   "interaction": "Thiol-Cys, H-bond",
+   "name": "(3-Mercaptopropyl)trimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "SCCC[Si](OC)(OC)OC"
+  },
+  "MTMS": {
+   "interaction": "Hydrophobic",
+   "name": "Methyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C[Si](OC)(OC)OC"
+  },
+  "PTES": {
+   "interaction": "π-π stacking, hydrophobic",
+   "name": "Phenyltriethoxysilane",
+   "polymerization": "silane",
+   "smiles": "CCO[Si](OCC)(OCC)c1ccccc1"
+  },
+  "TEOS": {
+   "interaction": "Cross-linker",
+   "name": "Tetraethyl orthosilicate",
+   "polymerization": "silane",
+   "smiles": "CCO[Si](OCC)(OCC)OCC"
+  },
+  "TTMS": {
+   "interaction": "π-π + mild hydrophobic",
+   "name": "p-Tolyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "Cc1ccc(cc1)[Si](OC)(OC)OC"
+  },
+  "UPTMS": {
+   "interaction": "Multi H-bond (urea D+A)",
+   "name": "3-Ureidopropyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "O=C(N)NCCC[Si](OC)(OC)OC"
+  },
+  "VTMS": {
+   "interaction": "Hydrophobic + crosslinkable",
+   "name": "Vinyltrimethoxysilane",
+   "polymerization": "silane",
+   "smiles": "C=C[Si](OC)(OC)OC"
+  }
+ },
+ "SMD_BE_THRESHOLD": -2.0,
+ "SMD_TOP_N_FOR_PHASE3": 12,
+ "TARGETS": {
+  "CD63": {
+   "ccg_position": 145,
+   "chain": "A",
+   "description": "CD63 LEL — heavy glycosylation, largest head",
+   "disulfide_cys": {
+    "__seq__": [
+     145,
+     146,
+     169,
+     170,
+     177,
+     191
+    ]
+   },
+   "disulfide_pairing_citation": "SSBOND records of PDB 9HUR (1.65 A, P41212) and 9HQ5 (2.60 A, P43212) — two independent crystal forms in different space groups, measured SG-SG 2.02-2.05 A with the next-closest non-bonded SG pair at 7.66/7.70 A. UniProt P08962 carries NO DISULFID annotation, so the PDB entries are the only citable source. Independently reproduced by AlphaFold v6 (SG-SG 2.03-2.04 A). CD63 has exactly 6 LEL cysteines; the 8-cysteine tetraspanin subclass does not apply.",
+   "disulfide_pairs": {
+    "__seq__": [
+     {
+      "__seq__": [
+       145,
+       191
+      ]
+     },
+     {
+      "__seq__": [
+       146,
+       169
+      ]
+     },
+     {
+      "__seq__": [
+       170,
+       177
+      ]
+     }
+    ]
+   },
+   "ec1_range": {
+    "__seq__": [
+     33,
+     51
+    ]
+   },
+   "ec1_scored": false,
+   "ec2_experimental_range": {
+    "__seq__": [
+     109,
+     198
+    ]
+   },
+   "ecl2_range": {
+    "__seq__": [
+     103,
+     203
+    ]
+   },
+   "full_length": 238,
+   "glycan_note": "N130/N150/N172 were ENGINEERED TO SER in both 9HUR and 9HQ5 and have been reverted here. The three Asn side chains are rebuilt rotamers, not measurements — and S150 has no OG at all in 9HUR, so there is no experimental side-chain information at that position. They anchor the shadow mask, so their error propagates into it.",
+   "glycan_shadow_anchors": {
+    "__seq__": [
+     130,
+     150,
+     172
+    ]
+   },
+   "glycans_modelled": false,
+   "head_candidates": {
+    "__seq__": [
+     {
+      "glycan_in": {
+       "__seq__": []
+      },
+      "name": "head_canonical",
+      "range": {
+       "__seq__": [
+        155,
+        170
+       ]
+      }
+     },
+     {
+      "glycan_in": {
+       "__seq__": [
+        172
+       ]
+      },
+      "name": "head_glyco_N172",
+      "range": {
+       "__seq__": [
+        157,
+        172
+       ]
+      }
+     },
+     {
+      "glycan_in": {
+       "__seq__": [
+        150
+       ]
+      },
+      "name": "head_glyco_N150",
+      "range": {
+       "__seq__": [
+        143,
+        158
+       ]
+      }
+     },
+     {
+      "glycan_in": {
+       "__seq__": [
+        130
+       ]
+      },
+      "name": "head_glyco_N130",
+      "range": {
+       "__seq__": [
+        123,
+        138
+       ]
+      }
+     }
+    ]
+   },
+   "head_residues": {
+    "__seq__": [
+     155,
+     170
+    ]
+   },
+   "head_status": "RETIRED (nanovesicle imprinting); coverage on this template 157-172 = 16/16 modelled, 16/16 experimental",
+   "membrane_frame": "TM-SVD derived (no OPM entry exists for CD63); normal and origin validated against OPM on 5TCX to 0.07 +/- 0.12 A, thickness ASSERTED not fitted",
+   "membrane_half_thickness_A": 15.5,
+   "membrane_occluded": {
+    "__seq__": [
+     103,
+     104,
+     105,
+     106,
+     107,
+     108,
+     111,
+     199,
+     200,
+     201,
+     202,
+     203
+    ]
+   },
+   "membrane_occluded_sensitivity": {
+    "15.3": 12,
+    "15.7": 13,
+    "17.1": 14
+   },
+   "n_glycan_positions": {
+    "__seq__": [
+     130,
+     150,
+     172
+    ]
+   },
+   "n_glycan_sites": 3,
+   "predicted_residues_in_ec2": {
+    "__seq__": [
+     103,
+     104,
+     105,
+     106,
+     107,
+     108,
+     199,
+     200,
+     201,
+     202,
+     203
+    ]
+   },
+   "prepared_path": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD63_open_v1.pdb",
+   "prepared_template": "CD63_open_v1",
+   "scored_surface": {
+    "__seq__": [
+     109,
+     110,
+     112,
+     113,
+     114,
+     115,
+     116,
+     117,
+     118,
+     119,
+     120,
+     121,
+     122,
+     123,
+     124,
+     125,
+     126,
+     127,
+     128,
+     129,
+     130,
+     131,
+     132,
+     133,
+     134,
+     135,
+     136,
+     137,
+     138,
+     139,
+     140,
+     141,
+     142,
+     143,
+     144,
+     145,
+     146,
+     147,
+     148,
+     149,
+     150,
+     151,
+     152,
+     153,
+     154,
+     155,
+     156,
+     157,
+     158,
+     159,
+     160,
+     161,
+     162,
+     163,
+     164,
+     165,
+     166,
+     167,
+     168,
+     169,
+     170,
+     171,
+     172,
+     173,
+     174,
+     175,
+     176,
+     177,
+     178,
+     179,
+     180,
+     181,
+     182,
+     183,
+     184,
+     185,
+     186,
+     187,
+     188,
+     189,
+     190,
+     191,
+     192,
+     193,
+     194,
+     195,
+     196,
+     197,
+     198
+    ]
+   },
+   "source": "alphafold",
+   "template_conformer": "OPEN/UPRIGHT — but the LEL-TM hinge is AlphaFold's, NOT experimental. No CD63 structure contains a TM helix, a lipid, a detergent or an OPM entry, so nothing constrains it. Transplanting the 9HUR LEL into the 5TCX and 6K4J membrane frames brackets the occluded fraction at 10-28%; report CD63 accessibility as a range.",
+   "template_donors": {
+    "__seq__": [
+     "AF-P08962-F1 v6 (2025-08-01) -> 1-108, 199-238: TM1-4, EC1, both stalk exits, and the membrane frame"
+    ]
+   },
+   "template_primary": "9HUR chain A (X-ray 1.65 A, released 2025-11-19) -> EC2 109-198",
+   "template_provenance_json": "structures/prepared/CD63_open_v1_provenance.json",
+   "uniprot_id": "P08962"
+  },
+  "CD81": {
+   "ccg_position": 156,
+   "chain": "A",
+   "closed_arm_note": "CD81_closed_5tcx_v1 (5TCX, cholesterol-bound) is a WITHIN-CD81 sensitivity arm ONLY. Do NOT put it in the cross-target contrast: it would make CD81 the one closed template of three and the contrast would partly measure that. Its EC1 is 13/30 and is left broken on purpose — REMARK 465 removes D38-A54, the solvent-facing apex, and building 17 de novo residues would be fabrication.",
+   "conformer_arms": {
+    "closed": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD81_closed_5tcx_v1.pdb",
+    "open": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD81_open_v1.pdb"
+   },
+   "description": "CD81 LEL — non-glycosylated, hydrophobic head",
+   "disulfide_cys": {
+    "__seq__": [
+     156,
+     157,
+     175,
+     190
+    ]
+   },
+   "disulfide_pairing_citation": "UniProt P60033 DISULFID 156..190 and 157..175 (CD81 IS annotated, unlike CD63), independently reproduced by SSBOND in all 16 human CD81 entries at SG-SG 1.97-2.09 A. Both bonds are ideal at 2.03 A in 7JIC, which is the strongest internal argument that its unusual head trace is not a modelling collapse.",
+   "disulfide_pairs": {
+    "__seq__": [
+     {
+      "__seq__": [
+       156,
+       190
+      ]
+     },
+     {
+      "__seq__": [
+       157,
+       175
+      ]
+     }
+    ]
+   },
+   "ec1_range": {
+    "__seq__": [
+     34,
+     63
+    ]
+   },
+   "ec1_scored": false,
+   "ec2_experimental_range": {
+    "__seq__": [
+     113,
+     201
+    ]
+   },
+   "ecl2_range": {
+    "__seq__": [
+     113,
+     201
+    ]
+   },
+   "full_length": 236,
+   "glycan_note": "CD81 has ZERO extracellular N-glycan sequons. UniProt P60033 lists no Glycosylation feature and the only N-X-S/T in the 236-aa sequence is the cytoplasmic N232; no carbohydrate appears on any CD81 chain in any of the 20 surveyed structures. Nothing is missing here — this is a real biological asymmetry and makes CD81 the negative control on the glycan axis.",
+   "glycan_shadow_anchors": {
+    "__seq__": []
+   },
+   "glycans_modelled": false,
+   "head_candidates": {
+    "__seq__": [
+     {
+      "glycan_in": {
+       "__seq__": []
+      },
+      "name": "head_canonical",
+      "range": {
+       "__seq__": [
+        168,
+        183
+       ]
+      }
+     }
+    ]
+   },
+   "head_residues": {
+    "__seq__": [
+     168,
+     183
+    ]
+   },
+   "head_status": "RETIRED (nanovesicle imprinting); coverage on this template 168-183 = 16/16 modelled, 13/16 experimental (168-170 de novo)",
+   "membrane_cut_boundary_residues": {
+    "__seq__": [
+     118,
+     119
+    ]
+   },
+   "membrane_frame": "OPM 7jic (DUM planes at z = +/-15.3 A); the opening is intrinsic to the coordinates, not to OPM's placement — a TM-only superposition onto 5TCX still drops the headgroup-band count from 24/80 to 6/80",
+   "membrane_half_thickness_A": 15.3,
+   "membrane_occluded": {
+    "__seq__": [
+     113,
+     114,
+     115,
+     116,
+     117,
+     119,
+     196,
+     197,
+     198,
+     199,
+     200,
+     201
+    ]
+   },
+   "membrane_occluded_closed_arm": {
+    "__seq__": [
+     113,
+     114,
+     115,
+     116,
+     119,
+     123,
+     141,
+     142,
+     143,
+     144,
+     145,
+     146,
+     148,
+     149,
+     150,
+     151,
+     152,
+     153,
+     154,
+     177,
+     197,
+     198,
+     199,
+     200,
+     201
+    ]
+   },
+   "n_glycan_positions": {
+    "__seq__": []
+   },
+   "n_glycan_sites": 0,
+   "pdb_id": "5TCX",
+   "predicted_residues_in_ec2": {
+    "__seq__": [
+     116,
+     167,
+     168,
+     169,
+     170
+    ]
+   },
+   "prepared_path": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD81_open_v1.pdb",
+   "prepared_template": "CD81_open_v1",
+   "scored_surface": {
+    "__seq__": [
+     118,
+     120,
+     121,
+     122,
+     123,
+     124,
+     125,
+     126,
+     127,
+     128,
+     129,
+     130,
+     131,
+     132,
+     133,
+     134,
+     135,
+     136,
+     137,
+     138,
+     139,
+     140,
+     141,
+     142,
+     143,
+     144,
+     145,
+     146,
+     147,
+     148,
+     149,
+     150,
+     151,
+     152,
+     153,
+     154,
+     155,
+     156,
+     157,
+     158,
+     159,
+     160,
+     161,
+     162,
+     163,
+     164,
+     165,
+     166,
+     167,
+     168,
+     169,
+     170,
+     171,
+     172,
+     173,
+     174,
+     175,
+     176,
+     177,
+     178,
+     179,
+     180,
+     181,
+     182,
+     183,
+     184,
+     185,
+     186,
+     187,
+     188,
+     189,
+     190,
+     191,
+     192,
+     193,
+     194,
+     195
+    ]
+   },
+   "scored_surface_caution": {
+    "__seq__": [
+     167,
+     168,
+     169,
+     170,
+     171,
+     172,
+     173
+    ]
+   },
+   "scored_surface_caution_reason": "167-170 are DE NOVO backbone (5M33 cannot donate: fitting on the flanks 160-166+171-177 gives 4.4 A, so the 7JIC head really is rearranged there and a splice would import the wrong fold). 171-172 are reverted construct substitutions (SEQADV CONFLICT K171T/N172S; K171 is a surface lysine whose loss would have biased every acidic-monomer result). The whole block sits inside the former CD19 interface. Build it for sterics, exclude it from primary scoring, and report how many top-ranked monomers touch it.",
+   "source": "pdb",
+   "template_conformer": "OPEN/UPRIGHT (experimental) but CD19-STABILISED. 7JIC's LEL head is a conformational singleton: 13.0-15.8 A from all 18 other CD81 LELs after stalk superposition, where every other pair falls in 0.35-5.10 A. The vesicles carry no CD19. 7JIC proves the open state is ACCESSIBLE; it does not prove it is POPULATED without CD19, and no PDB entry can settle that.",
+   "template_donors": {
+    "__seq__": [
+     "5M33 chain A (X-ray 1.28 A) -> EC2 137-140"
+    ]
+   },
+   "template_primary": "7JIC chain B (cryo-EM 3.80 A, CD19-CD81-Fab complex)",
+   "template_provenance_json": "structures/prepared/CD81_open_v1_provenance.json"
+  },
+  "CD9": {
+   "apex_ensemble_note": "Any CD9-selective monomer hit must survive BOTH arms. If they agree the binder-shaped-loop worry is retired cheaply; if they disagree, CD9 needs a larger apex ensemble than two crystal conformers.",
+   "ccg_position": 152,
+   "chain": "A",
+   "conformer_arms": {
+    "apex_6rlo": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD9_open_v1b.pdb",
+    "apex_6z1v": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD9_open_v1.pdb"
+   },
+   "description": "CD9 LEL — light glycosylation, smallest head",
+   "disulfide_cys": {
+    "__seq__": [
+     152,
+     153,
+     167,
+     181
+    ]
+   },
+   "disulfide_pairing_citation": "SSBOND records of PDB 6K4J, 6Z1V, 6Z20, 6RLO and 6RLR — all five agree at SG-SG 1.96-2.10 A. Every bond is INTRA-chain even in 6RLR, so that entry's domain swap is not a disulfide-shuffling artefact and does not undermine the pairing.",
+   "disulfide_pairs": {
+    "__seq__": [
+     {
+      "__seq__": [
+       152,
+       181
+      ]
+     },
+     {
+      "__seq__": [
+       153,
+       167
+      ]
+     }
+    ]
+   },
+   "ec1_range": {
+    "__seq__": [
+     34,
+     55
+    ]
+   },
+   "ec1_scored": false,
+   "ec2_experimental_range": {
+    "__seq__": [
+     112,
+     195
+    ]
+   },
+   "ecl2_range": {
+    "__seq__": [
+     112,
+     195
+    ]
+   },
+   "full_length": 228,
+   "glycan_note": "N52/N53 sit on EC1 at CA heights 26.7 and 24.4 A, i.e. a low collar around the base of the LEL rather than a second presenting surface. CD9's mask has a WIDER positional error than CD63's: N51 and N52 both lack CG/OD1/ND2 in 6K4J and the only rotamer donor is AlphaFold at pLDDT 54.7-66 — its worst EC1 stretch is exactly the sequon loop.",
+   "glycan_shadow_anchors": {
+    "__seq__": [
+     52,
+     53
+    ]
+   },
+   "glycans_modelled": false,
+   "head_candidates": {
+    "__seq__": [
+     {
+      "glycan_in": {
+       "__seq__": []
+      },
+      "name": "head_canonical",
+      "range": {
+       "__seq__": [
+        156,
+        171
+       ]
+      }
+     }
+    ]
+   },
+   "head_residues": {
+    "__seq__": [
+     156,
+     171
+    ]
+   },
+   "head_status": "RETIRED (nanovesicle imprinting); coverage on this template 156-171 = 16/16 modelled, 16/16 experimental",
+   "membrane_frame": "OPM 6k4j (DUM planes at z = +/-15.7 A)",
+   "membrane_half_thickness_A": 15.7,
+   "membrane_occluded": {
+    "__seq__": [
+     112,
+     113,
+     114,
+     117,
+     141,
+     142,
+     145,
+     149,
+     192,
+     193,
+     194,
+     195
+    ]
+   },
+   "n_glycan_positions": {
+    "__seq__": []
+   },
+   "n_glycan_sites": 1,
+   "pdb_id": "6K4J",
+   "predicted_residues_in_ec2": {
+    "__seq__": []
+   },
+   "prepared_path": "/home/chan/Research/Monomer_screening_in_Bio/structures/prepared/CD9_open_v1.pdb",
+   "prepared_template": "CD9_open_v1",
+   "restored_residues": {
+    "__seq__": [
+     175,
+     176,
+     177,
+     178,
+     179
+    ]
+   },
+   "restored_residues_note": "T175-F176-T177-V178-K179 were DELETED FROM THE 6K4J CONSTRUCT (SEQADV DELETION, absent from SEQRES, absent from REMARK 465) and are now present from 6Z1V. In this membrane frame they sit 18-24 A above the hydrophobic core — the single most polymer-accessible point on CD9, and precisely where nanobody 4E8, nanobody 4C8 and the AT1412dm Fab all bind.",
+   "scored_surface": {
+    "__seq__": [
+     115,
+     116,
+     118,
+     119,
+     120,
+     121,
+     122,
+     123,
+     124,
+     125,
+     126,
+     127,
+     128,
+     129,
+     130,
+     131,
+     132,
+     133,
+     134,
+     135,
+     136,
+     137,
+     138,
+     139,
+     140,
+     143,
+     144,
+     146,
+     147,
+     148,
+     150,
+     151,
+     152,
+     153,
+     154,
+     155,
+     156,
+     157,
+     158,
+     159,
+     160,
+     161,
+     162,
+     163,
+     164,
+     165,
+     166,
+     167,
+     168,
+     169,
+     170,
+     171,
+     172,
+     173,
+     174,
+     175,
+     176,
+     177,
+     178,
+     179,
+     180,
+     181,
+     182,
+     183,
+     184,
+     185,
+     186,
+     187,
+     188,
+     189,
+     190,
+     191
+    ]
+   },
+   "source": "pdb",
+   "template_conformer": "OPEN/UPRIGHT, experimental, membrane-embedded, no protein partner — the best-founded of the three, corroborated independently at 8.6 A by EMD-11053 (CD9-EWI-F).",
+   "template_donors": {
+    "__seq__": [
+     "6Z1V chain A (X-ray 1.33 A, nanobody 4E8) -> EC2 114-190"
+    ]
+   },
+   "template_primary": "6K4J chain A (X-ray 2.70 A, lipidic cubic phase) — membrane frame, TM1-4, EC1, and 112-113 + 191-195",
+   "template_provenance_json": "structures/prepared/CD9_open_v1_provenance.json"
+  }
+ },
+ "TARGET_IF_MIN": 3,
+ "TARGET_KD_NM": 50,
+ "TEMPERATURE": 298.15,
+ "UNCONSUMED_KEYS": {
+  "__set__": []
+ },
+ "USE_AUTODOCK_GPU": true,
+ "USE_BINDING_SITE_PREDICTION": true,
+ "USE_GPU": true,
+ "VALIDATION_CD_SPECTROSCOPY": true,
+ "VALIDATION_QCM_D": true,
+ "VALIDATION_SPR": true,
+ "VINYL_MONOMERS": {
+  "4VIm": {
+   "interaction": "π-π, H-bond, His mimic",
+   "name": "4(5)-Vinylimidazole",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1cnc[nH]1"
+  },
+  "AA": {
+   "interaction": "Electrostatic (Lys, Arg, His)",
+   "name": "Acrylic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)O"
+  },
+  "AAPBA": {
+   "interaction": "Glycan recognition + radical polymerization (APBA-acrylate)",
+   "name": "N-Acryloyl-3-aminophenylboronic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)Nc1ccc(B(O)O)cc1"
+  },
+  "AAm": {
+   "interaction": "H-bond (D+A)",
+   "name": "Acrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(N)=O"
+  },
+  "APBA": {
+   "interaction": "Glycan (diol) recognition; ONLY usable as surface anchor",
+   "name": "3-Aminophenylboronic acid",
+   "polymerization": "surface",
+   "smiles": "Nc1ccc(B(O)O)cc1"
+  },
+  "DA": {
+   "interaction": "Multi H-bond, catechol",
+   "name": "Dopamine hydrochloride",
+   "polymerization": "catechol",
+   "smiles": "NCCc1ccc(O)c(O)c1"
+  },
+  "EGDMA": {
+   "interaction": "Cross-linker",
+   "name": "Ethylene glycol dimethacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCCOC(=O)C(=C)C"
+  },
+  "FPBA": {
+   "interaction": "Glycan recognition; Liu 2017 standard for NP grafting",
+   "name": "4-Formylphenylboronic acid",
+   "polymerization": "surface",
+   "smiles": "O=Cc1ccc(B(O)O)cc1"
+  },
+  "HEMA": {
+   "interaction": "H-bond (OH)",
+   "name": "2-Hydroxyethyl methacrylate",
+   "polymerization": "vinyl",
+   "smiles": "C=C(C)C(=O)OCCO"
+  },
+  "MAA": {
+   "interaction": "Electrostatic + mild hydrophobic",
+   "name": "Methacrylic acid",
+   "polymerization": "vinyl",
+   "smiles": "CC(=C)C(=O)O"
+  },
+  "MBAAm": {
+   "interaction": "Cross-linker",
+   "name": "N,N'-Methylenebisacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)NCNC(=O)C=C"
+  },
+  "NE": {
+   "interaction": "DA-like + extra OH",
+   "name": "Norepinephrine",
+   "polymerization": "catechol",
+   "smiles": "NCC(O)c1ccc(O)c(O)c1"
+  },
+  "NIPAm": {
+   "interaction": "H-bond + hydrophobic",
+   "name": "N-Isopropylacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "CC(C)NC(=O)C=C"
+  },
+  "TBAm": {
+   "interaction": "Hydrophobic",
+   "name": "N-tert-Butylacrylamide",
+   "polymerization": "vinyl",
+   "smiles": "C=CC(=O)NC(C)(C)C"
+  },
+  "VPBA": {
+   "interaction": "Glycan (diol) recognition + radical polymerization",
+   "name": "4-Vinylphenylboronic acid",
+   "polymerization": "vinyl",
+   "smiles": "C=Cc1ccc(B(O)O)cc1"
+  }
+ }
+}
