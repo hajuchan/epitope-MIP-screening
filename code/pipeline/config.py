@@ -1250,11 +1250,24 @@ if EXPERIMENT not in KNOWN_EXPERIMENTS:
 _OVERRIDE = _Path(__file__).resolve().parent / f"config_{EXPERIMENT}.py"
 
 __CONFIG_DISPATCH__ = True          # sentinel the override files assert on
+# Which names the delta file ASSIGNS, read from its source. Comparing VALUES
+# cannot answer this: config_BSA.py sets MD_TIMESTEP_FS = 2.0 and the baseline
+# is also 2.0, so "the experiment chose 2 fs" and "nobody touched it" are the
+# same number. The HMR guard below needs the distinction. Empty for CD, whose
+# delta is pure documentation.
+_DELTA_ASSIGNED = frozenset()
 if _OVERRIDE.is_file():
     # compile(..., str(_OVERRIDE), ...) keeps tracebacks pointing at the real
     # file and line inside config_BSA.py rather than at "<string>".
-    exec(compile(_OVERRIDE.read_text(encoding="utf-8"), str(_OVERRIDE), "exec"),
-         globals())
+    _DELTA_SRC = _OVERRIDE.read_text(encoding="utf-8")
+    import ast as _ast
+    _DELTA_ASSIGNED = frozenset(
+        _t.id
+        for _n in _ast.walk(_ast.parse(_DELTA_SRC, str(_OVERRIDE)))
+        if isinstance(_n, _ast.Assign)
+        for _t in _n.targets
+        if isinstance(_t, _ast.Name))
+    exec(compile(_DELTA_SRC, str(_OVERRIDE), "exec"), globals())
 elif EXPERIMENT == "CD":
     # PACKAGING RESILIENCE. config_CD.py is a PURE DOCUMENTATION delta — it
     # contains zero value assignments, because config.py's own body IS the CD
@@ -1366,6 +1379,21 @@ if EXPERIMENT != "CD":
 # keyword; here we set the timestep alone — constraint switch lives in the
 # mdp writer.
 if globals().get("PHASE4_HMR_MODE", False):
+    # REFUSE TO CLOBBER AN EXPERIMENT'S OWN CHOICE. This assignment runs AFTER
+    # the delta is exec'd, so `MD_TIMESTEP_FS = 2.0` in config_<X>.py used to be
+    # silently overwritten with 4.0 -- and 4 fs on a topology whose hydrogens
+    # were never repartitioned is not a slower answer, it is a wrong one. An
+    # experiment that wants a different timestep must say so by turning the flag
+    # off (PHASE4_HMR_MODE = False), which is also the truthful statement about
+    # its topology; setting only the timestep is ambiguous, so it is an error.
+    if "MD_TIMESTEP_FS" in _DELTA_ASSIGNED:
+        raise ImportError(
+            f"config_{EXPERIMENT}.py sets MD_TIMESTEP_FS = {MD_TIMESTEP_FS} while "
+            f"PHASE4_HMR_MODE is True, and this block would overwrite it with 4.0. "
+            f"HMR is only valid where the TOPOLOGY carries repartitioned hydrogen "
+            f"masses (CD gets that from CHARMM-GUI; a pdb2gmx/acpype topology does "
+            f"NOT, and nothing in this repo repartitions one). Set "
+            f"PHASE4_HMR_MODE = False in that file instead.")
     MD_TIMESTEP_FS = 4.0
 
 if not _os.environ.get("MIP_CONFIG_QUIET"):

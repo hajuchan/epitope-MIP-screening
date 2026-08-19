@@ -921,10 +921,21 @@ def print_summary(output_dir: str):
         for target, data in mmsd.items():
             if isinstance(data, dict) and "top_pcs" in data:
                 for pc in data["top_pcs"][:3]:
+                    # A PINNED composition never runs MMSD, so it carries no
+                    # mmsd_sum: BSA fixes TEOS+APTES by bench protocol and its
+                    # only top_pc has {'pc_id','monomers','crosslinker',
+                    # 'selected_from','pinned_by',...} and nothing else. The
+                    # old f-string applied :.2f to the 'N/A' STRING default and
+                    # raised ValueError -- killing the process in the summary
+                    # printer AFTER every phase had already succeeded and the
+                    # manifest had been written, so a clean run exited non-zero
+                    # and anything chained behind it never started.
+                    _m = pc.get("mmsd_sum")
+                    _ms = f"{_m:.2f}" if isinstance(_m, (int, float)) else "N/A (pinned)"
                     logger.info(
                         f"  {target} {pc['pc_id']}: "
                         f"{pc['monomers']} "
-                        f"(MMSD={pc.get('mmsd_sum', 'N/A'):.2f})"
+                        f"(MMSD={_ms})"
                     )
 
     # Phase 6: Recipes.

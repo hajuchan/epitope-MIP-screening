@@ -52,7 +52,7 @@ import os
 import sys
 import tempfile
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -74,7 +74,7 @@ LOGS = ROOT / "structures" / "logs"
 # every call, and an unlucky placement puts two atoms close enough for the GBn2
 # Born-radius term to diverge (E ~ -2e7 kJ/mol, Fmax ~ 1e13) and NaN out. Same
 # model, measured: 1 failure then 6/6 successes, so retrying is the fix.
-MINIMISE_ATTEMPTS = 4
+MINIMISE_ATTEMPTS = 8
 
 # ── target facts (every one traceable to a header record or a UniProt field) ──
 UNIPROT = {"CD63": "P08962", "CD81": "P60033", "CD9": "P21926"}
@@ -848,9 +848,25 @@ def build_remarks(b, report) -> list:
     return R
 
 
-def peptide_bonds(m: Model, tol: float = 1.5):
-    """Every i -> i+1 C-N distance that exceeds `tol` A. A prepared template with
-    a stretched backbone bond is a broken molecule and must not be docked."""
+def peptide_bonds(m: Model, tol: float = 1.5, lo: float = 1.2):
+    """Every i -> i+1 C-N distance outside [`lo`, `tol`] A. A prepared template
+    with a broken backbone bond must not be docked.
+
+    THE LOWER BOUND IS NOT COSMETIC. This check used to test `d > tol` only, and
+    a splice is just as likely to COMPRESS a junction as to stretch it: CD63's
+    108/109 seam sat at 1.045 A -- a larger absolute error than the 1.5 A limit
+    this function does test for -- and was reported as "none", i.e. as a
+    continuous chain. A one-sided test on a two-sided failure mode reports
+    success on half of its own domain.
+
+    THE C-N DISTANCE ALONE IS NOT ENOUGH EITHER. It is one scalar with no
+    direction, so a junction can satisfy it while the peptide unit is folded
+    flat: CD63's 198/199 seam sat at C-N 1.45 A (in range) with CA(198)...N(199)
+    at 0.985 A and a CA-C-N angle of 38 deg instead of 116 deg. The two 1-3
+    distances are therefore checked as well -- they are what actually detects a
+    collapsed junction, and they are the reason a template can pass "the chain
+    is continuous" while being unusable.
+    """
     bad = {}
     nums = m.nums()
     for a, c in zip(nums, nums[1:]):
@@ -859,9 +875,61 @@ def peptide_bonds(m: Model, tol: float = 1.5):
         ra, rc = m.res[a], m.res[c]
         if "C" in ra.atoms and "N" in rc.atoms:
             d = float(np.linalg.norm(ra.atoms["C"].xyz - rc.atoms["N"].xyz))
-            if d > tol:
+            if d > tol or d < lo:
                 bad[f"{a}-{c}"] = round(d, 2)
+        # 1-3 distances across the junction; ideal ~2.43-2.46 A for both.
+        for nm_a, nm_c, key in (("CA", "N", "CA..N"), ("C", "CA", "C..CA")):
+            if nm_a in ra.atoms and nm_c in rc.atoms:
+                d13 = float(np.linalg.norm(ra.atoms[nm_a].xyz - rc.atoms[nm_c].xyz))
+                if not 2.2 <= d13 <= 2.7:
+                    bad[f"{a}-{c} {key}"] = round(d13, 2)
     return bad
+
+
+def stereo_problems(m: Model) -> dict:
+    """D-amino acids and non-proline cis peptide bonds.
+
+    Neither was checked before, and both were present in the shipped set:
+    CD81_open_v1 carried three D-residues (K116, T167, L170) and one non-Pro cis
+    bond (L170-K171) out of pdbfixer's de novo loop, and a restrained
+    minimisation that had to pull apart a 0.985 A junction overlap inverted
+    CD63's TRP198 -- an EXPERIMENTAL, scored-surface residue. Both are invisible
+    to a C-N distance test: a cis bond has a perfectly normal 1.33 A C-N, and an
+    inverted CA changes no bond length at all. An unnoticed D-residue silently
+    changes the shape of the surface a docking screen scores.
+    """
+    d_res, cis = [], []
+    nums = m.nums()
+    for i in nums:
+        r = m.res[i]
+        if r.resname == "GLY":
+            continue                      # no CB: not a stereocentre
+        a = r.atoms
+        if not all(n in a for n in ("N", "CA", "C", "CB")):
+            continue
+        ca = a["CA"].xyz
+        # L-amino acids give a POSITIVE (CA->N) x (CA->C) . (CA->CB) triple product
+        trip = float(np.dot(np.cross(a["N"].xyz - ca, a["C"].xyz - ca),
+                            a["CB"].xyz - ca))
+        if trip < 0:
+            d_res.append(f"{r.resname}{i}")
+    for x, y in zip(nums, nums[1:]):
+        if y != x + 1:
+            continue
+        ra, rc = m.res[x], m.res[y]
+        if not ({"CA", "C"} <= set(ra.atoms) and {"N", "CA"} <= set(rc.atoms)):
+            continue
+        p0, p1 = ra.atoms["CA"].xyz, ra.atoms["C"].xyz
+        p2, p3 = rc.atoms["N"].xyz, rc.atoms["CA"].xyz
+        b1 = p2 - p1
+        b1 /= np.linalg.norm(b1)
+        v = (p0 - p1) - np.dot(p0 - p1, b1) * b1
+        w = (p3 - p2) - np.dot(p3 - p2, b1) * b1
+        omega = float(np.degrees(np.arctan2(np.dot(np.cross(b1, v), w),
+                                            np.dot(v, w))))
+        if abs(omega) < 30.0 and rc.resname != "PRO":
+            cis.append(f"{ra.resname}{x}-{rc.resname}{y}({omega:.0f}deg)")
+    return {"d_amino_acids": d_res, "cis_nonpro": cis}
 
 
 def analyse(b, minim_note) -> dict:
@@ -940,8 +1008,15 @@ def verify(path: Path, target: str, half: float) -> dict:
                 chains=sorted(chains), sequence_mismatches=mismatched,
                 ss_sg_sg=ss,
                 n_hetatm=sum(1 for l in open(path) if l.startswith("HETATM")),
-                occ_histogram={k: v for k, v in sorted(
-                    {f"{a.occ:.2f}": 0 for i in m.nums() for a in m.res[i].atoms.values()}.items())} or {},
+                # WAS: {f"{a.occ:.2f}": 0 for ...} -- a dict comprehension that
+                # built the right KEYS and pinned every value to the literal 0.
+                # This is the one field produced by independently re-reading the
+                # written file, so the provenance channel reported "0 atoms" in
+                # every class and could never contradict anything. Now counted.
+                occ_histogram=dict(sorted(Counter(
+                    f"{a.occ:.2f}" for i in m.nums()
+                    for a in m.res[i].atoms.values()).items())),
+                stereo=stereo_problems(m),
                 )
 
 
@@ -998,6 +1073,41 @@ def build_one(name: str, do_min: bool) -> dict:
                     for n2, a2 in m2.res[i].atoms.items():
                         if n2 in m.res[i].atoms:
                             a2.occ = m.res[i].atoms[n2].occ
+                # A minimisation that buys geometry with stereochemistry is a
+                # FAILED minimisation, not a successful one. Measured: relaxing
+                # CD63's 0.985 A junction overlap flipped TRP198 -- an
+                # experimental, scored-surface residue -- into a D-amino acid,
+                # and every existing check passed it, because an inverted CA
+                # changes no bond length. The step is stochastic, so rejecting
+                # the attempt and drawing again is a real fix, not a retry-loop
+                # that hides the problem.
+                _s_pre, _s_post = stereo_problems(m), stereo_problems(m2)
+                _new_d = sorted(set(_s_post["d_amino_acids"]) - set(_s_pre["d_amino_acids"]))
+                _new_c = sorted(set(_s_post["cis_nonpro"]) - set(_s_pre["cis_nonpro"]))
+                if _new_d or _new_c:
+                    raise RuntimeError(
+                        f"minimisation introduced stereochemistry errors: "
+                        f"D-amino acids {_new_d or 'none'}, non-Pro cis bonds "
+                        f"{_new_c or 'none'}")
+                # ACCEPTANCE IS "A VALID STRUCTURE CAME OUT", NOT "NOTHING
+                # THREW". A run that stops at E = -7.0e5 kJ/mol (-193 per atom,
+                # ~25x below anything physical for this system in implicit
+                # solvent) having moved ZERO atoms and left the 1.04 A junction
+                # untouched is a diverged GB evaluation, and the first version
+                # of this gate accepted it because it only looked at
+                # stereochemistry. Both symptoms are now disqualifying.
+                _n_at = sum(len(m2.res[i].atoms) for i in m2.nums())
+                _e_at = stats["e_after_kJ"] / max(1, _n_at)
+                if not np.isfinite(stats["e_after_kJ"]) or _e_at < -50.0:
+                    raise RuntimeError(
+                        f"minimisation converged to an unphysical energy: "
+                        f"{stats['e_after_kJ']:.0f} kJ/mol over {_n_at} atoms "
+                        f"= {_e_at:.1f} kJ/mol/atom")
+                _bad_post = peptide_bonds(m2)
+                if _bad_post:
+                    raise RuntimeError(
+                        f"minimisation left backbone bond(s) out of range: "
+                        f"{_bad_post} (before: {pre_bad or 'none'})")
                 b["model"] = m = m2
                 minim_note = (f"OpenMM restrained minimisation, 10 kJ/mol/A^2 on every atom "
                               f"this script did not invent ({stats['n_restrained']} atoms held; "
@@ -1130,9 +1240,11 @@ def main():
                           # written anyway and reported through a summary that
                           # did not mention minimisation at all, under exit 0 --
                           # indistinguishable from a relaxed one.
-                          "minimisation_ok": v.get("minimisation_ok")}
+                          "minimisation_ok": v.get("minimisation_ok"),
+                          "stereo": v.get("stereo")}
                       for k, v in results.items()}, indent=2))
 
+    rc = 0
     unrelaxed = sorted(k for k, v in results.items()
                        if v.get("minimisation_ok") is False)
     if unrelaxed:
@@ -1141,8 +1253,23 @@ def main():
         print("Their de novo loops and rebuilt side chains are RAW pdbfixer output "
               "and were never relaxed. Do not dock or run MD against them; re-run "
               "this script (the step is stochastic) or investigate.", file=sys.stderr)
-        return 1
-    return 0
+        rc = 1
+
+    bad_stereo = {k: v["stereo"] for k, v in results.items()
+                  if (v.get("stereo") or {}).get("d_amino_acids")
+                  or (v.get("stereo") or {}).get("cis_nonpro")}
+    if bad_stereo:
+        print(f"\nSTEREOCHEMISTRY DEFECTS in {len(bad_stereo)} template(s):",
+              file=sys.stderr)
+        for k, s in sorted(bad_stereo.items()):
+            print(f"  {k}: D-amino acids {s['d_amino_acids'] or 'none'}; "
+                  f"non-Pro cis bonds {s['cis_nonpro'] or 'none'}", file=sys.stderr)
+        print("A D-residue changes the shape of the surface a docking screen "
+              "scores, and no force field will restore it during MD. Rebuild "
+              "(pdbfixer's loop geometry is stochastic) or repair by hand.",
+              file=sys.stderr)
+        rc = 1
+    return rc
 
 
 if __name__ == "__main__":

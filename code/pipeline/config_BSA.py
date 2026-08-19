@@ -413,6 +413,39 @@ EPITOPE_MD_TIME_NS = 5              # Phase 1 stability MD; prefer --skip-md any
 # that now BLOCKS acceptance. 5000 steps = 10 ps/frame = 3,000 frames per leg,
 # ~100 MB, which is affordable precisely because the legs are short.
 MD_NSTXOUT_COMPRESSED = 5000
+
+# MD_TIMESTEP_FS — BSA MUST override the baseline here.
+# The baseline turned on PHASE4_HMR_MODE (2026-08-14, "membrane batch"), which
+# forces MD_TIMESTEP_FS = 4.0 at module scope.  That is correct for the CD legs
+# and ONLY for them: their systems come from CHARMM-GUI, whose topologies are
+# genuinely hydrogen-mass-repartitioned (toppar/PROA.itp carries H = 3.024 Da
+# and N = 7.959 Da instead of 1.008 / 14.007).  BSA has no membrane and no
+# CHARMM-GUI step: its protein topology is built here by pdb2gmx with
+# amber99sb-ildn and its monomers by acpype, both of which give H = 1.008 Da,
+# and NOTHING in this repository repartitions them -- there is no HMR code at
+# all, and the mdp writers all emit `constraints = h-bonds` rather than the
+# `all-bonds` the baseline comment claims HMR switches them to.
+#
+# So the inherited flag would integrate a 1.008 Da hydrogen at 4 fs, which is
+# exactly the failure the baseline warns about two lines above its own
+# declaration ("otherwise the topology H masses stay 2 Da and 4 fs will fly
+# apart").  Overriding the TIMESTEP rather than the FLAG keeps the override
+# narrow: PHASE4_HMR_MODE stays True for CD, and no code branches on it.
+#
+# COST: 30 ns is 15,000,000 steps instead of 7,500,000, so a grid leg is ~7 h
+# instead of ~3.6 h.  This is also what the EM/NVT/NPT setup already on disk was
+# built with, so those stay reusable.  To buy the 2x back, implement real HMR
+# for the pipeline-built path (pdb2gmx -heavyh + repartitioning the acpype
+# monomer itps, mass-conserving) -- then this override can go.
+#
+# OVERRIDE THE FLAG, NOT THE TIMESTEP. config.py re-forces MD_TIMESTEP_FS = 4.0
+# at line ~1368, AFTER this file is exec'd into its globals ("MUST be after all
+# symbol definitions"), so assigning MD_TIMESTEP_FS here alone is silently
+# undone. Turning the flag off is also the honest statement: BSA's hydrogens
+# really are 1.008 Da. MD_TIMESTEP_FS is restated below so the value this
+# experiment runs at is readable here rather than inherited.
+PHASE4_HMR_MODE = False
+MD_TIMESTEP_FS = 2.0
 # (Pre-existing baseline inconsistency deliberately NOT normalised here:
 #  TEMPERATURE=298.15 vs MD_TEMPERATURE_K=300.0.  Touching either would change
 #  CD numbers if the value ever migrated upward.)

@@ -1401,8 +1401,30 @@ _HB_DONOR_ACCEPTOR_SEL = ("((prop mass > 13.9 and prop mass < 14.1) or "
 
 # ── Built-composition verification ────────────────────────────
 
+# Protonation-state residue names. pdb2gmx -lys/-his/-asp/-glu rename titratable
+# residues to encode the state the pH model chose, and MDAnalysis's `protein`
+# selection does not recognise all of them -- LYSN (neutral lysine) in
+# particular. In the pH 7.87 BSA model two lysines are neutral, so they fell OUT
+# of `protein` and INTO the monomer selection: 102 "monomer" residues against a
+# 100-molecule topology, and the positional-mapping guard then refused the whole
+# occupancy analysis. The MD was fine; only the selection was wrong. Every grid
+# point with a live pH model failed this way.
+_PH_PROTEIN_RESNAMES = {
+    "LYSN", "LYN",                                  # neutral lysine
+    "HISD", "HISE", "HISH", "HID", "HIE", "HIP",    # histidine states
+    "ASPH", "ASH", "GLUH", "GLH",                   # protonated Asp / Glu
+    "CYM", "CYX", "CYS2",                           # deprotonated / SS cysteine
+    "ARGN", "TYRO", "LYSH",                         # neutral Arg, tyrosinate, +Lys
+}
+
 _TOPOLOGY_SOLVENT_IONS = {"SOL", "WAT", "TIP3", "TIP3P", "HOH", "T3P",
                           "NA", "CL", "K", "MG", "CA", "ZN", "NA+", "CL-"}
+
+# One set, two readers. The occupancy analysis used to keep its own private copy
+# of this list, so the [ molecules ] scan and the trajectory selection could
+# drift apart silently -- which is exactly how a residue can be "not solvent" to
+# one and "not a monomer" to the other.
+_SOLVENT_IONS = _TOPOLOGY_SOLVENT_IONS
 
 
 def _read_topology_molecule_counts(top_file: Path) -> dict:
@@ -2799,7 +2821,14 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
                     f"cutoff={cutoff_nm*10:.0f}Å")
 
         # Build residue → monomer type mapping from topology
-        non_protein = u.select_atoms("not protein and not resname SOL NA CL")
+        # Excludes solvent/ions AND the protonation-variant protein names --
+        # see _PH_PROTEIN_RESNAMES. The old selection was
+        # "not protein and not resname SOL NA CL", which (a) missed renamed
+        # titratable residues and (b) used a narrower notion of "solvent" than
+        # the [ molecules ] scan below, so the two could disagree by
+        # construction. Both now read the same sets.
+        _excl = " ".join(sorted(_SOLVENT_IONS | _PH_PROTEIN_RESNAMES))
+        non_protein = u.select_atoms(f"not protein and not resname {_excl}")
         # crosslinker may legitimately be None: a functional-only control
         # box (the grid's APTES-only point) has no crosslinker to score.
         all_monomers_list = list(functional_monomers) + (
@@ -2823,8 +2852,6 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
         #   (c) a monomer missing from [ molecules ] -> partial mapping
         # (b) is fixed here by skipping solvent/ion lines instead of breaking;
         # (a) and (c) now raise.
-        _SOLVENT_IONS = {"SOL", "WAT", "TIP3", "TIP3P", "HOH", "T3P",
-                         "NA", "CL", "K", "MG", "CA", "ZN", "NA+", "CL-"}
         if not top_file.exists():
             return {"error": (
                 f"topol.top not found at {top_file} — the residue->monomer "
@@ -3074,8 +3101,11 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
             hb_mean = {}
             hb_lifetime_ps = {}
             hb_failed = []          # monomers whose HBA raised (REVIEW FINDING 19)
+            # Same exclusion as the occupancy selection above — this copy was
+            # missed when that one was fixed, so HBNMax alone still counted the
+            # two neutral lysines as monomers and skipped itself.
             mon_residues_hb = u_hb.select_atoms(
-                "not protein and not resname SOL NA CL").residues
+                f"not protein and not resname {_excl}").residues
             if len(mon_residues_hb) != len(mon_residues):
                 logger.error(
                     "    HBNMax: monomer residue count differs between the "
@@ -3455,7 +3485,11 @@ def _compute_per_atom_rdf(traj_path: Path, top_path: Path,
         rdf_failures = []
         all_monomers = list(functional_monomers) + (
             [crosslinker] if crosslinker else [])
-        non_prot = u.select_atoms("not protein and not resname SOL NA CL WAT")
+        # Protonation-variant residue names count as protein — see
+        # _PH_PROTEIN_RESNAMES.
+        non_prot = u.select_atoms(
+            "not protein and not resname "
+            + " ".join(sorted(_SOLVENT_IONS | _PH_PROTEIN_RESNAMES)))
 
         for m in all_monomers:
             # Select all atoms of this monomer type

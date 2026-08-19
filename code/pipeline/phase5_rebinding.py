@@ -43,6 +43,14 @@ import sys
 import numpy as np
 from pathlib import Path
 
+# Shared with Phase 4: a pH model renames titratable residues (LYSN, HISE, ...)
+# and MDAnalysis's `protein` selection does not know all of them, so an
+# exclusion-based monomer selection silently picks up protein residues. Phase 4
+# owns the canonical sets; importing them keeps the two phases from drifting.
+from .phase4_md_validation import _PH_PROTEIN_RESNAMES, _SOLVENT_IONS
+
+_NON_MONOMER_RESNAMES = " ".join(sorted(_SOLVENT_IONS | _PH_PROTEIN_RESNAMES))
+
 logger = logging.getLogger(__name__)
 
 
@@ -397,14 +405,14 @@ def _gmx_hbond(tpr_path: Path, xtc_path: Path, work_dir: Path) -> float:
 
         hb = HBA(u,
                  donors_sel="protein",
-                 acceptors_sel="not protein and not resname SOL NA CL WAT",
+                 acceptors_sel=f"not protein and not resname {_NON_MONOMER_RESNAMES}",
                  d_a_cutoff=3.5, d_h_a_angle_cutoff=150,
                  update_selections=False)
         hb.run(start=start, step=stride, verbose=False)
 
         # Also check reverse direction (monomer donors → protein acceptors)
         hb2 = HBA(u,
-                  donors_sel="not protein and not resname SOL NA CL WAT",
+                  donors_sel=f"not protein and not resname {_NON_MONOMER_RESNAMES}",
                   acceptors_sel="protein",
                   d_a_cutoff=3.5, d_h_a_angle_cutoff=150,
                   update_selections=False)
@@ -448,7 +456,7 @@ def _contact_count(tpr_path: Path, xtc_path: Path, work_dir: Path,
     try:
         u = mda.Universe(top, str(xtc))
         protein = u.select_atoms("protein")
-        monomers = u.select_atoms("not protein and not resname SOL NA CL WAT")
+        monomers = u.select_atoms(f"not protein and not resname {_NON_MONOMER_RESNAMES}")
         if len(protein) == 0 or len(monomers) == 0:
             return None
 
@@ -1142,7 +1150,7 @@ def _select_equilibrium_frames(traj_path, top_path, topol_path,
 
         u = mda.Universe(str(top_path), str(traj_path))
         protein = u.select_atoms("protein")
-        non_protein = u.select_atoms("not protein and not resname SOL NA CL")
+        non_protein = u.select_atoms(f"not protein and not resname {_NON_MONOMER_RESNAMES}")
 
         if len(protein) == 0 or len(non_protein) == 0:
             return []
