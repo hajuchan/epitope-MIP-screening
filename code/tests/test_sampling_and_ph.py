@@ -211,16 +211,39 @@ def test_zero_contact_species_is_a_measurement_not_a_rejection():
     assert acc2["criteria"]["converged"] is False
     assert "converged" in acc2["failed_criteria"]
 
-    # A DRIFTING species is still rejected.
+    # A DRIFTING species: rejected under the BLOCKING gate, reported but not
+    # rejected under the ADVISORY gate. Both are asserted, because the point of
+    # this test is that the number is never silently ignored — which mode
+    # applies is a declared configuration choice (PHASE4_CONVERGENCE_GATE),
+    # not a default that can drift back to "computed and discarded".
+    #
+    # WHY "advisory" EXISTS (BSA, 2026-09): the gate compares two sub-window
+    # block means. Measured on the BSA ratio grid, tau of the contact signal is
+    # 0.45-0.78 ns, so a block holds ~4 independent samples and the block-to-
+    # block difference expected from NOISE ALONE is 17-20% -- above the 10%
+    # threshold. Rejecting on it discarded legs at close to random.
     conv_drift = {"converged": False, "monomers_drifting": ["APTES"],
                   "monomers_without_contacts": [],
                   "window_diff_pct": {"APTES": 73.0}, "tolerance_pct": 10.0}
     res3 = {"md_completed": True,
             "occupancy_analysis": {"convergence": conv_drift}}
-    with tempfile.TemporaryDirectory() as td:
-        acc3 = p4._replica_acceptance(res3, Path(td))
-    assert "converged" in acc3["failed_criteria"]
-    print("S3 PASS  measured zero != failed analysis; dead and drifting still fail")
+    _get = p4._cfg
+    for mode, must_reject in (("blocking", True), ("advisory", False)):
+        try:
+            p4._cfg = lambda n, _m=mode, _o=_get: (
+                _m if n == "PHASE4_CONVERGENCE_GATE" else _o(n))
+            with tempfile.TemporaryDirectory() as td:
+                acc3 = p4._replica_acceptance(res3, Path(td))
+        finally:
+            p4._cfg = _get
+        # Reported in `criteria` in BOTH modes — the shape never changes.
+        assert acc3["criteria"]["converged"] is False, (mode, acc3)
+        assert (("converged" in acc3["failed_criteria"]) is must_reject), (mode, acc3)
+        if not must_reject:
+            assert acc3["advisory_criteria"].get("converged") is False, acc3
+            assert any("ADVISORY ONLY" in n for n in acc3["notes"]), acc3["notes"]
+    print("S3 PASS  measured zero != failed analysis; dead box always fails; "
+          "drift fails only under the blocking gate")
 
 
 # ── S4 ──────────────────────────────────────────────────────────

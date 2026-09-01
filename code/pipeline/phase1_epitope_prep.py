@@ -441,6 +441,121 @@ def _prepare_single_target(name: str, cfg: dict,
     prepare_receptor_pdbqt(ecl2_pdb, receptor_pdbqt)
     result["receptor_pdbqt"] = str(receptor_pdbqt)
 
+    # 6b-glyco. GLYCOSYLATED CD63 receptor — sibling artefact, not a replacement.
+    #
+    # Phase 3 was producing near-degenerate CD63/CD9/CD81 monomer picks
+    # (selectivity margins < 1 kcal/mol, near thermal noise). Root cause: the
+    # Phase 1 receptor for CD63 is naked ECL2 aqueous protein, so the boronate-
+    # diol chemistry (FPBA/APBA vs glycan cis-diols at N130/N150/N172) that
+    # actually differentiates CD63 in vitro is invisible to the docking search
+    # — every monomer scores against protein alone and the three tetraspanins
+    # look interchangeable.
+    #
+    # When PHASE1_GLYCAN_MODE == "explicit" AND target == "CD63" we carve the
+    # ECL2 protein + its three covalent Man3GlcNAc2 trees out of the CHARMM-GUI
+    # membrane system (structures/membrane/CD63/step5_input.gro) and prepare
+    # a SECOND receptor PDBQT (CD63_receptor_glyco.pdbqt) alongside the naked
+    # one. Phase 2/3 read the glyco path when it exists; the naked path is
+    # preserved as a fallback and remains what CD9/CD81 use (they carry no
+    # ECL2-internal glycans, so their Phase 1-3 receptor stays naked and the
+    # cross-target contrast is not confounded by asymmetric glycan-atom
+    # counts).
+    #
+    # Gated in TWO places (PHASE1_GLYCAN_MODE and target name) so setting the
+    # mode back to "none" gives byte-identical behaviour to the pre-glyco
+    # pipeline: nothing is done, nothing is written, nothing is read.
+    if PHASE1_GLYCAN_MODE == "explicit" and name == "CD63":
+        try:
+            from .utils_structure import (
+                extract_glycosylated_ecl2_from_charmm_gui,
+                extract_naked_ecl2_from_charmm_gui,
+                compute_glyco_grid_box,
+            )
+            glyco_pdb = target_dir / f"{name}_ecl2_glyco.pdb"
+            glyco_meta = extract_glycosylated_ecl2_from_charmm_gui(
+                target=name,
+                ecl2_range=cfg["ecl2_range"],
+                out_pdb=glyco_pdb,
+            )
+            logger.info(
+                f"[{name}] GLYCO extract: {glyco_meta['n_protein_res']} "
+                f"protein residues + {glyco_meta['n_glycan_res']} glycan "
+                f"residues ({glyco_meta['glycan_atom_count']} sugar atoms) "
+                f"anchored at Asn {glyco_meta['sequon_residues']}")
+            for cav in glyco_meta.get("caveats", []):
+                logger.warning(f"[{name}] GLYCO caveat: {cav}")
+
+            glyco_pdbqt = target_dir / f"{name}_receptor_glyco.pdbqt"
+            # verify_charge stays default-on inside prepare_receptor_pdbqt; it
+            # returns ok=None on the glyco receptor because sugars are non-
+            # standard residues and the expected-formal-charge computation
+            # abstains rather than falsely asserting the protein-only integer.
+            # See verify_receptor_charge() indeterminate branch.
+            prepare_receptor_pdbqt(glyco_pdb, glyco_pdbqt)
+            result["receptor_pdbqt_glyco"] = str(glyco_pdbqt)
+
+            # B1 FIX (audit): sequential MMSD in Phase 3 merges ligand poses
+            # (produced by docking against the CG-frame glyco receptor at
+            # grid_center_glyco) back INTO a protein PDB. If that PDB is
+            # ecl2_pdb (the AF-frame naked ECL2) the ligand ends up tens of
+            # Å from the protein — every ΔΔG downstream is corrupted.
+            # Emit a naked-protein-in-CG-frame PDB here so Phase 3 has a
+            # frame-matched receptor seed.
+            naked_cg_pdb = target_dir / f"{name}_ecl2_cgframe.pdb"
+            naked_cg_meta = extract_naked_ecl2_from_charmm_gui(
+                target=name,
+                ecl2_range=cfg["ecl2_range"],
+                out_pdb=naked_cg_pdb,
+            )
+            result["epitope_pdb_glyco"] = str(naked_cg_pdb)
+            result["epitope_pdb_glyco_frame"] = naked_cg_meta.get("frame", "CHARMM_GUI")
+            logger.info(
+                f"[{name}] GLYCO CG-frame naked protein: "
+                f"{naked_cg_meta['n_protein_res']} residues, "
+                f"{naked_cg_meta['protein_atom_count']} atoms → "
+                f"{naked_cg_pdb.name} (sequential-MMSD receptor seed).")
+
+            result["glyco_extract"] = {
+                "pdb": str(glyco_pdb),
+                "n_protein_res": glyco_meta["n_protein_res"],
+                "n_glycan_res": glyco_meta["n_glycan_res"],
+                "glycan_atom_count": glyco_meta["glycan_atom_count"],
+                "protein_atom_count": glyco_meta["protein_atom_count"],
+                "sequon_residues": glyco_meta["sequon_residues"],
+                "anchor_pairs": glyco_meta["anchor_pairs"],
+                "protein_chain": glyco_meta["protein_chain"],
+                "glycan_chain": glyco_meta["glycan_chain"],
+                "caveats": glyco_meta["caveats"],
+            }
+
+            # Glyco-specific grid box: centre on Asn Cα mean, size = max
+            # distance from centre to farthest glycan atom + 5 Å buffer.
+            # Recorded ALONGSIDE the naked grid so Phase 2 can pick which to
+            # use per receptor. The naked grid stays result["grid_center"]
+            # /["grid_npts"]; the glyco values live under a separate key.
+            gcenter, gnpts = compute_glyco_grid_box(
+                glyco_pdb, asn_residues=glyco_meta["sequon_residues"],
+                glycan_chain=glyco_meta["glycan_chain"],
+                buffer_A=5.0,
+            )
+            result["grid_center_glyco"] = gcenter
+            result["grid_npts_glyco"] = list(gnpts)
+            logger.info(
+                f"[{name}] GLYCO grid: center={gcenter}, npts={gnpts} "
+                f"(vs naked center={result['grid_center']} "
+                f"npts={result['grid_npts']}). Note: the glyco box is larger "
+                f"to cover the tri-mannose fan; if AutoGrid rejects it, "
+                f"tighten the buffer in compute_glyco_grid_box or increase "
+                f"AUTODOCK4_SPACING.")
+        except Exception as e:
+            # Do NOT fail Phase 1 here — the naked receptor is fully built and
+            # everything downstream can proceed with it. Record the failure so
+            # the JSON shows why the glyco path was skipped.
+            logger.error(f"[{name}] GLYCO receptor build FAILED: "
+                          f"{type(e).__name__}: {e}. Continuing with naked "
+                          f"receptor; Phase 2/3 will not see glycans.")
+            result["glyco_extract"] = {"error": f"{type(e).__name__}: {e}"}
+
     # 6c. RECEPTOR CHARGE — recorded, not merely logged.
     #
     # prepare_receptor_pdbqt() already ENFORCES this (BLOCKER 02: it raises
@@ -869,6 +984,16 @@ def _run_stability_md(epitope_pdb: Path, work_dir: Path) -> dict:
     md_dir = work_dir / "stability_md"
     md_dir.mkdir(parents=True, exist_ok=True)
 
+    # Phase 1 stability MD uses pdb2gmx protein with H mass 1.008 Da
+    # (not HMR-repartitioned) — running it at MD_TIMESTEP_FS=4.0 caused LINCS
+    # explosion and CUDA errors. Override to dt=2 fs + h-bonds constraints
+    # locally; HMR remains in effect for Phase 4 where monomers have H=3.024.
+    from . import config as _cfg_mod
+    _saved_dt = getattr(_cfg_mod, "MD_TIMESTEP_FS", 2.0)
+    _saved_hmr = getattr(_cfg_mod, "PHASE4_HMR_MODE", False)
+    _cfg_mod.MD_TIMESTEP_FS = 2.0
+    _cfg_mod.PHASE4_HMR_MODE = False
+
     try:
         setup_protein_topology(epitope_pdb, md_dir)
         setup_simulation_box(md_dir / "protein.gro", md_dir)
@@ -892,6 +1017,9 @@ def _run_stability_md(epitope_pdb: Path, work_dir: Path) -> dict:
     except Exception as e:
         logger.error(f"Stability MD failed: {e}")
         return {"error": str(e), "stable": False}
+    finally:
+        _cfg_mod.MD_TIMESTEP_FS = _saved_dt
+        _cfg_mod.PHASE4_HMR_MODE = _saved_hmr
 
 
 def _log_properties(name: str, props: dict):

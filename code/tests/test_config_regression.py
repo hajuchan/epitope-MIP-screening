@@ -79,6 +79,11 @@ _NEW_NAMES = {
     "PHASE1_GLYCAN_MODE", "PHASE1_GLYCAN_INPUT_DIR", "PHASE1_GLYCAN_SEQUON_REGEX",
     "PHASE4_MEMBRANE_MODE", "PHASE4_MEMBRANE_INPUT_DIR", "PHASE4_MEMBRANE_LIPIDS",
     "PHASE4_MEMBRANE_POSRES_LIPID_K", "PHASE4_MEMBRANE_RESTRAIN_TM",
+    # 2026-08-20: monomer-placement mode ("upper_only" default = current
+    # behaviour; "symmetric" splits monomers 50/50 across both aqueous slabs).
+    # Consumed by utils_gromacs.setup_from_charmm_gui_membrane. Default MUST
+    # keep the pre-2026-08-20 dry-run byte identity on CD.
+    "PHASE4_MEMBRANE_MONOMER_PLACEMENT",
     "SELECTIVITY_MEMBRANE_CALIBRATION",
     # 2026-08-14: HMR + EV-templated Phase 5 rebinding (Triton lysis).
     # Values chosen to reproduce current OFF-mode behaviour when the caller
@@ -92,6 +97,18 @@ _NEW_NAMES = {
     "PHASE4_HMR_MODE",
     "PHASE5_TRITON_REMOVAL_MODE", "PHASE5_FRESH_EV_PLACEMENTS",
     "PHASE5_FRESH_EV_APPROACH_GAP_NM", "PHASE5_BOX_Z_EXTEND_NM",
+    # 2026-08-20 BLOCKER C4: fresh-EV independence mode. Defaults
+    # ("nvt_perturbation", 200 ps) do NOT change any CD result byte-for-byte
+    # because the CD (non-membrane) path never dispatches into the EV-approach
+    # branch — this whitelist entry is permission for the NAMES to exist under
+    # CD; membrane-mode callers (BSA / vesicle runs) opt in.
+    "PHASE5_FRESH_EV_INDEPENDENCE", "PHASE5_FRESH_EV_NVT_TIME_PS",
+    # 2026-08 C2: force-field strategy pre-flight (guards Phase 4/5 against
+    # mixing GAFF and CHARMM36 in one box). Default 'cgenff_uniform' is a
+    # DECLARATION — the runtime check is only ARMED in the Phase 4/5 code
+    # paths that actually merge topologies, and adding this name does not
+    # change any other config value on the CD path.
+    "PHASE4_FF_STRATEGY", "CGENFF_MONOMER_DIR",
 }
 
 

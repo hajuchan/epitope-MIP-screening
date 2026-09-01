@@ -95,7 +95,7 @@ MDP_NVT = dedent("""\
     nstlog      = {nstenergy}
     continuation = no
     constraint_algorithm = lincs
-    constraints = h-bonds
+    constraints = {constraints}
     lincs_iter  = 1
     lincs_order = 4
     cutoff-scheme = Verlet
@@ -106,9 +106,9 @@ MDP_NVT = dedent("""\
     rvdw        = 1.0
     pbc         = xyz
     tcoupl      = V-rescale
-    tc-grps     = Protein Non-Protein
-    tau_t       = 0.1 0.1
-    ref_t       = {temperature} {temperature}
+    tc-grps     = {tc_grps}
+    tau_t       = {tau_t}
+    ref_t       = {ref_t}
     pcoupl      = no
     gen_vel     = yes
     gen_temp    = {temperature}
@@ -126,7 +126,7 @@ MDP_NPT = dedent("""\
     nstlog      = {nstenergy}
     continuation = yes
     constraint_algorithm = lincs
-    constraints = h-bonds
+    constraints = {constraints}
     lincs_iter  = 1
     lincs_order = 4
     cutoff-scheme = Verlet
@@ -137,15 +137,16 @@ MDP_NPT = dedent("""\
     rvdw        = 1.0
     pbc         = xyz
     tcoupl      = V-rescale
-    tc-grps     = Protein Non-Protein
-    tau_t       = 0.1 0.1
-    ref_t       = {temperature} {temperature}
+    tc-grps     = {tc_grps}
+    tau_t       = {tau_t}
+    ref_t       = {ref_t}
     pcoupl      = Parrinello-Rahman
-    pcoupltype  = isotropic
+    pcoupltype  = {pcoupltype}
     tau_p       = 2.0
-    ref_p       = {pressure}
-    compressibility = 4.5e-5
+    ref_p       = {ref_p}
+    compressibility = {compressibility}
     refcoord_scaling = com
+    DispCorr    = EnerPres
 """)
 
 MDP_PRODUCTION = dedent("""\
@@ -159,7 +160,7 @@ MDP_PRODUCTION = dedent("""\
     nstlog      = 5000
     continuation = yes
     constraint_algorithm = lincs
-    constraints = h-bonds
+    constraints = {constraints}
     lincs_iter  = 1
     lincs_order = 4
     cutoff-scheme = Verlet
@@ -170,19 +171,35 @@ MDP_PRODUCTION = dedent("""\
     rvdw        = 1.0
     pbc         = xyz
     tcoupl      = V-rescale
-    tc-grps     = Protein Non-Protein
-    tau_t       = 0.1 0.1
-    ref_t       = {temperature} {temperature}
+    tc-grps     = {tc_grps}
+    tau_t       = {tau_t}
+    ref_t       = {ref_t}
     pcoupl      = Parrinello-Rahman
-    pcoupltype  = isotropic
+    pcoupltype  = {pcoupltype}
     tau_p       = 2.0
-    ref_p       = {pressure}
-    compressibility = 4.5e-5
+    ref_p       = {ref_p}
+    compressibility = {compressibility}
     ; BLOCKER 10: production may run with -DPOSRES (surface-MIP mode). Without
     ; refcoord_scaling grompp emits a WARNING about position restraints under
     ; pressure coupling -- previously swallowed by -maxwarn 10, now a hard error.
     refcoord_scaling = com
+    DispCorr    = EnerPres
 """)
+
+
+def _hmr_constraint_choice() -> str:
+    """LINCS constraint scope, matched to the current timestep policy.
+
+    HMR (H mass repartitioned to 4 Da) with dt=4 fs is only stable when ALL
+    bonds are constrained, not just X-H. Under the default 2 fs dt (no HMR)
+    'h-bonds' is the canonical, cheaper choice. Read PHASE4_HMR_MODE at call
+    time (not import time) so tests that mutate the flag are honoured.
+    """
+    try:
+        from . import config as _cfg_mod
+    except Exception:
+        return "h-bonds"
+    return "all-bonds" if getattr(_cfg_mod, "PHASE4_HMR_MODE", False) else "h-bonds"
 
 
 # ── Monomer Parameterization ──────────────────────────────────
@@ -240,6 +257,24 @@ def _run_acpype(mol2_path: Path, name: str, output_dir: Path,
     if int(net_charge) != 0:
         logger.info(f"  {name}: net formal charge {int(net_charge):+d} from the "
                     f"library SMILES -- passing it to acpype (-n {int(net_charge)})")
+
+    # C2 · Advisory only. Under 'cgenff_uniform' the caller should be feeding a
+    # pre-built CGenFF itp from CGENFF_MONOMER_DIR — the box will otherwise
+    # merge GAFF with CHARMM36. Emit a WARNING (never block: legacy aqueous
+    # runs still call this function and are still supported).
+    try:
+        from .config import PHASE4_FF_STRATEGY as _ff_strategy
+        from .config import CGENFF_MONOMER_DIR as _cgenff_dir
+    except Exception:
+        _ff_strategy, _cgenff_dir = "gaff_uniform", "structures/monomers/cgenff"
+    if _ff_strategy == "cgenff_uniform":
+        logger.warning(
+            "  %s: acpype/GAFF2 invoked while PHASE4_FF_STRATEGY='cgenff_uniform'. "
+            "Membrane / EV-approach mode expects a CGenFF-parameterised itp at "
+            "%s/%s.itp — the pre-flight in Phase 4/5 will REFUSE to run the box "
+            "if this GAFF itp is ever merged with CHARMM36. See "
+            "structures/monomers/cgenff/README.md for the workflow.",
+            name, _cgenff_dir, name)
     cmd = [
         sys.executable, ACPYPE_BIN,
         "-i", str(mol2_path),
@@ -292,7 +327,30 @@ def _run_acpype(mol2_path: Path, name: str, output_dir: Path,
     if not itp_files or not gro_files:
         return {"error": f"acpype produced no itp/gro for {name} in {acpype_dir}"}
 
-    return {"itp": str(itp_files[0]), "gro": str(gro_files[0]),
+    itp_out = Path(itp_files[0])
+
+    # C3 · HMR repartition. CHARMM-GUI protein/lipid/water itps ship with
+    # H mass ~4 Da; the acpype/GAFF2 monomer here comes out at 1.008 Da. LINCS
+    # with dt=4 fs on 1-Da hydrogens is the "LINCS warnings storm" crash. When
+    # PHASE4_HMR_MODE is on, rewrite this monomer's [ atoms ] block so its H
+    # atoms match the CHARMM-GUI convention (3.024 Da) with mass conserved.
+    try:
+        from .config import PHASE4_HMR_MODE as _hmr_on
+    except Exception:
+        _hmr_on = False
+    if _hmr_on:
+        try:
+            _repartition_hydrogens_hmr(itp_out)
+            logger.info(f"  {name}: HMR repartition applied "
+                        f"(H=3.024 Da) — dt=4 fs is now safe under LINCS.")
+        except Exception as e:
+            logger.error(
+                f"  {name}: HMR repartition FAILED on {itp_out}: {e}. "
+                f"Downstream mdrun at dt=4 fs will likely LINCS-storm. Fix the "
+                f"itp or set PHASE4_HMR_MODE=False (which forces dt=2 fs).")
+            return {"error": f"HMR repartition failed for {name}: {e}"}
+
+    return {"itp": str(itp_out), "gro": str(gro_files[0]),
             "acpype_dir": str(acpype_dir)}
 
 
@@ -438,6 +496,379 @@ def _hand_built_topology(name: str, output_dir: Path) -> dict:
 # Back-compat shim: older call sites imported this name.
 def _try_polca_fallback(name: str, mol2_path: Path, output_dir: Path) -> dict:
     return _hand_built_topology(name, Path(output_dir))
+
+
+# ── C2 · Force-field consistency pre-flight ───────────────────
+# BLOCKS Phase 4 / Phase 5 (membrane + EV-approach) when a merged system would
+# mix GAFF and CHARMM36 in one box. The failure closed here is silent: the
+# base's [ defaults ] block wins and every monomer's 1-4 interactions are then
+# rescaled by fudgeLJ 0.5→1.0 / fudgeQQ 0.8333→1.0. See config.py:
+# PHASE4_FF_STRATEGY.
+_GAFF_TYPE_HINTS = frozenset({
+    # GAFF/GAFF2 atom types that never appear in a CGenFF-parameterised itp.
+    # Presence of ANY of these in an [ atomtypes ] block identifies the itp as
+    # a GAFF build (that would silently mix with CHARMM36 if merged).
+    "c3", "c2", "ca", "cc", "cd", "ce", "cf", "cg", "ch", "cl", "cx", "cy",
+    "hc", "ha", "hn", "ho", "hs", "hp", "h1", "h2", "h3", "h4", "h5",
+    "oh", "os", "op", "oq", "o", "n", "n1", "n2", "n3", "n4", "n7", "n8", "n9",
+    "nh", "no", "s", "s2", "s4", "s6", "sh", "ss", "sx", "sy",
+    "Si3", "SI", "si", "Si",
+    "f", "cl", "br", "i",
+})
+
+
+def _itp_has_own_defaults_block(itp_path: "Path") -> bool:
+    """True iff `itp_path` contains a top-level [ defaults ] block.
+
+    The block is a GROMACS-global — only one wins per system — so a monomer itp
+    that ships one silently overrides the base force field. CGenFF itps do NOT
+    include this block; GAFF itps produced by `acpype -o gmx` sometimes do (it
+    depends on the acpype version). The check is purely textual (no rdkit
+    or GROMACS binary required), so it is safe to call from tests.
+    """
+    try:
+        for line in Path(itp_path).read_text().splitlines():
+            s = line.split(";", 1)[0].strip()
+            if s.startswith("[") and s.replace(" ", "").startswith("[defaults]"):
+                return True
+    except (OSError, UnicodeDecodeError):
+        return False
+    return False
+
+
+def _itp_atomtype_names(itp_path: "Path") -> set:
+    """Return the atom types named in an itp's [ atomtypes ] block (or [ atoms ]).
+
+    Used by the FF-strategy pre-flight to spot GAFF/GAFF2 types leaking into a
+    supposedly CHARMM-based system. Reads either an embedded [ atomtypes ]
+    block (acpype), or falls back to the type column of [ atoms ] (all itps).
+    """
+    types: set = set()
+    try:
+        text = Path(itp_path).read_text()
+    except (OSError, UnicodeDecodeError):
+        return types
+    section = None
+    for raw in text.splitlines():
+        s = raw.split(";", 1)[0].rstrip()
+        if not s.strip():
+            continue
+        stripped = s.strip()
+        if stripped.startswith("["):
+            section = stripped.strip("[] ").strip()
+            continue
+        if section == "atomtypes":
+            first = stripped.split()[0]
+            if first:
+                types.add(first)
+        elif section == "atoms":
+            parts = stripped.split()
+            if len(parts) >= 2:
+                types.add(parts[1])
+    return types
+
+
+def _preflight_ff_consistency_check(monomer_itps, strategy: str = None) -> dict:
+    """Verify monomer itps match the declared PHASE4_FF_STRATEGY.
+
+    Parameters
+    ----------
+    monomer_itps : list
+        Each entry is either a Path/str to an itp file, or a dict with an
+        `itp` key (the shape parameterize_monomer returns).
+    strategy : str, optional
+        One of the PHASE4_FF_STRATEGY values ('gaff_uniform', 'cgenff_uniform',
+        'strict_error'). Reads config.PHASE4_FF_STRATEGY when None.
+
+    Returns
+    -------
+    dict {'ok': bool, 'issues': [str], 'recommendation': str, 'strategy': str,
+          'checked': int}
+
+    Under 'cgenff_uniform' the check FAILS if any itp either (a) ships its own
+    [ defaults ] block or (b) declares GAFF atom types. Under 'gaff_uniform'
+    the check FAILS if any itp declares CHARMM-only atom types (heuristic
+    only — CHARMM types are usually uppercase e.g. CT1, HA3), which mostly
+    catches a stray CGenFF itp dropped into an aqueous run. 'strict_error'
+    always FAILS on a [ defaults ] block regardless of the base FF.
+    """
+    if strategy is None:
+        try:
+            from .config import PHASE4_FF_STRATEGY as _s
+            strategy = _s
+        except Exception:
+            strategy = "gaff_uniform"
+
+    issues: list = []
+    checked = 0
+
+    def _resolve(entry) -> "Path":
+        if isinstance(entry, (str, Path)):
+            return Path(entry)
+        if isinstance(entry, dict):
+            p = entry.get("itp")
+            if p:
+                return Path(p)
+        return None
+
+    # De-duplicate: the phase 4 orchestrator appends the same dict per copy.
+    seen_paths: set = set()
+    for entry in monomer_itps or []:
+        p = _resolve(entry)
+        if p is None:
+            continue
+        rp = str(p.resolve()) if p.exists() else str(p)
+        if rp in seen_paths:
+            continue
+        seen_paths.add(rp)
+        checked += 1
+        if not p.exists():
+            issues.append(f"monomer itp {p} does not exist on disk")
+            continue
+
+        has_defaults = _itp_has_own_defaults_block(p)
+        types = _itp_atomtype_names(p)
+        gaff_types = types & _GAFF_TYPE_HINTS
+
+        if strategy == "cgenff_uniform":
+            if has_defaults:
+                issues.append(
+                    f"{p.name} ships its own [ defaults ] block — merging with "
+                    f"CHARMM36 would silently override fudgeLJ/fudgeQQ. Rebuild "
+                    f"this monomer with CGenFF (CHARMM-GUI Ligand Reader) and "
+                    f"drop the .itp under CGENFF_MONOMER_DIR.")
+            if gaff_types:
+                sample = sorted(gaff_types)[:6]
+                issues.append(
+                    f"{p.name} declares GAFF/GAFF2 atom types {sample} — these "
+                    f"are undefined under CHARMM36 and use a different combining "
+                    f"rule (GAFF comb-rule 2 vs CHARMM's arithmetic mean on σ). "
+                    f"Rebuild with CGenFF.")
+        elif strategy == "strict_error":
+            if has_defaults:
+                issues.append(
+                    f"{p.name} contains a [ defaults ] block; strict_error "
+                    f"refuses ALL such itps regardless of base FF.")
+        elif strategy == "gaff_uniform":
+            # BUG #20: this branch used to be a pure no-op. A monomer itp that
+            # ships its own [ defaults ] block silently overrides the base
+            # amber99sb-ildn fudgeLJ/fudgeQQ once #include-d, and the resulting
+            # non-bonded scaling is undefined. Strict enforcement would refuse
+            # every legacy monomer we've built to date, so we log a loud
+            # warning here (and instruct the user to strip the block) instead
+            # of blocking the run.
+            if has_defaults:
+                logger.warning(
+                    "[ff-preflight] %s contains its own [ defaults ] block; "
+                    "under gaff_uniform this silently overrides the base "
+                    "amber99sb-ildn fudgeLJ/fudgeQQ. Strip the [ defaults ] "
+                    "block from the monomer .itp (the base topology owns it), "
+                    "or switch PHASE4_FF_STRATEGY to 'strict_error' to make "
+                    "this a hard failure.", p.name)
+            # Aqueous / legacy path — GAFF is expected. Only complain if we see
+            # CHARMM-only types (rough heuristic: uppercase-heavy types that
+            # never appear in GAFF).
+            charmm_hints = {t for t in types
+                             if len(t) >= 3 and t[0].isupper() and t[1].isupper()}
+            # Exclude the PolCA Si override tag (`Si3`) — that is an acpype
+            # convention retained by our silane build.
+            charmm_hints.discard("Si3")
+            if charmm_hints:
+                sample = sorted(charmm_hints)[:6]
+                issues.append(
+                    f"{p.name} declares atom types {sample} that look CHARMM-"
+                    f"native; under gaff_uniform the base is amber99sb-ildn and "
+                    f"those types are undefined. Rebuild with acpype or switch "
+                    f"PHASE4_FF_STRATEGY to 'cgenff_uniform'.")
+        else:
+            issues.append(
+                f"unknown PHASE4_FF_STRATEGY={strategy!r}; expected one of "
+                f"'gaff_uniform', 'cgenff_uniform', 'strict_error'.")
+
+    if strategy == "cgenff_uniform":
+        recommendation = (
+            "Re-parameterise every monomer with CGenFF via CHARMM-GUI Ligand "
+            "Reader (or paramchem.org) and drop the .itp files under "
+            "structures/monomers/cgenff/<monomer>.itp — see the README there. "
+            "Alternative: set PHASE4_FF_STRATEGY='gaff_uniform' to opt out "
+            "(safe only in the aqueous, non-membrane pipeline).")
+    elif strategy == "gaff_uniform":
+        recommendation = (
+            "Aqueous GAFF path detected; if you are in membrane / EV-approach "
+            "mode, switch PHASE4_FF_STRATEGY to 'cgenff_uniform' and rebuild "
+            "the monomers with CGenFF.")
+    else:
+        recommendation = ""
+
+    return {
+        "ok": not issues,
+        "issues": issues,
+        "recommendation": recommendation,
+        "strategy": strategy,
+        "checked": checked,
+    }
+
+
+# ── C3 · HMR (Hydrogen Mass Repartitioning) for acpype monomer itps ────
+# CHARMM-GUI already ships HMR-ready protein/lipid/water itps (H mass ~4 Da).
+# acpype/GAFF2 monomer itps come out with the standard 1.008 Da hydrogens.
+# Running LINCS with dt=4 fs on 1-Da hydrogens is what triggers the mdrun
+# "LINCS warnings storm" crash. This helper rewrites an ITP's [ atoms ] block
+# to move mass from each H onto its heavy neighbour, preserving the total
+# mass exactly.
+
+def _repartition_hydrogens_hmr(itp_path: "Path",
+                                 out_path: "Path" = None,
+                                 h_mass_target: float = 3.024) -> "Path":
+    """Rewrite an acpype-style ITP's [ atoms ] block for HMR (dt=4 fs stability).
+
+    For each H (mass < 2.0 Da) bonded to a heavy atom X in [ bonds ]:
+        delta      = h_mass_target - mass_H_old
+        mass_H_new = h_mass_target
+        mass_X_new = mass_X_old - delta
+
+    Default target 3.024 Da matches CHARMM-GUI's HMR convention (3x the
+    canonical 1.008 Da H mass; heavy neighbours give up 2 * 1.008 = 2.016 Da
+    for every three C-H, which is enough to move LINCS iterations onto a 4 fs
+    step). If a heavy atom would be pushed below 1 Da the helper raises rather
+    than silently produce an unstable topology.
+
+    Parameters
+    ----------
+    itp_path : Path
+        Source ITP (mutated in-place when out_path is None).
+    out_path : Path, optional
+        Destination path. Defaults to itp_path (in-place).
+    h_mass_target : float
+        New mass for every hydrogen. Must be > 1.0 and < any heavy mass minus
+        the mass it would surrender.
+
+    Returns
+    -------
+    Path of the repartitioned itp.
+    """
+    itp_path = Path(itp_path)
+    if out_path is None:
+        out_path = itp_path
+    else:
+        out_path = Path(out_path)
+
+    text = itp_path.read_text()
+    lines = text.splitlines(keepends=True)
+
+    # 1) Parse [ atoms ]: index -> (line_no, cols_before_mass, mass, cols_after_mass)
+    # 2) Parse [ bonds ]: list of (ai, aj)
+    atoms = {}      # index -> {'line': int, 'mass': float, 'raw': str}
+    bonds = []      # (ai, aj)
+    section = None
+    for i, raw in enumerate(lines):
+        s = raw.split(";", 1)[0].rstrip()
+        stripped = s.strip()
+        if stripped.startswith("["):
+            section = stripped.strip("[] ").strip()
+            continue
+        if not stripped:
+            continue
+        parts = stripped.split()
+        if section == "atoms":
+            # acpype layout: nr type resi res atom cgnr charge mass
+            if len(parts) >= 8:
+                try:
+                    nr = int(parts[0])
+                    m = float(parts[7])
+                except ValueError:
+                    continue
+                atoms[nr] = {"line": i, "mass": m, "raw": raw}
+        elif section == "bonds":
+            if len(parts) >= 2:
+                try:
+                    ai = int(parts[0]); aj = int(parts[1])
+                except ValueError:
+                    continue
+                bonds.append((ai, aj))
+
+    if not atoms:
+        raise RuntimeError(
+            f"HMR repartition: {itp_path} has no parseable [ atoms ] block. "
+            f"Refusing to touch it — check the file is a real acpype/GAFF or "
+            f"CGenFF monomer itp with [atoms] + [bonds] sections.")
+
+    total_before = sum(a["mass"] for a in atoms.values())
+
+    # Identify hydrogens: mass < 2.0 Da (H = 1.008).
+    h_indices = {n for n, a in atoms.items() if a["mass"] < 2.0}
+    # For each H, find its unique heavy neighbour via [ bonds ]. H rarely has
+    # more than one bond; if it does (bad topology), we split the mass loss
+    # equally between the heavy neighbours.
+    h_partners = {h: [] for h in h_indices}
+    for ai, aj in bonds:
+        for h, other in ((ai, aj), (aj, ai)):
+            if h in h_indices and other in atoms and other not in h_indices:
+                h_partners[h].append(other)
+
+    orphan_hs = [h for h, ps in h_partners.items() if not ps]
+    if orphan_hs:
+        raise RuntimeError(
+            f"HMR repartition: {len(orphan_hs)} H atom(s) in {itp_path.name} have "
+            f"no heavy neighbour in [ bonds ] (indices {orphan_hs[:6]}). Cannot "
+            f"transfer mass. Rebuild the itp with a proper bond list, or skip "
+            f"HMR for this monomer.")
+
+    # 3) Apply the transfer. Do not mutate atoms dict until we validate the
+    # heavy-atom masses would remain positive (>= 1 Da).
+    new_masses = {n: a["mass"] for n, a in atoms.items()}
+    for h in h_indices:
+        old = atoms[h]["mass"]
+        delta = h_mass_target - old  # amount to add to H (subtract from heavy)
+        new_masses[h] = h_mass_target
+        partners = h_partners[h]
+        share = delta / len(partners)
+        for x in partners:
+            new_masses[x] -= share
+
+    for n, m in new_masses.items():
+        if m < 1.0:
+            raise RuntimeError(
+                f"HMR repartition of {itp_path.name} would push atom index "
+                f"{n} below 1.0 Da (new mass {m:.3f}). Heavy atom is too small "
+                f"for h_mass_target={h_mass_target}; lower the target or skip "
+                f"HMR for this monomer.")
+
+    total_after = sum(new_masses.values())
+    if abs(total_after - total_before) > 0.01:
+        raise RuntimeError(
+            f"HMR repartition of {itp_path.name} drifted total mass by "
+            f"{total_after - total_before:+.4f} Da (before {total_before:.4f}, "
+            f"after {total_after:.4f}). Mass is not conserved — refusing to "
+            f"write the topology.")
+
+    # 4) Emit the file with rewritten mass columns. The [ atoms ] line format
+    # varies by acpype version; the safest edit is to find the mass column and
+    # replace it in place while preserving the trailing '; qtot ...' comment.
+    out_lines = list(lines)
+    for nr, a in atoms.items():
+        line = out_lines[a["line"]]
+        # Split off any inline comment first.
+        head, sep, comment = line.partition(";")
+        parts = head.split()
+        if len(parts) < 8:
+            continue
+        parts[7] = f"{new_masses[nr]:.5f}"
+        # Preserve leading whitespace of the original line for readability.
+        lead = line[: len(line) - len(line.lstrip())]
+        new_head = lead + "  ".join(parts) + " "
+        out_lines[a["line"]] = new_head + (sep + comment if sep else "\n" if not head.endswith("\n") else "")
+        # Ensure the line still ends with exactly one newline.
+        if not out_lines[a["line"]].endswith("\n"):
+            out_lines[a["line"]] += "\n"
+
+    out_path.write_text("".join(out_lines))
+    logger.info(
+        "  HMR repartition: %s -> %s (H=%.3f Da, %d H atoms, total mass "
+        "conserved to %+.4f Da)",
+        itp_path.name, out_path.name, h_mass_target, len(h_indices),
+        total_after - total_before)
+    return out_path
 
 
 # ── System Setup ───────────────────────────────────────────────
@@ -1206,11 +1637,20 @@ def _check_equilibration(work_dir: Path, stage: str, temperature: float,
             report["density_drift_frac"] = d_drift / d_first if d_first else 0.0
             logger.info(f"  {stage.upper()}: <rho> = {d_mean:.1f} kg/m^3, "
                         f"drift {100*report['density_drift_frac']:+.2f} %")
-            if abs(report["density_drift_frac"]) > EQUIL_DENSITY_DRIFT_FRAC:
+            # BUG #6: 1% is too tight for a 100 ps membrane NPT window; a
+            # healthy CHARMM36 bilayer run legitimately drifts ~2-3% while the
+            # barostat is still coming to equilibrium. Widen the tolerance
+            # under PHASE4_MEMBRANE_MODE so we don't flag good runs.
+            try:
+                from .config import PHASE4_MEMBRANE_MODE as _mem_mode
+            except Exception:
+                _mem_mode = False
+            _density_tol = 0.03 if _mem_mode else EQUIL_DENSITY_DRIFT_FRAC
+            if abs(report["density_drift_frac"]) > _density_tol:
                 raise EquilibrationError(
                     f"{stage}: density has not plateaued "
                     f"({100*report['density_drift_frac']:+.2f} % between the two "
-                    f"halves, tolerance {100*EQUIL_DENSITY_DRIFT_FRAC:.1f} %) -- "
+                    f"halves, tolerance {100*_density_tol:.1f} %) -- "
                     f"the barostat has not finished compressing the box.")
         else:
             raise EquilibrationError(
@@ -1247,7 +1687,11 @@ def run_energy_minimization(work_dir: Path) -> Path:
 
 
 def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0, define: str = "",
-                           temperature: float = 300.0, gen_seed: int = -1) -> Path:
+                           temperature: float = 300.0, gen_seed: int = -1,
+                           tc_grps: str = "Protein Non-Protein",
+                           tau_t: str = "0.1 0.1",
+                           ref_t: str = None,
+                           index: Path = None) -> Path:
     """Run NVT equilibration and verify the thermostat actually equilibrated it.
 
     gen_seed
@@ -1257,20 +1701,35 @@ def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0, define: str = 
         deterministic seed per replica and passes it through
         run_full_md_pipeline(seed=...); without it, replicas are independent but
         cannot be re-run to the same trajectory.
+
+    tc_grps / tau_t / ref_t / index
+        Thermostat group parameterisation, added for PHASE4_MEMBRANE_MODE. The
+        defaults reproduce the pre-membrane MDP byte-for-byte: a single-solute
+        `Protein Non-Protein` V-rescale group at 0.1 ps coupling and a two-value
+        `ref_t = <T> <T>` line. Membrane mode passes the CHARMM-GUI style
+        `TC1 TC2` group names together with `index` pointing at the .ndx that
+        defines TC1 (protein+glycan+monomer) and TC2 (membrane+water+ion).
     """
     work_dir = Path(work_dir)
     from .config import MD_TIMESTEP_FS
     dt = MD_TIMESTEP_FS / 1000.0  # fs to ps
     nsteps = int(time_ps / dt)
+    constraints = _hmr_constraint_choice()
+
+    if ref_t is None:
+        ref_t = f"{temperature} {temperature}"
 
     mdp_path = work_dir / "nvt.mdp"
     mdp_path.write_text(MDP_NVT.format(
         define=define, nsteps=nsteps, dt=dt, temperature=temperature,
+        constraints=constraints,
         nstxout=NSTXOUT_COMPRESSED_EQUIL, nstenergy=NSTENERGY_EQUIL,
-        gen_seed=int(gen_seed)), encoding='utf-8')
+        gen_seed=int(gen_seed),
+        tc_grps=tc_grps, tau_t=tau_t, ref_t=ref_t), encoding='utf-8')
 
     _grompp(work_dir, mdp_path, work_dir / "em.gro", work_dir / "topol.top",
-            work_dir / "nvt.tpr", restraint=work_dir / "em.gro")
+            work_dir / "nvt.tpr", restraint=work_dir / "em.gro",
+            index=index)
 
     _gmx(["mdrun", "-deffnm", "nvt"], work_dir, timeout=3600)
     # Extract final frame from checkpoint/trajectory if gro not created.
@@ -1288,22 +1747,47 @@ def run_nvt_equilibration(work_dir: Path, time_ps: float = 100.0, define: str = 
 
 def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0, define: str = "",
                            temperature: float = 300.0,
-                           pressure: float = 1.0) -> Path:
-    """Run NPT equilibration and verify T and density have plateaued."""
+                           pressure: float = 1.0,
+                           tc_grps: str = "Protein Non-Protein",
+                           tau_t: str = "0.1 0.1",
+                           ref_t: str = None,
+                           pcoupltype: str = "isotropic",
+                           compressibility: str = "4.5e-5",
+                           ref_p: str = None,
+                           index: Path = None) -> Path:
+    """Run NPT equilibration and verify T and density have plateaued.
+
+    tc_grps / tau_t / ref_t / pcoupltype / compressibility / ref_p / index
+        Parameterisation added for PHASE4_MEMBRANE_MODE. The defaults reproduce
+        the pre-membrane MDP byte-for-byte (isotropic P coupling, single 4.5e-5
+        compressibility, and the Protein/Non-Protein tc-grps). Membrane mode
+        passes `semiisotropic` with a two-value compressibility / ref_p and
+        `TC1 TC2` groups defined in the .ndx pointed to by `index`.
+    """
     work_dir = Path(work_dir)
     from .config import MD_TIMESTEP_FS
     dt = MD_TIMESTEP_FS / 1000.0
     nsteps = int(time_ps / dt)
+    constraints = _hmr_constraint_choice()
+
+    if ref_t is None:
+        ref_t = f"{temperature} {temperature}"
+    if ref_p is None:
+        ref_p = str(pressure)
 
     mdp_path = work_dir / "npt.mdp"
     mdp_path.write_text(MDP_NPT.format(
         define=define, nsteps=nsteps, dt=dt, temperature=temperature,
-        pressure=pressure,
-        nstxout=NSTXOUT_COMPRESSED_EQUIL, nstenergy=NSTENERGY_EQUIL), encoding='utf-8')
+        pressure=pressure, constraints=constraints,
+        nstxout=NSTXOUT_COMPRESSED_EQUIL, nstenergy=NSTENERGY_EQUIL,
+        tc_grps=tc_grps, tau_t=tau_t, ref_t=ref_t,
+        pcoupltype=pcoupltype, compressibility=compressibility,
+        ref_p=ref_p), encoding='utf-8')
 
     _grompp(work_dir, mdp_path, work_dir / "nvt.gro", work_dir / "topol.top",
             work_dir / "npt.tpr", restraint=work_dir / "nvt.gro",
-            checkpoint=work_dir / "nvt.cpt")
+            checkpoint=work_dir / "nvt.cpt",
+            index=index)
 
     _gmx(["mdrun", "-deffnm", "npt"], work_dir, timeout=3600)
     npt_gro = work_dir / "npt.gro"
@@ -1320,8 +1804,20 @@ def run_npt_equilibration(work_dir: Path, time_ps: float = 100.0, define: str = 
 def run_production_md(work_dir: Path, time_ns: float = 200.0, define: str = "",
                        temperature: float = 300.0,
                        pressure: float = 1.0,
-                       gpu_id: str = "0") -> Path:
-    """Run production MD simulation."""
+                       gpu_id: str = "0",
+                       tc_grps: str = "Protein Non-Protein",
+                       tau_t: str = "0.1 0.1",
+                       ref_t: str = None,
+                       pcoupltype: str = "isotropic",
+                       compressibility: str = "4.5e-5",
+                       ref_p: str = None,
+                       index: Path = None) -> Path:
+    """Run production MD simulation.
+
+    tc_grps / tau_t / ref_t / pcoupltype / compressibility / ref_p / index
+        Same parameterisation as run_npt_equilibration — added for
+        PHASE4_MEMBRANE_MODE. Defaults reproduce pre-membrane MDP byte identity.
+    """
     work_dir = Path(work_dir)
     from .config import MD_TIMESTEP_FS
     dt = MD_TIMESTEP_FS / 1000.0
@@ -1339,14 +1835,24 @@ def run_production_md(work_dir: Path, time_ns: float = 200.0, define: str = "",
                 f"({nstxout*dt:.0f} ps/frame) → ~{n_frames} frames for "
                 f"{time_ns:g} ns")
 
+    if ref_t is None:
+        ref_t = f"{temperature} {temperature}"
+    if ref_p is None:
+        ref_p = str(pressure)
+
+    constraints = _hmr_constraint_choice()
     mdp_path = work_dir / "md.mdp"
     mdp_path.write_text(MDP_PRODUCTION.format(define=define,
         nsteps=nsteps, dt=dt, temperature=temperature, pressure=pressure,
-        nstxout=nstxout), encoding='utf-8')
+        constraints=constraints, nstxout=nstxout,
+        tc_grps=tc_grps, tau_t=tau_t, ref_t=ref_t,
+        pcoupltype=pcoupltype, compressibility=compressibility,
+        ref_p=ref_p), encoding='utf-8')
 
     _grompp(work_dir, mdp_path, work_dir / "npt.gro", work_dir / "topol.top",
             work_dir / "md.tpr", restraint=work_dir / "npt.gro",
-            checkpoint=work_dir / "npt.cpt")
+            checkpoint=work_dir / "npt.cpt",
+            index=index)
 
     md_cmd = ["mdrun", "-deffnm", "md", "-v"]
 
@@ -1917,11 +2423,30 @@ def run_full_md_pipeline(protein_pdb: Path, monomer_itps: list,
         results.update(analysis)
 
         # 8. MM-PBSA
+        # BUG #5/#2: the (start,end) window was hardcoded 300-350 ns; a 20 ns
+        # quick-MD run terminates well before start_ns, MM-GBSA sees an empty
+        # frame slice, and Phase 4 gets stamped success=False. Gate the window
+        # on the effective trajectory length so a short run still gets its
+        # last ~25 % analysed.
+        if quick:
+            _mm_start = max(0.0, time_ns - 10)
+            _mm_end = time_ns
+        elif MD_MMPBSA_END_NS <= time_ns:
+            _mm_start = MD_MMPBSA_START_NS
+            _mm_end = MD_MMPBSA_END_NS
+        else:
+            _mm_start = max(0.0, time_ns * 0.75)
+            _mm_end = time_ns
+            logger.warning(
+                "MM-PBSA: configured window %.1f-%.1f ns exceeds trajectory "
+                "length %.1f ns; falling back to the last %.1f-%.1f ns.",
+                MD_MMPBSA_START_NS, MD_MMPBSA_END_NS, time_ns,
+                _mm_start, _mm_end)
         logger.info("Running MM-PBSA...")
         mmpbsa = run_mmpbsa(
             work_dir,
-            start_ns=MD_MMPBSA_START_NS if not quick else time_ns - 10,
-            end_ns=MD_MMPBSA_END_NS if not quick else time_ns,
+            start_ns=_mm_start,
+            end_ns=_mm_end,
             n_frames=MD_MMPBSA_INTERVAL,
         )
         results["mmpbsa"] = mmpbsa
@@ -1947,6 +2472,1364 @@ def run_full_md_pipeline(protein_pdb: Path, monomer_itps: list,
                          "run_full_md_pipeline is returning success=False.", _mm_err)
     except Exception as e:
         logger.error(f"MD pipeline failed: {e}")
+        results["success"] = False
+        results["error"] = str(e)
+
+    return results
+
+
+# ── A1 · CHARMM-GUI membrane setup (PHASE4_MEMBRANE_MODE=True) ─
+#
+# When PHASE4_MEMBRANE_MODE is on, Phase 4 must NOT re-solvate a naked ECL2
+# peptide with amber99sb-ildn + tip3p.  Instead the pre-built CHARMM-GUI
+# Membrane Builder output at structures/membrane/<target>/ (CD protein +
+# POPC/POPE/PSM/POPS/CHL1 bilayer + TIP3 water + Na+/Cl-, plus Man3GlcNAc2
+# glycans covalently attached to PROA for CD63) is consumed as the starting
+# system, and monomers are placed ONLY in the aqueous slab so they cannot start
+# embedded in the bilayer.  The topology is CHARMM36 (via toppar/*.itp) and the
+# monomer itps built by acpype/GAFF2 upstream are appended with a WARN if any
+# lacks its own [ atomtypes ] block (the same GAFF2-under-CHARMM36 caveat that
+# utils_ev_approach._build_merged_topology records for the fresh-EV path).
+
+def _infer_bilayer_z_extent(gro_path: Path, lipid_resnames) -> tuple:
+    """Return (z_min, z_max) in nm across every atom whose resname is a lipid.
+
+    Uses fixed-column .gro parsing (cols 5-10 = resname).  Raises ValueError
+    if no lipid atoms are found — that is exactly the "wrong tree" case we
+    must fail loudly on rather than silently placing monomers everywhere.
+    """
+    gro_path = Path(gro_path)
+    lipid_set = set(lipid_resnames)
+    z_min = float("inf")
+    z_max = float("-inf")
+    with open(gro_path) as fh:
+        lines = fh.readlines()
+    natoms = int(lines[1].strip())
+    for ln in lines[2:2 + natoms]:
+        if len(ln) < 44:
+            continue
+        resname = ln[5:10].strip()
+        if resname not in lipid_set:
+            continue
+        try:
+            z = float(ln[36:44])
+        except ValueError:
+            continue
+        if z < z_min:
+            z_min = z
+        if z > z_max:
+            z_max = z
+    if z_min == float("inf"):
+        raise ValueError(
+            f"_infer_bilayer_z_extent: no lipid atoms found in {gro_path} — "
+            f"expected any of {sorted(lipid_set)}. This is exactly the wrong-"
+            f"tree case; refusing to place monomers over an unknown bilayer.")
+    return z_min, z_max
+
+
+def _check_monomer_itp_has_atomtypes(itp_path: Path) -> bool:
+    """True iff the itp file contains its own [ atomtypes ] block.
+
+    A monomer built by acpype/GAFF2 normally has one.  If it does not, the
+    merged topology under a CHARMM36 base will silently miss atom-type
+    definitions for that monomer (grompp then emits "Atomtype X not found").
+    This helper lets the caller WARN, matching the guard style in
+    utils_ev_approach._build_merged_topology.
+    """
+    try:
+        for line in Path(itp_path).read_text().split("\n"):
+            if line.strip() == "[ atomtypes ]":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _place_monomers_in_aqueous_slab(system_atoms: list,
+                                     monomer_itps: list,
+                                     box_xyz_nm: tuple,
+                                     z_slab_lo_nm: float,
+                                     z_slab_hi_nm: float,
+                                     seed: int = 42,
+                                     min_sep_nm: float = 1.0) -> tuple:
+    """Pack monomer copies into an aqueous slab above the upper leaflet.
+
+    system_atoms: the existing .gro atom lines (protein+lipid+water+ions).
+                   Used only for existing-atom overlap avoidance in-slab.
+    monomer_itps: list of {'itp','gro',...} dicts (one entry per copy).
+    Returns (placed_positions, extra_atom_lines, per_monomer_records).
+
+    Placement strategy: uniform random x/y over the box XY and z uniform over
+    the slab; reject if a monomer center is within min_sep_nm of any
+    already-placed monomer center or of any existing atom in the slab.  A
+    per-monomer fallback (fixed grid step) applies after 500 rejections so a
+    dense box still terminates.
+    """
+    import math
+    import random
+
+    rng = random.Random(seed)
+
+    # Existing atoms falling INSIDE the slab — monomer centres must clear them
+    existing_in_slab = []
+    for ln in system_atoms:
+        if len(ln) < 44:
+            continue
+        try:
+            z = float(ln[36:44])
+        except ValueError:
+            continue
+        if z_slab_lo_nm - 0.5 <= z <= z_slab_hi_nm + 0.5:
+            try:
+                x = float(ln[20:28]); y = float(ln[28:36])
+            except ValueError:
+                continue
+            existing_in_slab.append((x, y, z))
+
+    box_x, box_y, _ = box_xyz_nm
+    placed_centers = []
+    monomer_positions = []
+    for mi in range(len(monomer_itps)):
+        placed = False
+        for _ in range(500):
+            x = rng.uniform(0.5, box_x - 0.5)
+            y = rng.uniform(0.5, box_y - 0.5)
+            z = rng.uniform(z_slab_lo_nm, z_slab_hi_nm)
+            too_close = False
+            for px, py, pz in placed_centers:
+                d2 = (x - px) ** 2 + (y - py) ** 2 + (z - pz) ** 2
+                if d2 < min_sep_nm * min_sep_nm:
+                    too_close = True
+                    break
+            if not too_close:
+                for px, py, pz in existing_in_slab:
+                    d2 = (x - px) ** 2 + (y - py) ** 2 + (z - pz) ** 2
+                    # Existing atoms are individual atoms, not centres; use a
+                    # softer 0.4 nm keepout (monomer centre must clear any
+                    # existing atom by more than the sum of vdW radii ~0.35 nm).
+                    if d2 < 0.4 * 0.4:
+                        too_close = True
+                        break
+            if not too_close:
+                placed_centers.append((x, y, z))
+                monomer_positions.append((x, y, z))
+                placed = True
+                break
+        if not placed:
+            # Deterministic fallback: step through the slab on a coarse grid
+            step = max(min_sep_nm, 1.2)
+            n_x = max(1, int((box_x - 1.0) / step))
+            n_y = max(1, int((box_y - 1.0) / step))
+            slot = len(monomer_positions)
+            xi = 0.5 + step * (slot % n_x)
+            yi = 0.5 + step * ((slot // n_x) % n_y)
+            zi = z_slab_lo_nm + 0.3 + step * (slot // (n_x * n_y))
+            zi = min(zi, z_slab_hi_nm - 0.3)
+            placed_centers.append((xi, yi, zi))
+            monomer_positions.append((xi, yi, zi))
+
+    # Realise atom lines for each monomer at its placed centre
+    extra_atoms = []
+    per_monomer = []
+    # We must renumber residues + atoms so the resulting .gro is well-formed;
+    # the CALLER is responsible for the base offsets.
+    for i, (param, (tx, ty, tz)) in enumerate(zip(monomer_itps, monomer_positions)):
+        gro_path = param.get("gro")
+        if not gro_path or not Path(gro_path).exists():
+            continue
+        mon_lines = Path(gro_path).read_text().strip().split("\n")
+        mon_natoms = int(mon_lines[1].strip())
+        mon_coords = mon_lines[2:2 + mon_natoms]
+        mon_center = _get_gro_center(mon_coords)
+        xo = tx - mon_center[0]
+        yo = ty - mon_center[1]
+        zo = tz - mon_center[2]
+        offset = _offset_gro_coords(mon_coords,
+                                     x_offset=xo, y_offset=yo, z_offset=zo)
+        extra_atoms.extend(offset)
+        per_monomer.append({"index": i,
+                            "center": (tx, ty, tz),
+                            "n_atoms": mon_natoms,
+                            "itp_stem": Path(param["itp"]).stem})
+    return monomer_positions, extra_atoms, per_monomer
+
+
+def _extract_and_sanitize_monomer_itp(src_itp: Path, dst_itp: Path) -> tuple:
+    """Copy a monomer itp to dst, strip its [ atomtypes ] block, return the block.
+
+    Mirrors the atomtypes hoist that _include_monomers_in_topology performs for
+    the aqueous path.  Returns (atomtypes_lines, has_atomtypes) where
+    has_atomtypes==False means the caller should WARN (grompp will fail if the
+    CHARMM36 base is missing the referenced atom types).  Silicon mass=0 lines
+    written by acpype get the same 28.086 patch as the aqueous path.
+    """
+    src_text = Path(src_itp).read_text()
+    atomtypes = []
+    cleaned = []
+    in_atomtypes = False
+    has_atomtypes = False
+    for line in src_text.split("\n"):
+        if line.strip() == "[ atomtypes ]":
+            in_atomtypes = True
+            has_atomtypes = True
+            continue
+        elif line.strip().startswith("[") and in_atomtypes:
+            in_atomtypes = False
+        if in_atomtypes:
+            if line.strip() and not line.strip().startswith(";"):
+                atomtypes.append(line)
+        else:
+            cleaned.append(line)
+    fixed = []
+    for line in cleaned:
+        if "[ atoms ]" not in line and " Si " in line and "0.00000" in line:
+            parts = line.split()
+            if len(parts) >= 8 and parts[1] == "Si":
+                try:
+                    if float(parts[7]) == 0:
+                        parts[7] = "28.08600"
+                        line = "  ".join(parts)
+                except ValueError:
+                    pass
+        fixed.append(line)
+    Path(dst_itp).write_text("\n".join(fixed))
+    return atomtypes, has_atomtypes
+
+
+# CHARMM(-GUI) resnames for common N-/O-linked glycan sugars. Covalently
+# attached to the protein via the glycosylation machinery, so they thermostat
+# with the protein group (TC1). This is an ALLOW-LIST, not a catch-all — the
+# `_write_membrane_index` classifier now warns loudly on truly unknown resnames
+# instead of silently sweeping them into TC1.
+GLYCAN_RESNAMES_CHARMM = (
+    "BGLCNA", "BMAN", "AMAN", "ANE5", "AFUC",
+    "BGLC", "AGLC", "BGAL", "AGAL",
+    "NAG", "MAN", "SIA", "FUC",
+    # NE5 / NE5AC = N-acetylneuraminic acid (sialic acid) variants CHARMM-GUI
+    # writes when the glycan tree carries a sialylated cap.
+    "BNE5", "ANE5AC", "BNE5AC",
+    # CHARMM-GUI .gro files have a 5-column resname field and TRUNCATE 6-char
+    # names on write. So BGLCNA appears as 'BGLCN' in step5_input.gro even
+    # though the .itp / .top spell it BGLCNA. Include both forms so the .gro
+    # classifier does not warn on the truncated variant.
+    "BGLCN", "ANE5A", "BNE5A",
+)
+
+
+def _write_membrane_index(gro_path: Path, index_path: Path,
+                           lipid_resnames, monomer_resnames) -> dict:
+    """Write a GROMACS .ndx with TC1 (protein+glycan+monomer) and TC2 (bilayer+
+    water+ions) groups derived from the .gro atom resnames.
+
+    The two groups are the tc-grps the membrane NVT / NPT / production MDPs
+    reference (matching CHARMM-GUI's SOLU / MEMB+SOLV convention).  Returns
+    counts per group so the caller can log them and refuse the case where TC1
+    ends up empty (e.g. wrong-tree resnames).
+
+    Classification is now EXPLICIT: standard AAs and known glycan sugars go
+    into TC1; lipids, waters, and ions into TC2; monomer resnames into TC1;
+    ANY UNKNOWN resname is logged at WARNING and falls back to TC1 (the same
+    physical default as before) but visibly, so that a mis-parsed CHARMM-GUI
+    output or an unfamiliar patch resname surfaces in the log instead of
+    silently skewing the thermostat coupling.
+    """
+    from .utils_vesicle import (SOLVENT_RESNAMES, ION_RESNAMES_CHARMM,
+                                 STANDARD_AMINO_ACIDS)
+    lipid_set = set(lipid_resnames)
+    monomer_set = set(monomer_resnames)
+    solvent_set = set(SOLVENT_RESNAMES)
+    # CHARMM-GUI writes SOD/CLA; broaden defensively for K+/Mg2+/Ca2+ which
+    # some ion-swap protocols emit.
+    ion_set = set(ION_RESNAMES_CHARMM) | {"NA", "CL", "K", "POT", "MG",
+                                           "CA2", "ZN", "ZN2"}
+    glycan_set = set(GLYCAN_RESNAMES_CHARMM)
+    aa_set = set(STANDARD_AMINO_ACIDS)
+
+    tc1_ids = []
+    tc2_ids = []
+    unknown = {}
+    with open(gro_path) as fh:
+        lines = fh.readlines()
+    natoms = int(lines[1].strip())
+    for atom_idx, ln in enumerate(lines[2:2 + natoms], start=1):
+        if len(ln) < 10:
+            continue
+        resname = ln[5:10].strip()
+        if resname in aa_set:
+            tc1_ids.append(atom_idx)                          # protein
+        elif resname in monomer_set:
+            tc1_ids.append(atom_idx)                          # monomer
+        elif resname in glycan_set:
+            tc1_ids.append(atom_idx)                          # covalent glycan
+        elif resname in lipid_set:
+            tc2_ids.append(atom_idx)                          # bilayer
+        elif resname in solvent_set:
+            tc2_ids.append(atom_idx)                          # water
+        elif resname in ion_set:
+            tc2_ids.append(atom_idx)                          # ion
+        else:
+            unknown[resname] = unknown.get(resname, 0) + 1
+            tc1_ids.append(atom_idx)
+
+    if unknown:
+        for rn, n in sorted(unknown.items(), key=lambda kv: -kv[1]):
+            logger.warning(
+                "_write_membrane_index: unknown resname %s (%d atoms) in %s "
+                "— classifying into TC1 by default. This may skew tc-grps "
+                "thermostatting. Investigate: extend GLYCAN_RESNAMES_CHARMM, "
+                "or utils_vesicle.MEMBRANE_LIPID_RESNAMES / SOLVENT_RESNAMES "
+                "/ ION_RESNAMES_CHARMM, or pass the resname via "
+                "monomer_resnames if it is a bespoke monomer.",
+                rn, n, gro_path.name)
+
+    def _write_group(name, ids):
+        buf = [f"[ {name} ]"]
+        for i in range(0, len(ids), 15):
+            chunk = ids[i:i + 15]
+            buf.append(" " + " ".join(f"{v:5d}" for v in chunk))
+        return "\n".join(buf) + "\n"
+
+    Path(index_path).write_text(
+        _write_group("TC1", tc1_ids) + _write_group("TC2", tc2_ids))
+    return {"TC1": len(tc1_ids), "TC2": len(tc2_ids),
+            "unknown_resnames": unknown}
+
+
+def _detect_water_resname(gro_path: Path) -> str:
+    """Return the water residue name actually present in the CHARMM-GUI .gro.
+
+    CHARMM-GUI Membrane Builder writes water as `TIP3` (TIP3P), older/legacy
+    exports occasionally use `SOL`. This is what we pass to
+    `gmx insert-molecules -replace` and what we decrement in [ molecules ].
+    Falls back to 'TIP3' when nothing matches, with a WARNING so a wrong-tree
+    output does not silently fail the SOL bookkeeping downstream.
+    """
+    from .utils_vesicle import SOLVENT_RESNAMES
+    counts = {}
+    with open(gro_path) as fh:
+        lines = fh.readlines()
+    natoms = int(lines[1].strip())
+    for ln in lines[2:2 + natoms]:
+        if len(ln) < 10:
+            continue
+        rn = ln[5:10].strip()
+        if rn in SOLVENT_RESNAMES:
+            counts[rn] = counts.get(rn, 0) + 1
+    if not counts:
+        logger.warning("_detect_water_resname: no known solvent resname "
+                       "(any of %s) in %s — defaulting to 'TIP3'.",
+                       SOLVENT_RESNAMES, gro_path)
+        return "TIP3"
+    # Whichever solvent resname wins the atom count is the one we target.
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _parse_insert_molecules_output(output_text: str) -> dict:
+    """Extract the two numbers gmx insert-molecules reports on stderr/stdout.
+
+    gmx 2019+ prints lines like:
+        Added N molecules (out of M requested)
+        Replaced N residues              (when -replace is on)
+    Older builds spell it 'Added N molecule' or 'Removed N solvent residues'.
+    Missing lines return 0 for that field (defensive: never crash the pipeline
+    over a phrasing change).
+    """
+    import re
+    added = 0
+    replaced = 0
+    for line in output_text.splitlines():
+        s = line.strip()
+        m = re.search(r"Added\s+(\d+)\s+(?:out\s+of\s+\d+\s+)?molecule", s,
+                       re.IGNORECASE)
+        if m:
+            added = int(m.group(1))
+            continue
+        m = re.search(r"Replaced\s+(\d+)\s+(?:residues?|SOL|TIP3)", s,
+                       re.IGNORECASE)
+        if m:
+            replaced = max(replaced, int(m.group(1)))
+            continue
+        m = re.search(r"Removed\s+(\d+)\s+(?:solvent\s+)?(?:residues?|molecules?)",
+                       s, re.IGNORECASE)
+        if m:
+            replaced = max(replaced, int(m.group(1)))
+    return {"added": added, "replaced": replaced}
+
+
+def _random_slab_positions(box_xy_nm: tuple, slab_z_ranges: list,
+                            n_positions: int, seed: int,
+                            margin_nm: float = 0.5) -> list:
+    """Generate `n_positions` uniformly-random xyz points spread across the
+    given z-slab ranges. Each entry in `slab_z_ranges` is (z_lo, z_hi) in nm;
+    positions are distributed round-robin so a two-slab (symmetric) request
+    splits evenly.
+    """
+    import random
+    rng = random.Random(seed)
+    box_x, box_y = box_xy_nm
+    n_slabs = len(slab_z_ranges)
+    out = []
+    for i in range(n_positions):
+        z_lo, z_hi = slab_z_ranges[i % n_slabs]
+        x = rng.uniform(margin_nm, box_x - margin_nm)
+        y = rng.uniform(margin_nm, box_y - margin_nm)
+        z = rng.uniform(z_lo, z_hi)
+        out.append((x, y, z))
+    return out
+
+
+def _place_monomers_via_gmx_insert(system_gro: Path,
+                                    monomer_itps: list,
+                                    output_dir: Path,
+                                    box_xyz_nm: tuple,
+                                    slab_z_ranges: list,
+                                    water_resname: str,
+                                    seed: int = 42,
+                                    radius_nm: float = 0.20,
+                                    n_try: int = 500) -> dict:
+    """Insert monomer copies into `system_gro` via `gmx insert-molecules
+    -replace <water>`.
+
+    system_gro : Path
+        Existing CHARMM-GUI system to modify IN PLACE (the caller passes an
+        already-copied working file, not the read-only source).
+    monomer_itps : list of {'itp','gro',...}
+        One entry per monomer COPY (same convention as the rest of Phase 4).
+    slab_z_ranges : list of (z_lo, z_hi) tuples
+        The z-ranges within which random insertion positions are drawn. Pass
+        one range for `upper_only`; two for `symmetric`.
+    water_resname : str
+        Resname of the water/solvent that gmx should be allowed to displace
+        on clash (`TIP3` for CHARMM-GUI, `SOL` for legacy).
+    radius_nm / n_try : float / int
+        Passed straight through to `gmx insert-molecules -radius / -try`.
+
+    Returns
+    -------
+    dict with keys:
+        n_monomers_placed          : total gmx-reported inserted monomers
+        n_monomers_requested       : len(monomer_itps)
+        n_water_displaced          : sum of `Replaced N residues` across calls
+        per_monomer                : [{itp_stem, n_atoms, requested, inserted,
+                                       water_displaced}]
+        molecule_counts            : {mol_name: n_inserted_this_run} for
+                                     topol.top [molecules] append.
+    """
+    from .utils_vesicle import SOLVENT_RESNAMES
+
+    system_gro = Path(system_gro)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Group copies by unique monomer (itp basename), preserving order.
+    grouped = {}
+    for entry in monomer_itps:
+        itp = Path(entry.get("itp", ""))
+        if not itp.exists():
+            logger.warning("_place_monomers_via_gmx_insert: missing itp %s, "
+                           "skipping this copy", entry.get("itp"))
+            continue
+        gro = Path(entry.get("gro", ""))
+        if not gro.exists():
+            logger.warning("_place_monomers_via_gmx_insert: missing gro %s, "
+                           "skipping this copy", entry.get("gro"))
+            continue
+        stem = itp.stem
+        grouped.setdefault(stem, {"gro": gro, "itp": itp, "copies": 0,
+                                    "mol_name": stem.replace("_GMX", "")})
+        grouped[stem]["copies"] += 1
+
+    # Confirm water_resname is one we know how to book-keep.
+    if water_resname not in SOLVENT_RESNAMES:
+        logger.warning("_place_monomers_via_gmx_insert: passed water_resname=%r"
+                       " which is not in SOLVENT_RESNAMES %s — proceeding "
+                       "anyway", water_resname, SOLVENT_RESNAMES)
+
+    per_monomer = []
+    molecule_counts = {}
+    total_placed = 0
+    total_displaced = 0
+
+    for gi, (stem, info) in enumerate(grouped.items()):
+        n_copies = info["copies"]
+        mol_name = info["mol_name"]
+
+        # 1. Centre the monomer .gro on (0,0,0) so `-ip` positions become
+        #    ABSOLUTE placement centres (gmx interprets -ip as displacements
+        #    from the input molecule's coordinates).
+        centered_gro = output_dir / f"_ins_{stem}_centered.gro"
+        _gmx(["editconf", "-f", str(info["gro"]),
+              "-o", str(centered_gro), "-center", "0", "0", "0"],
+             output_dir, check=True)
+
+        # 2. Emit a positions file (n_copies random xyz points in the slab).
+        #    Use a deterministic per-monomer sub-seed to keep the placement
+        #    stream reproducible across full-pipeline re-runs.
+        pos_path = output_dir / f"_ins_{stem}_positions.dat"
+        positions = _random_slab_positions(
+            (box_xyz_nm[0], box_xyz_nm[1]),
+            slab_z_ranges, n_copies,
+            seed=(seed + 1000 * (gi + 1)))
+        with open(pos_path, "w") as fh:
+            fh.write("# gmx insert-molecules -ip: absolute placement centres "
+                     "(nm); monomer was pre-centered on (0,0,0).\n")
+            for (x, y, z) in positions:
+                fh.write(f"{x:.4f}  {y:.4f}  {z:.4f}\n")
+
+        # 3. Call gmx insert-molecules — IN-PLACE update of system_gro.
+        result = _gmx([
+            "insert-molecules",
+            "-f", str(system_gro),
+            "-ci", str(centered_gro),
+            "-ip", str(pos_path),
+            "-o", str(system_gro),
+            "-replace", f"resname {water_resname}",
+            "-radius", f"{radius_nm}",
+            "-try", str(int(n_try)),
+            "-seed", str(int(seed + 1000 * (gi + 1))),
+        ], output_dir, check=True)
+
+        # 4. Parse how many actually landed + how many waters were displaced.
+        blob = "\n".join(filter(None, [result.stdout or "", result.stderr or ""]))
+        counts = _parse_insert_molecules_output(blob)
+        inserted = counts["added"]
+        displaced = counts["replaced"]
+        total_placed += inserted
+        total_displaced += displaced
+        molecule_counts[mol_name] = molecule_counts.get(mol_name, 0) + inserted
+        per_monomer.append({
+            "itp_stem": stem,
+            "mol_name": mol_name,
+            "requested": n_copies,
+            "inserted": inserted,
+            "water_displaced": displaced,
+        })
+        if inserted < n_copies:
+            logger.warning(
+                "_place_monomers_via_gmx_insert: %s requested %d copies but "
+                "gmx inserted only %d (raise -try / relax -radius; check the "
+                "slab is not saturated with protein or lipid).",
+                mol_name, n_copies, inserted)
+        else:
+            logger.info(
+                "  gmx insert-molecules %-16s: +%d (of %d) monomers, "
+                "-%d %s displaced", mol_name, inserted, n_copies, displaced,
+                water_resname)
+
+    return {
+        "n_monomers_placed": total_placed,
+        "n_monomers_requested": len(monomer_itps),
+        "n_water_displaced": total_displaced,
+        "per_monomer": per_monomer,
+        "molecule_counts": molecule_counts,
+        "water_resname": water_resname,
+    }
+
+
+def _decrement_water_count_in_topol(topol_top: Path, water_resname: str,
+                                      n_displaced: int) -> dict:
+    """Subtract `n_displaced` from the water molecule count in topol.top's
+    [ molecules ] block. IDEMPOTENT via a mid-line marker.
+
+    Matches the trailing `<resname>   <count>` line whose resname column is
+    the water. Fails silently (returns {'matched': False}) if the line is not
+    found — the caller logs but does not raise, because gmx insert-molecules
+    only actually decremented atoms in the .gro, so a missing top adjustment
+    just means the [ molecules ] block does not use this resname (e.g. the
+    CHARMM-GUI top might list the water block by a different name).
+    """
+    topol_top = Path(topol_top)
+    text = topol_top.read_text()
+    if n_displaced <= 0:
+        return {"matched": False, "old": None, "new": None,
+                "reason": "no displacement requested"}
+    marker = f"; Phase4 water decrement: -{n_displaced} {water_resname}"
+    if marker in text:
+        return {"matched": True, "old": None, "new": None,
+                "reason": "already applied (idempotent)"}
+    lines = text.split("\n")
+    in_molecules = False
+    matched = False
+    old_count = None
+    new_count = None
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if stripped.startswith("["):
+            in_molecules = (stripped == "[ molecules ]")
+            continue
+        if not in_molecules:
+            continue
+        if not stripped or stripped.startswith(";") or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) >= 2 and parts[0] == water_resname:
+            try:
+                old_count = int(parts[1])
+            except ValueError:
+                continue
+            new_count = max(0, old_count - n_displaced)
+            lines[i] = f"{water_resname:<10s}{new_count:>10d}   {marker}"
+            matched = True
+            break
+    if matched:
+        topol_top.write_text("\n".join(lines))
+    return {"matched": matched, "old": old_count, "new": new_count,
+            "water_resname": water_resname}
+
+
+def _inject_membrane_posres(toppar_dir: Path, system_gro: Path,
+                              lipid_resnames, lipid_k: float,
+                              restrain_tm: bool, z_min_lip: float,
+                              z_max_lip: float,
+                              protein_moltype_hint: str = "PROA") -> dict:
+    """Append `#ifdef POSRES_MEMBRANE ...` position-restraint blocks INSIDE
+    each lipid moleculetype .itp in `toppar_dir`, plus (if requested) a
+    Cα restraint block inside the protein moleculetype .itp for residues whose
+    Cα falls between z_min_lip and z_max_lip (transmembrane band).
+
+    This is what the CHARMM-GUI convention expects — position restraints are
+    per-moleculetype-scoped, not top-level, so a single top-level `posres.itp`
+    include cannot express them. The blocks are guarded by `#ifdef
+    POSRES_MEMBRANE ... #endif`; the caller then just adds
+    `define = -DPOSRES_MEMBRANE` to the equilibration MDPs to activate them.
+
+    IDEMPOTENT via a marker sentinel line in each patched .itp.
+    """
+    toppar_dir = Path(toppar_dir)
+    system_gro = Path(system_gro)
+    lipid_set = set(lipid_resnames)
+    marker = "; --- Phase4 POSRES_MEMBRANE ifdef block (auto) ---"
+
+    # ── (a) build a per-lipid map: {resname: [local_atom_indices_of_P_atoms]}
+    #     by parsing every candidate .itp file in toppar/. We identify a P atom
+    #     as one whose (moleculetype resname == lipid resname) AND whose atom
+    #     name is 'P' or 'P1'.
+    patched = []
+    skipped = []
+    protein_patched = False
+
+    for itp_path in sorted(toppar_dir.glob("*.itp")):
+        try:
+            text = itp_path.read_text()
+        except Exception:
+            continue
+        if marker in text:
+            skipped.append(itp_path.name + " (idempotent skip)")
+            continue
+
+        # Parse [ moleculetype ] blocks and their [ atoms ] tables. A single
+        # .itp CAN carry several moleculetypes; iterate them all.
+        # We build (start_line, end_line, moltype_name, atoms_list) tuples.
+        lines = text.split("\n")
+        block_ranges = []  # (start_i_incl, end_i_excl, moltype_name)
+        current_start = None
+        current_name = None
+        # We accept the pattern "[ moleculetype ]\n; name  nrexcl\nNAME  N".
+        i = 0
+        while i < len(lines):
+            if lines[i].strip() == "[ moleculetype ]":
+                # Close previous block, if any.
+                if current_start is not None:
+                    block_ranges.append((current_start, i, current_name))
+                # Find the next non-comment, non-empty line for the name.
+                j = i + 1
+                name = None
+                while j < len(lines):
+                    s = lines[j].strip()
+                    if s and not s.startswith(";"):
+                        parts = s.split()
+                        if parts:
+                            name = parts[0]
+                        break
+                    j += 1
+                current_start = i
+                current_name = name
+            i += 1
+        if current_start is not None:
+            block_ranges.append((current_start, len(lines), current_name))
+
+        # For each moleculetype block, if it's a lipid or the protein, scan
+        # its [ atoms ] section and record atoms of interest (P for lipid, CA
+        # for protein).
+        insertions = []  # list of (insert_before_line_index, block_text_lines)
+        for (b_start, b_end, name) in block_ranges:
+            if name is None:
+                continue
+            is_lipid = name in lipid_set
+            is_protein = (name == protein_moltype_hint or
+                          name.startswith("PRO"))
+            if not (is_lipid or (is_protein and restrain_tm)):
+                continue
+
+            atoms_start = None
+            atoms_end = None
+            k = b_start
+            while k < b_end:
+                if lines[k].strip() == "[ atoms ]":
+                    atoms_start = k + 1
+                    m = atoms_start
+                    while m < b_end:
+                        s = lines[m].strip()
+                        if s.startswith("["):
+                            atoms_end = m
+                            break
+                        m += 1
+                    if atoms_end is None:
+                        atoms_end = b_end
+                    break
+                k += 1
+            if atoms_start is None:
+                continue
+
+            target_indices = []
+            for m in range(atoms_start, atoms_end):
+                s = lines[m].strip()
+                if not s or s.startswith(";") or s.startswith("#"):
+                    continue
+                parts = s.split()
+                # Standard [ atoms ] col order:
+                #   nr type resnr residue atom cgnr charge mass ...
+                if len(parts) < 5:
+                    continue
+                try:
+                    local_idx = int(parts[0])
+                except ValueError:
+                    continue
+                aname = parts[4]
+                if is_lipid and aname in ("P", "P1"):
+                    target_indices.append(local_idx)
+                elif is_protein and aname == "CA":
+                    target_indices.append(local_idx)
+
+            if not target_indices:
+                continue
+
+            if is_protein and restrain_tm:
+                # Filter to the transmembrane band: only Cα atoms whose z lies
+                # in [z_min_lip, z_max_lip] in the current system_gro. This
+                # relies on the protein moleculetype occupying the FIRST N atoms
+                # of the system (the CHARMM-GUI convention: PROA first).
+                atom_z = {}
+                with open(system_gro) as fh:
+                    gro_lines = fh.readlines()
+                natoms = int(gro_lines[1].strip())
+                for ai, ln in enumerate(gro_lines[2:2 + natoms], start=1):
+                    if len(ln) < 44:
+                        continue
+                    try:
+                        z = float(ln[36:44])
+                    except ValueError:
+                        continue
+                    atom_z[ai] = z
+                kept = [li for li in target_indices
+                        if atom_z.get(li) is not None
+                        and z_min_lip <= atom_z[li] <= z_max_lip]
+                if not kept:
+                    logger.warning(
+                        "_inject_membrane_posres: no protein Cα atoms fell "
+                        "inside the TM band [%.2f, %.2f] nm — leaving %s "
+                        "unrestrained (RESTRAIN_TM had nothing to bind to).",
+                        z_min_lip, z_max_lip, name)
+                    continue
+                target_indices = kept
+                k_val = lipid_k
+                label = f"protein Cα (TM band, n={len(kept)})"
+            else:
+                k_val = lipid_k
+                label = f"lipid P/P1 (n={len(target_indices)})"
+
+            block = [marker,
+                     f"#ifdef POSRES_MEMBRANE",
+                     f"; {label}, k = {k_val} kJ/mol/nm^2 (isotropic)",
+                     f"[ position_restraints ]",
+                     ";  atom  type      fx      fy      fz"]
+            for li in target_indices:
+                block.append(f"{li:6d}     1  {k_val:8.1f}  {k_val:8.1f}  {k_val:8.1f}")
+            block.append("#endif")
+            block.append("")
+            insertions.append((b_end, block, name, len(target_indices)))
+
+            if is_protein:
+                protein_patched = True
+
+        if not insertions:
+            continue
+
+        # Apply insertions from BOTTOM up so earlier line indices stay valid.
+        for (insert_at, block_lines, name, n_restrained) in sorted(
+                insertions, key=lambda t: -t[0]):
+            lines[insert_at:insert_at] = block_lines
+            patched.append(f"{itp_path.name}:{name} (+{n_restrained})")
+        itp_path.write_text("\n".join(lines))
+
+    if not patched:
+        logger.warning(
+            "_inject_membrane_posres: patched no .itp files under %s — "
+            "the CHARMM-GUI toppar/ layout may differ from expectations "
+            "(one .itp per moleculetype). POSRES_MEMBRANE will be a no-op.",
+            toppar_dir)
+    else:
+        logger.info(
+            "  POSRES_MEMBRANE injected into %d moleculetype block(s): %s",
+            len(patched), ", ".join(patched))
+
+    return {"patched": patched, "skipped": skipped,
+            "protein_patched": protein_patched,
+            "lipid_k_kj_mol_nm2": lipid_k,
+            "restrain_tm": restrain_tm}
+
+
+def _validate_membrane_grompp(system_gro: Path, topol_top: Path,
+                                work_dir: Path,
+                                index_ndx: Path = None) -> dict:
+    """Post-hoc dry-run grompp validator for the merged membrane system.
+
+    Runs `gmx grompp` with a trivial em.mdp against the built
+    (system_membrane.gro, topol.top[, index.ndx]) triple and reports whether
+    the topology + coordinates would even reach mdrun. This catches SOL/monomer
+    overlap (grompp emits 'atoms overlap' at that point), missing atom types,
+    and gross box/PBC mistakes without paying for an actual EM run.
+
+    Returns {'ok': bool, 'stderr_tail': str, 'tpr': Path or None}.
+    """
+    system_gro = Path(system_gro); topol_top = Path(topol_top)
+    work_dir = Path(work_dir)
+    em_mdp = work_dir / "_validate_em.mdp"
+    em_mdp.write_text(MDP_EM, encoding='utf-8')
+    tpr = work_dir / "_validate.tpr"
+    args = ["grompp", "-f", str(em_mdp), "-c", str(system_gro),
+            "-p", str(topol_top), "-o", str(tpr), "-maxwarn", "0"]
+    if index_ndx is not None and Path(index_ndx).exists():
+        args += ["-n", str(index_ndx)]
+    # Do NOT raise on failure — this is a validator; the caller reads .ok.
+    result = _gmx(args, work_dir, check=False)
+    ok = (result.returncode == 0) and tpr.exists()
+    tail = "\n".join(filter(None, [result.stdout or "", result.stderr or ""])
+                     ).splitlines()[-40:]
+    return {"ok": ok,
+            "stderr_tail": "\n".join(tail),
+            "tpr": tpr if ok else None,
+            "returncode": result.returncode}
+
+
+def setup_from_charmm_gui_membrane(target: str, monomer_itps: list,
+                                    output_dir: Path,
+                                    seed: int = 42,
+                                    validate_grompp: bool = False) -> dict:
+    """Consume CHARMM-GUI Membrane Builder output for `target` as the Phase 4
+    starting system and add monomers in the aqueous slab.
+
+    Parameters
+    ----------
+    target : str
+        Target name (CD9/CD63/CD81) — resolved via utils_vesicle to
+        structures/membrane/<target>/step5_input.gro etc.
+    monomer_itps : list of dict
+        As produced by parameterize_monomer, one entry per monomer COPY (the
+        same convention run_full_md_pipeline already uses).  Each dict has
+        `itp` and `gro` keys.  Duplicates → higher [ molecules ] count.
+    output_dir : Path
+        Working directory to write system_membrane.gro, topol.top,
+        index.ndx, and toppar/ into.
+    seed : int
+        Deterministic seed for the aqueous-slab placement RNG.
+
+    Returns
+    -------
+    dict
+        {'system_gro', 'topol_top', 'index_ndx', 'toppar_dir',
+         'n_monomers_placed', 'n_monomers_requested', 'n_water_displaced',
+         'membrane_z_extent', 'aqueous_slab_z', 'placement_mode',
+         'group_atom_counts', 'monomer_atomtypes_warnings',
+         'water_resname', 'water_topol_decrement', 'posres_membrane',
+         'grompp_validation' (only when validate_grompp=True)}
+    """
+    import shutil
+    from .utils_vesicle import (load_template_ev, MEMBRANE_LIPID_RESNAMES,
+                                 read_gro_box_nm)
+    try:
+        from .config import (PHASE4_MEMBRANE_POSRES_LIPID_K,
+                              PHASE4_MEMBRANE_RESTRAIN_TM,
+                              PHASE4_MEMBRANE_MONOMER_PLACEMENT)
+    except Exception:
+        PHASE4_MEMBRANE_POSRES_LIPID_K = 200
+        PHASE4_MEMBRANE_RESTRAIN_TM = True
+        PHASE4_MEMBRANE_MONOMER_PLACEMENT = "upper_only"
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Copy CHARMM-GUI outputs (idempotent).
+    template = load_template_ev(target, output_dir)
+    src_gro = template["gro"]
+    src_top = template["top"]
+    toppar_dir = template["toppar_dir"]
+    box_xyz = template["box_nm"]
+
+    # 2. Compute bilayer z-extent from the coord file.
+    z_min_lip, z_max_lip = _infer_bilayer_z_extent(src_gro,
+                                                     MEMBRANE_LIPID_RESNAMES)
+    box_z = box_xyz[2]
+
+    # 3. Aqueous slab(s) — 1.0 nm keepout from lipid headgroups, 0.5 nm keepout
+    #    from box edges. "symmetric" mode splits monomers 50/50 between the
+    #    upper slab (above upper leaflet) and the lower slab (below lower
+    #    leaflet); "upper_only" keeps the pre-2026-08-20 behaviour.
+    upper_lo = z_max_lip + 1.0
+    upper_hi = box_z - 0.5
+    lower_lo = 0.5
+    lower_hi = z_min_lip - 1.0
+    placement_mode = str(PHASE4_MEMBRANE_MONOMER_PLACEMENT).lower()
+    if placement_mode not in ("upper_only", "symmetric"):
+        logger.warning(
+            "PHASE4_MEMBRANE_MONOMER_PLACEMENT=%r unrecognised — falling back "
+            "to 'upper_only'.", PHASE4_MEMBRANE_MONOMER_PLACEMENT)
+        placement_mode = "upper_only"
+    if upper_hi <= upper_lo:
+        raise ValueError(
+            f"setup_from_charmm_gui_membrane({target}): the aqueous slab above "
+            f"the upper leaflet is empty (leaflet z_max={z_max_lip:.2f} nm, "
+            f"box_z={box_z:.2f} nm). CHARMM-GUI output likely does not have a "
+            f"solvation cap large enough for monomer insertion.")
+    if placement_mode == "symmetric" and lower_hi <= lower_lo:
+        logger.warning(
+            "setup_from_charmm_gui_membrane(%s): symmetric placement requested "
+            "but the aqueous slab below the lower leaflet is empty "
+            "(z_min_lip=%.2f). Degrading to 'upper_only'.", target, z_min_lip)
+        placement_mode = "upper_only"
+
+    slab_ranges = ([(upper_lo, upper_hi)] if placement_mode == "upper_only"
+                   else [(upper_lo, upper_hi), (lower_lo, lower_hi)])
+    slab_lo, slab_hi = upper_lo, upper_hi  # kept for the return dict
+
+    logger.info(
+        "  setup_from_charmm_gui_membrane(%s): bilayer z=[%.2f, %.2f] nm, "
+        "box_z=%.2f nm, placement=%s, slab(s)=%s nm",
+        target, z_min_lip, z_max_lip, box_z, placement_mode,
+        [(f"{a:.2f}", f"{b:.2f}") for (a, b) in slab_ranges])
+
+    # 4. Copy the CHARMM-GUI .gro into place, then call gmx insert-molecules to
+    #    drop the monomer copies into the aqueous slab(s), letting gmx handle
+    #    van der Waals overlap by DISPLACING the water it collides with. This
+    #    replaces the pure-Python placement that used a soft 0.4 nm keepout and
+    #    routinely handed grompp overlapping TIP3 oxygens (LINCS warning storm
+    #    → grompp fatal).
+    system_gro = output_dir / "system_membrane.gro"
+    shutil.copy2(src_gro, system_gro)
+
+    water_resname = _detect_water_resname(src_gro)
+    placement = _place_monomers_via_gmx_insert(
+        system_gro, monomer_itps, output_dir,
+        box_xyz_nm=box_xyz, slab_z_ranges=slab_ranges,
+        water_resname=water_resname, seed=seed)
+    n_placed = placement["n_monomers_placed"]
+    n_water_displaced = placement["n_water_displaced"]
+    per_monomer = placement["per_monomer"]
+
+    # 5. Recount atoms from the actual merged .gro (gmx already re-wrote it).
+    with open(system_gro) as fh:
+        gro_lines = fh.readlines()
+    total_atoms = int(gro_lines[1].strip())
+    logger.info(
+        "  Placed %d monomer(s) via gmx insert-molecules (seed=%d), "
+        "displaced %d %s residues → system now %d atoms",
+        n_placed, seed, n_water_displaced, water_resname, total_atoms)
+
+    # 6. Build topol.top from the CHARMM-GUI top plus monomer itps.
+    topol_top = output_dir / "topol.top"
+    shutil.copy2(src_top, topol_top)
+
+    # Copy per-monomer itps into toppar/, hoisting their [ atomtypes ] blocks.
+    seen = {}       # mol_name -> (itp_filename, copies)
+    all_atomtypes = []
+    warnings_no_atomtypes = []
+    for param in monomer_itps:
+        src_itp_path = Path(param.get("itp", ""))
+        if not src_itp_path.exists():
+            continue
+        mol_name = src_itp_path.stem.replace("_GMX", "")
+        dst_itp_name = src_itp_path.name
+        if mol_name not in seen:
+            dst_itp = toppar_dir / dst_itp_name
+            atypes, has_at = _extract_and_sanitize_monomer_itp(
+                src_itp_path, dst_itp)
+            if not has_at:
+                warnings_no_atomtypes.append(mol_name)
+            all_atomtypes.extend(atypes)
+            seen[mol_name] = (dst_itp_name, 1)
+        else:
+            fname, cnt = seen[mol_name]
+            seen[mol_name] = (fname, cnt + 1)
+
+    if warnings_no_atomtypes:
+        logger.warning(
+            "PHASE4_MEMBRANE_MODE: monomer itp(s) %s do not carry an "
+            "[ atomtypes ] block. Under a CHARMM36 base topology grompp will "
+            "not find the referenced GAFF2 atom types. Re-parameterise these "
+            "monomers with CGenFF (CHARMM-GUI Ligand Reader) or verify their "
+            "itps embed [ atomtypes ] before running the leg.",
+            warnings_no_atomtypes)
+
+    # Deduplicate hoisted atomtypes by atom name (matches _include_monomers_in
+    # _topology behaviour).
+    seen_atoms = set()
+    unique_atomtypes = []
+    for line in all_atomtypes:
+        parts = line.split()
+        atom_name = parts[0] if parts else ""
+        if not atom_name or atom_name in seen_atoms:
+            continue
+        seen_atoms.add(atom_name)
+        if atom_name == "Si" and len(parts) >= 7:
+            try:
+                sigma = float(parts[5]) if parts[5] != "0.00000e+00" else 0
+                if sigma == 0:
+                    line = (f" Si  Si  {28.086:.3f}  0.000  A  "
+                            f"4.29500e-01  4.02000e-01")
+                    logger.info("  Fixed Si atomtype: acpype → UFF Si_3 parameters")
+            except ValueError:
+                pass
+        unique_atomtypes.append(line)
+
+    atomtypes_block = ""
+    if unique_atomtypes:
+        atomtypes_block = ("\n[ atomtypes ]\n" + "\n".join(unique_atomtypes)
+                           + "\n")
+    include_lines = [f'#include "toppar/{fname}"'
+                     for fname, _ in seen.values()]
+
+    top_text = topol_top.read_text()
+    # Insert atomtypes block + monomer #includes AFTER the last existing
+    # #include line (CHARMM-GUI's step5_input.top puts every include near the
+    # top).  Keep the injection idempotent — do not re-inject if we already ran.
+    marker = "; --- Phase4 membrane monomer includes (auto) ---"
+    if marker not in top_text:
+        lines = top_text.split("\n")
+        last_include = -1
+        for i, ln in enumerate(lines):
+            if ln.lstrip().startswith("#include"):
+                last_include = i
+        # BUG #3: [ atomtypes ] MUST precede any [ moleculetype ] that uses
+        # them. When the atomtypes_block came AFTER the monomer #include lines,
+        # strict grompp builds emitted a fatal "Atomtype X not found" for the
+        # monomer's [ atoms ] block. Emit the atomtypes hoist FIRST.
+        injection = [marker, atomtypes_block.rstrip("\n")] + include_lines
+        insert_at = last_include + 1 if last_include >= 0 else len(lines)
+        lines[insert_at:insert_at] = injection
+        top_text = "\n".join(lines)
+
+    # Append monomer molecule counts to [ molecules ] (idempotent — check for
+    # our own marker in the trailing block). Uses the gmx-reported ACTUAL
+    # insertion count (per mol_name) rather than the requested count, so a
+    # dense box that only accepted a subset of insertions still book-keeps
+    # honestly.
+    mol_marker = "; Phase4 monomers"
+    gmx_counts = placement["molecule_counts"]
+    if mol_marker not in top_text:
+        extra = ["", mol_marker]
+        for _mol in seen.keys():
+            _cnt = int(gmx_counts.get(_mol, 0))
+            if _cnt == 0:
+                logger.warning(
+                    "[ molecules ] append: gmx insert-molecules reported 0 "
+                    "successful insertions for %s — that copy will not appear "
+                    "in the run. Not writing a zero line.", _mol)
+                continue
+            extra.append(f"{_mol:<10s}{_cnt:>10d}")
+        top_text = top_text.rstrip() + "\n" + "\n".join(extra) + "\n"
+
+    topol_top.write_text(top_text)
+
+    # 6b. Decrement the water/solvent count in [ molecules ] by whatever gmx
+    #     insert-molecules displaced with -replace. Without this the [molecules]
+    #     total-atom count and the .gro atom count no longer match, and grompp
+    #     refuses to run.
+    water_decrement = _decrement_water_count_in_topol(
+        topol_top, water_resname, n_water_displaced)
+    if n_water_displaced > 0 and not water_decrement["matched"]:
+        logger.warning(
+            "topol.top: could not find a bare '%s   N' line in [ molecules ] "
+            "to decrement by %d (CHARMM-GUI top may use a different water "
+            "resname or group). grompp will refuse to run — inspect topol.top.",
+            water_resname, n_water_displaced)
+    elif water_decrement["matched"]:
+        logger.info(
+            "  topol.top: [ molecules ] %s %d → %d (−%d displaced by "
+            "gmx insert-molecules)", water_resname,
+            water_decrement["old"], water_decrement["new"], n_water_displaced)
+
+    # 6c. Inject POSRES_MEMBRANE ifdef blocks into each lipid moleculetype .itp
+    #     (and the protein .itp if PHASE4_MEMBRANE_RESTRAIN_TM). Activated by
+    #     the equilibration MDPs via `define = -DPOSRES_MEMBRANE`; production
+    #     leaves it OFF so monomers can diffuse.
+    posres_info = _inject_membrane_posres(
+        toppar_dir, system_gro,
+        lipid_resnames=MEMBRANE_LIPID_RESNAMES,
+        lipid_k=float(PHASE4_MEMBRANE_POSRES_LIPID_K),
+        restrain_tm=bool(PHASE4_MEMBRANE_RESTRAIN_TM),
+        z_min_lip=z_min_lip, z_max_lip=z_max_lip)
+
+    # 7. Build the .ndx file with TC1 / TC2.
+    monomer_resnames = set()
+    for m in per_monomer:
+        # Reading first atom line of each monomer .gro would give the resname;
+        # do that off the source itp stem for simplicity.
+        pass
+    # Derive monomer resnames from atom_lines of every monomer gro file — we
+    # need the actual resnames as they appear in the merged .gro (they were
+    # NOT rewritten, only atom-numbering was).
+    for param in monomer_itps:
+        gro_path = param.get("gro")
+        if not gro_path or not Path(gro_path).exists():
+            continue
+        for ln in Path(gro_path).read_text().split("\n")[2:]:
+            if len(ln) < 10:
+                continue
+            rn = ln[5:10].strip()
+            if rn:
+                monomer_resnames.add(rn)
+                break
+
+    index_ndx = output_dir / "index.ndx"
+    group_counts = _write_membrane_index(
+        system_gro, index_ndx,
+        lipid_resnames=MEMBRANE_LIPID_RESNAMES,
+        monomer_resnames=monomer_resnames)
+    logger.info("  TC groups: TC1 (protein+glycan+monomer) = %d atoms, "
+                "TC2 (membrane+water+ion) = %d atoms",
+                group_counts["TC1"], group_counts["TC2"])
+    if group_counts["TC1"] == 0 or group_counts["TC2"] == 0:
+        raise RuntimeError(
+            f"setup_from_charmm_gui_membrane({target}): index group empty "
+            f"({group_counts}). Cannot run two-group thermostat.")
+
+    out = {
+        "system_gro": system_gro,
+        "topol_top": topol_top,
+        "index_ndx": index_ndx,
+        "toppar_dir": toppar_dir,
+        "n_monomers_placed": n_placed,
+        "n_monomers_requested": len(monomer_itps),
+        "n_water_displaced": n_water_displaced,
+        "water_resname": water_resname,
+        "water_topol_decrement": water_decrement,
+        "per_monomer_placement": per_monomer,
+        "placement_mode": placement_mode,
+        "membrane_z_extent": (z_min_lip, z_max_lip),
+        "aqueous_slab_z": (slab_lo, slab_hi),
+        "slab_ranges": slab_ranges,
+        "group_atom_counts": group_counts,
+        "monomer_atomtypes_warnings": warnings_no_atomtypes,
+        "posres_membrane": posres_info,
+        "box_xyz_nm": box_xyz,
+        "total_atoms": total_atoms,
+    }
+
+    # 8. Optional post-hoc dry-run grompp — catches SOL/monomer overlap,
+    #    missing atom types, and PBC mistakes without paying for an actual EM.
+    if validate_grompp:
+        logger.info("  Running post-hoc grompp validation on the built system…")
+        val = _validate_membrane_grompp(system_gro, topol_top, output_dir,
+                                          index_ndx=index_ndx)
+        out["grompp_validation"] = val
+        if val["ok"]:
+            logger.info("  grompp validation OK (tpr=%s)", val["tpr"])
+        else:
+            logger.error(
+                "grompp validation FAILED (rc=%s). Tail:\n%s",
+                val["returncode"], val["stderr_tail"])
+
+    return out
+
+
+def run_full_md_pipeline_membrane(target: str, monomer_itps: list,
+                                    work_dir: Path,
+                                    time_ns: float = 200.0,
+                                    quick: bool = False,
+                                    seed: int = None) -> dict:
+    """Membrane-mode counterpart to run_full_md_pipeline (PHASE4_MEMBRANE_MODE=True).
+
+    Consumes the CHARMM-GUI Membrane Builder outputs for `target` via
+    setup_from_charmm_gui_membrane, then runs EM → NVT → NPT → production
+    with membrane-appropriate MDP settings:
+
+      * two-group V-rescale thermostat (TC1 = protein+glycan+monomer,
+        TC2 = membrane+water+ion) at tau_t = 0.5 ps,
+      * semiisotropic Parrinello-Rahman barostat at compressibility
+        4.5e-5 4.5e-5, ref_p = 1.0 1.0,
+      * index-file-driven grompp for every stage after EM.
+
+    The topology is CHARMM36 (no pdb2gmx / no amber99sb-ildn).  Monomers are
+    inserted ONLY in the aqueous slab above the upper leaflet, so they cannot
+    start embedded in the bilayer.  See setup_from_charmm_gui_membrane for the
+    coordinate build and topology merge details.
+
+    Returns
+    -------
+    dict with the same shape as run_full_md_pipeline: work_dir, time_ns,
+    success flags, MM-PBSA / analysis blocks, and additionally the
+    membrane_setup diagnostic dict.
+    """
+    from .config import (MD_TEMPERATURE_K, MD_PRESSURE_BAR,
+                         MD_GPU_ID, MD_QUICK_NS,
+                         MD_MMPBSA_START_NS, MD_MMPBSA_END_NS,
+                         MD_MMPBSA_INTERVAL)
+
+    if quick:
+        time_ns = MD_QUICK_NS
+
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    results = {"work_dir": str(work_dir), "time_ns": time_ns,
+               "membrane_mode": True}
+
+    try:
+        # 1. Coordinate + topology + index build from CHARMM-GUI.
+        if not (work_dir / "system_membrane.gro").exists() or \
+                not (work_dir / "topol.top").exists() or \
+                not (work_dir / "index.ndx").exists():
+            logger.info("Building CHARMM-GUI membrane system for %s...", target)
+            setup = setup_from_charmm_gui_membrane(
+                target, monomer_itps, work_dir,
+                seed=int(seed) if seed is not None else 42)
+            results["membrane_setup"] = {
+                "n_monomers_placed": setup["n_monomers_placed"],
+                "n_monomers_requested": setup.get("n_monomers_requested"),
+                "n_water_displaced": setup.get("n_water_displaced"),
+                "water_resname": setup.get("water_resname"),
+                "placement_mode": setup.get("placement_mode"),
+                "membrane_z_extent": setup["membrane_z_extent"],
+                "aqueous_slab_z": setup["aqueous_slab_z"],
+                "slab_ranges": setup.get("slab_ranges"),
+                "group_atom_counts": setup["group_atom_counts"],
+                "monomer_atomtypes_warnings":
+                    setup["monomer_atomtypes_warnings"],
+                "posres_membrane": setup.get("posres_membrane"),
+                "total_atoms": setup["total_atoms"],
+            }
+        else:
+            logger.info("Membrane system: FOUND, skipping build")
+            results["membrane_setup"] = {"reused": True}
+
+        # Alias ionized.gro → system_membrane.gro so run_energy_minimization
+        # (and every downstream stage that expects `ionized.gro`) works as-is.
+        # ALWAYS copy: a symlink here has bitten runs on Windows-mounted /mnt
+        # shares and on the exotic FS used by some HPC scratch quotas; copy2
+        # is a couple of MB, once, and removes the fallback branch.
+        ionized_alias = work_dir / "ionized.gro"
+        if not ionized_alias.exists():
+            import shutil as _sh
+            _sh.copy2(work_dir / "system_membrane.gro", ionized_alias)
+
+        index_ndx = work_dir / "index.ndx"
+        mem_tc = dict(tc_grps="TC1 TC2", tau_t="0.5 0.5",
+                       ref_t=f"{MD_TEMPERATURE_K} {MD_TEMPERATURE_K}",
+                       index=index_ndx)
+        mem_pcoup = dict(pcoupltype="semiisotropic",
+                          compressibility="4.5e-5 4.5e-5",
+                          ref_p="1.0 1.0")
+
+        # 2. EM (no thermostat, no barostat — index file not required).
+        if not (work_dir / "em.gro").exists():
+            logger.info("Running energy minimization (membrane)...")
+            run_energy_minimization(work_dir)
+        else:
+            logger.info("EM: FOUND, skipping")
+
+        # 3. NVT (100 ps). Membrane equilibration always runs with
+        #    -DPOSRES_MEMBRANE so lipid P atoms (and, when
+        #    PHASE4_MEMBRANE_RESTRAIN_TM=True, protein Cα in the TM band) stay
+        #    pinned while the aqueous slab thermalises around them. The ifdef
+        #    blocks were injected into each moleculetype .itp by
+        #    setup_from_charmm_gui_membrane; production leaves the flag OFF so
+        #    monomers can diffuse and lipids relax.
+        posres_define = "define = -DPOSRES_MEMBRANE"
+        if not (work_dir / "nvt.gro").exists():
+            logger.info("NVT equilibration (membrane, TC1/TC2, "
+                        "-DPOSRES_MEMBRANE)...")
+            run_nvt_equilibration(work_dir, time_ps=100.0,
+                                   temperature=MD_TEMPERATURE_K,
+                                   gen_seed=(int(seed) if seed is not None
+                                              else -1),
+                                   define=posres_define,
+                                   **mem_tc)
+        else:
+            logger.info("NVT: FOUND, skipping")
+
+        # 4. NPT (100 ps, semiisotropic). Also -DPOSRES_MEMBRANE — the barostat
+        #    must not squeeze the bilayer while the water thermalises around
+        #    the newly-inserted monomers.
+        if not (work_dir / "npt.gro").exists():
+            logger.info("NPT equilibration (membrane, semiisotropic, "
+                        "-DPOSRES_MEMBRANE)...")
+            run_npt_equilibration(work_dir, time_ps=100.0,
+                                   temperature=MD_TEMPERATURE_K,
+                                   pressure=MD_PRESSURE_BAR,
+                                   define=posres_define,
+                                   **mem_tc, **mem_pcoup)
+        else:
+            logger.info("NPT: FOUND, skipping")
+
+        # 5. Production MD.  Membrane runs DO NOT restrain the bilayer heavy
+        #    atoms (CHARMM-GUI already equilibrated them) and DO NOT restrain
+        #    the monomers (they must diffuse to find binding sites) — so no
+        #    -DPOSRES is passed here.  The protein is anchored via the two
+        #    thermostat groups already; residue-level Cα restraints for
+        #    surface-MIP mode are a follow-up (config flag not yet consumed).
+        if not (work_dir / "md.gro").exists():
+            logger.info(f"Production MD ({time_ns} ns, membrane)...")
+            run_production_md(work_dir, time_ns=time_ns,
+                               temperature=MD_TEMPERATURE_K,
+                               pressure=MD_PRESSURE_BAR,
+                               gpu_id=MD_GPU_ID,
+                               define="",
+                               **mem_tc, **mem_pcoup)
+        else:
+            logger.info("Production MD: FOUND, skipping")
+
+        # 6. Trajectory analysis + MM-PBSA (same as aqueous path).
+        logger.info("Analyzing trajectory...")
+        analysis = analyze_trajectory(work_dir)
+        results.update(analysis)
+
+        # BUG #5/#2: gate the MM-PBSA window on effective trajectory length,
+        # or a short (quick) membrane run fails MM-GBSA and stamps Phase 4
+        # success=False even though the MD completed cleanly.
+        if quick:
+            _mm_start = max(0.0, time_ns - 10)
+            _mm_end = time_ns
+        elif MD_MMPBSA_END_NS <= time_ns:
+            _mm_start = MD_MMPBSA_START_NS
+            _mm_end = MD_MMPBSA_END_NS
+        else:
+            _mm_start = max(0.0, time_ns * 0.75)
+            _mm_end = time_ns
+            logger.warning(
+                "MM-PBSA (membrane): configured window %.1f-%.1f ns exceeds "
+                "trajectory length %.1f ns; falling back to the last %.1f-%.1f ns.",
+                MD_MMPBSA_START_NS, MD_MMPBSA_END_NS, time_ns,
+                _mm_start, _mm_end)
+        logger.info("Running MM-PBSA...")
+        mmpbsa = run_mmpbsa(
+            work_dir,
+            start_ns=_mm_start,
+            end_ns=_mm_end,
+            n_frames=MD_MMPBSA_INTERVAL,
+        )
+        results["mmpbsa"] = mmpbsa
+
+        _mm_err = (results.get("mmpbsa") or {}).get("error")
+        results["success"] = not _mm_err and not results.get("error")
+        results["success_basis"] = (
+            "md_and_mmpbsa_ok" if results["success"]
+            else f"mmpbsa_error: {_mm_err}" if _mm_err
+            else f"error: {results.get('error')}")
+        if _mm_err:
+            logger.error("Membrane MD finished but MM-PBSA reported an error: %s. "
+                         "run_full_md_pipeline_membrane is returning success=False.",
+                         _mm_err)
+    except Exception as e:
+        logger.error(f"Membrane MD pipeline failed: {e}")
         results["success"] = False
         results["error"] = str(e)
 

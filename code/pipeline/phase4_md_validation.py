@@ -165,6 +165,25 @@ _CFG_DEFAULTS = {
     # either explicitly pinned or QUALIFIED (its CI excludes the runner-up).
     # False = allow the old behaviour of conditioning it on a bare argmax.
     "PHASE4_LOADING_SWEEP_REQUIRE_QUALIFIED_WINNER": True,
+    # How the within-leg block-convergence number is used.
+    #   "blocking" — a leg that fails it is REJECTED and never pooled (the
+    #                behaviour the 2026-08 audit introduced; kept for CD).
+    #   "advisory" — the number is still computed and reported, but it does not
+    #                reject the leg. Uncertainty is then carried by the
+    #                replicate CI (`_mean_ci`), which is what the ranking
+    #                already consumes.
+    # WHY "advisory" EXISTS. The gate compares two sub-window block means and
+    # demands they agree within PHASE4_CONVERGENCE_TOL_PCT. MEASURED on the BSA
+    # ratio grid: tau of the contact count is 0.45-0.78 ns, so a 3.75 ns block
+    # holds ~4 independent samples and the block-to-block difference expected
+    # from NOISE ALONE is 17-20% — above the 10% threshold. The gate therefore
+    # rejected legs at close to random, which is statistically indistinguishable
+    # from the cherry-picking the LiveCoMS best-practices checklist forbids
+    # (Grossfield et al., LiveCoMS 1(1):5067, 2018: "Use all of the available
+    # data unless there is an objective and compelling reason not to... sampling
+    # metrics should be applied uniformly to all simulations"). No published
+    # standard defines a block-to-block percentage threshold at all.
+    "PHASE4_CONVERGENCE_GATE": "blocking",
 }
 
 
@@ -184,6 +203,7 @@ _CFG_POST_BASELINE = frozenset({
     "PHASE4_RANK_MDD_PCT",
     "PHASE4_RANK_CI_LEVEL",
     "PHASE4_LOADING_SWEEP_REQUIRE_QUALIFIED_WINNER",
+    "PHASE4_CONVERGENCE_GATE",
 })
 
 
@@ -1737,7 +1757,13 @@ def _run_prepolymerization_md(target: str, pc_id: str,
               a (target, pc_id).  Without it two grid points would place their
               monomers with the identical RNG stream.
     """
-    from .utils_gromacs import run_full_md_pipeline, parameterize_monomer
+    from .utils_gromacs import (run_full_md_pipeline,
+                                  run_full_md_pipeline_membrane,
+                                  parameterize_monomer)
+    try:
+        from .config import PHASE4_MEMBRANE_MODE as _P4_MEMBRANE_MODE
+    except Exception:
+        _P4_MEMBRANE_MODE = False
     from .utils_structure import smiles_to_mol2
     from .config import ALL_MONOMERS
 
@@ -1882,6 +1908,30 @@ def _run_prepolymerization_md(target: str, pc_id: str,
 
             logger.info(f"  Total monomer molecules: {len(monomer_itps)}")
 
+            # C2 · Force-field consistency pre-flight. When PHASE4_MEMBRANE_MODE
+            # is on, monomer itps will be MERGED with CHARMM-GUI's CHARMM36
+            # base. If they still carry a GAFF [ defaults ] block or GAFF atom
+            # types, GROMACS silently uses the base's fudge factors and mixes
+            # two force fields in one box — internal energies and monomer-
+            # protein contacts come out wrong with no error. Refuse to launch.
+            if _P4_MEMBRANE_MODE:
+                try:
+                    from .config import PHASE4_FF_STRATEGY as _ff_strategy
+                except Exception:
+                    _ff_strategy = "cgenff_uniform"
+                from .utils_gromacs import _preflight_ff_consistency_check
+                _preflight = _preflight_ff_consistency_check(
+                    monomer_itps, _ff_strategy)
+                if not _preflight["ok"]:
+                    raise RuntimeError(
+                        f"Phase 4 pre-flight FAILED (C2 FF consistency, "
+                        f"strategy={_ff_strategy!r}, checked "
+                        f"{_preflight['checked']} itp(s)): {_preflight['issues']}. "
+                        f"Recommendation: {_preflight['recommendation']}")
+                logger.info(
+                    "  C2 pre-flight PASS (strategy=%s, %d monomer itps clean)",
+                    _preflight["strategy"], _preflight["checked"])
+
         # Record the manifest BEFORE the MD so a crashed run is still traceable
         (md_dir / _MANIFEST_NAME).write_text(json.dumps(manifest, indent=2,
                                                         default=str))
@@ -1913,7 +1963,14 @@ def _run_prepolymerization_md(target: str, pc_id: str,
         md_kwargs = dict(time_ns=time_ns, quick=False,
                          protein_restrained=protein_restrained)
         result["requested_time_ns"] = float(time_ns)
-        sig = inspect.signature(run_full_md_pipeline).parameters
+        # A1: pick the aqueous vs CHARMM-GUI-membrane pipeline. Membrane mode
+        # ignores `epitope_pdb` (that path uses pdb2gmx on a naked peptide and
+        # would silently rebuild the aqueous system) and instead consumes
+        # structures/membrane/<target>/step5_input.gro directly, placing the
+        # monomer swarm only in the aqueous slab above the upper leaflet.
+        _pipeline_fn = (run_full_md_pipeline_membrane if _P4_MEMBRANE_MODE
+                        else run_full_md_pipeline)
+        sig = inspect.signature(_pipeline_fn).parameters
         if "seed" in sig:
             md_kwargs["seed"] = seed
             result["thermostat_seed_reproducible"] = True
@@ -1923,16 +1980,27 @@ def _run_prepolymerization_md(target: str, pc_id: str,
             # velocities); they are just not bit-reproducible.
             result["thermostat_seed_reproducible"] = False
             logger.error(
-                "  run_full_md_pipeline() does not accept seed= yet, so MDP_NVT "
-                "keeps gen_seed=-1: replica %d is independent but NOT "
-                "reproducible. See cross-file request for utils_gromacs.py.",
-                replica_index)
+                "  %s() does not accept seed= yet, so MDP_NVT keeps "
+                "gen_seed=-1: replica %d is independent but NOT reproducible. "
+                "See cross-file request for utils_gromacs.py.",
+                _pipeline_fn.__name__, replica_index)
 
         rng_state = random.getstate()
         random.seed(seed)
         try:
-            md_result = run_full_md_pipeline(epitope_pdb, monomer_itps,
-                                             md_dir, **md_kwargs)
+            if _P4_MEMBRANE_MODE:
+                # Membrane pipeline takes (target, monomer_itps, work_dir, …);
+                # `epitope_pdb` and `protein_restrained` do not apply — the
+                # protein is the CHARMM-GUI PROA + covalently attached glycans
+                # and the bilayer has been equilibrated by CHARMM-GUI already.
+                md_kwargs.pop("protein_restrained", None)
+                logger.info("  PHASE4_MEMBRANE_MODE=True → using "
+                            "run_full_md_pipeline_membrane(%s)", target)
+                md_result = run_full_md_pipeline_membrane(
+                    target, monomer_itps, md_dir, **md_kwargs)
+            else:
+                md_result = run_full_md_pipeline(epitope_pdb, monomer_itps,
+                                                  md_dir, **md_kwargs)
         finally:
             random.setstate(rng_state)
         result.update(md_result)
@@ -2302,6 +2370,7 @@ def _replica_acceptance(result: dict, md_dir: Path) -> dict:
     """
     occ = result.get("occupancy_analysis", {}) or {}
     crit = {}
+    advisory = {}          # computed and reported, but never rejects the leg
     notes = []
 
     crit["md_completed"] = bool(result.get("md_completed"))
@@ -2320,17 +2389,47 @@ def _replica_acceptance(result: dict, md_dir: Path) -> dict:
                      f"is None (not 0), so this replica's H-bond metrics are "
                      f"incomplete")
 
+    # CONVERGENCE: BLOCKING OR ADVISORY (see PHASE4_CONVERGENCE_GATE).
+    # Under "advisory" the number is computed, reported and visible in every
+    # summary, but it does not reject the leg — uncertainty is carried by the
+    # replicate CI instead. A leg is still rejected for the things that are
+    # actual FAILURES (md_completed, analysis_ok, hbond_analysis_complete,
+    # rmsd_equilibrated); only the sub-window drift heuristic is demoted.
     conv = occ.get("convergence") or {}
+    _gate_mode = str(_cfg("PHASE4_CONVERGENCE_GATE")).strip().lower()
     if conv.get("converged") is None:
-        crit["converged"] = False
-        notes.append("convergence undetermined: " +
-                     str(conv.get("reason", "no convergence block")))
+        _conv_ok = False
+        _conv_note = ("convergence undetermined: "
+                      + str(conv.get("reason", "no convergence block")))
     else:
-        crit["converged"] = bool(conv["converged"])
-        if not crit["converged"]:
-            notes.append(f"block-averaged contact frequency not converged "
-                         f"(tol={conv.get('tolerance_pct')}%, "
-                         f"diffs={conv.get('window_diff_pct')})")
+        _conv_ok = bool(conv["converged"])
+        _conv_note = (None if _conv_ok else
+                      f"block-averaged contact frequency not converged "
+                      f"(tol={conv.get('tolerance_pct')}%, "
+                      f"diffs={conv.get('window_diff_pct')})")
+    # The key stays in `criteria` in BOTH modes so the record shape is stable
+    # for anything that reads it; "advisory" only removes it from the set that
+    # can REJECT the replica. Moving the key instead was a mistake — it turned a
+    # configuration choice into a schema change and broke consumers that index
+    # criteria["converged"].
+    crit["converged"] = _conv_ok
+    # ADVISORY DEMOTES DRIFT, NOT ABSENCE OF DATA. `converged` carries two very
+    # different failures: False means the species HAD contacts and the block
+    # means disagreed (the noisy heuristic this mode is meant to stop rejecting
+    # on), while None means the analysis could not determine it at all — a DEAD
+    # BOX where nothing touched the protein, or a missing convergence block.
+    # A dead box is a real failure with no data behind it and must still reject
+    # in either mode; demoting it would let an empty leg into the pooled result.
+    _conv_is_drift = conv.get("converged") is False
+    if _gate_mode == "advisory" and _conv_is_drift:
+        advisory["converged"] = _conv_ok
+        if _conv_note:
+            notes.append(
+                _conv_note + " — ADVISORY ONLY (PHASE4_CONVERGENCE_GATE="
+                "'advisory'): this leg is still pooled, and the uncertainty it "
+                "carries is reported as the replicate CI, not as a pass/fail.")
+    elif _conv_note:
+        notes.append(_conv_note)
     # A present species that recorded zero contacts is DATA (see the
     # convergence block). Recorded as a note, never as a failed criterion.
     _zero = conv.get("monomers_without_contacts") or []
@@ -2370,10 +2469,16 @@ def _replica_acceptance(result: dict, md_dir: Path) -> dict:
     warn["thermostat_seed_reproducible"] = bool(
         result.get("thermostat_seed_reproducible"))
 
-    failed = [k for k, v in crit.items() if not v]
+    # Criteria demoted by configuration are reported but never reject.
+    failed = [k for k, v in crit.items() if not v and k not in advisory]
     return {
         "accepted": not failed,
         "criteria": crit,
+        # Criteria that were EVALUATED but deliberately not allowed to reject.
+        # Kept separate from `warnings` so it is obvious which checks were
+        # demoted by configuration rather than merely informational.
+        "advisory_criteria": advisory,
+        "convergence_gate_mode": _gate_mode,
         "failed_criteria": failed,
         "warnings": warn,
         "notes": notes,
@@ -2540,6 +2645,19 @@ def _pool_replicas(target: str, pc_id: str, functional_monomers: list,
             "hbond_lifetime_avg": _pool_mean("hbond_mean_per_frame"),
             "crosslinker_proximity_A": _pool_mean("crosslinker_proximity_A"),
             "EBN": ebn_pool,
+            # SAMPLING EVIDENCE. These are per-replica, not averaged: the number
+            # of 6 A crossings is the SAMPLE SIZE behind an occupancy, so it
+            # adds across replicas, and a block-average SE is a property of one
+            # trajectory. Averaging either would destroy the thing they are for.
+            # (They were computed and logged from the first run but dropped
+            # here, because this dict is assembled from an explicit key list.)
+            "n_binding_events_per_replica": [
+                (o.get("n_binding_events") or {}) for o in occs],
+            "n_binding_events_total": {
+                m: sum((o.get("n_binding_events") or {}).get(m, 0) for o in occs)
+                for m in all_mons},
+            "block_average_se_per_replica": [
+                (o.get("block_average_se") or {}) for o in occs],
             "pair_distances_md_A": {},
             "convergence": {
                 "converged": all(bool((o.get("convergence") or {}).get("converged"))
@@ -2547,9 +2665,13 @@ def _pool_replicas(target: str, pc_id: str, functional_monomers: list,
                 "per_replica": [(o.get("convergence") or {}).get("converged")
                                 for o in occs],
                 # worst (largest) block difference seen across pooled replicas
+                # None values (e.g. when convergence analysis errored out) are
+                # coerced to 0 rather than crashing the max().
                 "window_diff_pct": {
-                    m: max([(o.get("convergence") or {})
-                            .get("window_diff_pct", {}).get(m, 0) for o in occs] or [0])
+                    m: max([(v if isinstance(v, (int, float)) else 0)
+                            for o in occs
+                            for v in [(o.get("convergence") or {})
+                                       .get("window_diff_pct", {}).get(m, 0)]] or [0])
                     for m in all_mons},
                 "tolerance_pct": float(_cfg("PHASE4_CONVERGENCE_TOL_PCT")),
             },
@@ -3027,6 +3149,76 @@ def _analyze_monomer_occupancy(traj_path: Path, top_path: Path,
         results["residence_frames"] = residence_steps
         logger.info(f"    Residence (ns): {residence_ns} "
                     f"[{residence_steps} analysed steps x {step_ps:.1f} ps]")
+
+        # 3b. THE REAL SAMPLE SIZE: how many times the 6 A shell was crossed.
+        # An occupancy average is not made of frames and not of nanoseconds; it
+        # is made of independent association/dissociation EVENTS, which is the
+        # unit PyLipID uses for exactly this class of observable (Song et al.,
+        # JCTC 18:1188, 2022). `res_contact_durations` already holds one entry
+        # per completed contact episode, so the count is free — it was simply
+        # never reported, and it is the number that says whether an occupancy is
+        # worth a CI at all. A leg with 3 events has no error bar no matter how
+        # many frames it wrote.
+        n_events = {m: len(d) for m, d in res_contact_durations.items()}
+        results["n_binding_events"] = n_events
+        # Same quantity per copy, so compositions with different monomer counts
+        # are comparable.
+        _ncop = {}
+        for _ri, _m in res_to_monomer.items():
+            _ncop[_m] = _ncop.get(_m, 0) + 1
+        results["n_binding_events_per_copy"] = {
+            m: round(n / _ncop[m], 3) for m, n in n_events.items() if _ncop.get(m)}
+        logger.info(f"    Binding events (6 A crossings): {n_events} "
+                    f"= {results['n_binding_events_per_copy']} per copy")
+
+        # 3c. WITHIN-LEG ERROR BAR BY BLOCK AVERAGING (Flyvbjerg & Petersen,
+        # JCP 91:461, 1989; Frenkel & Smit App. D.3; LiveCoMS 1(1):5067 Eqs.
+        # 13-14). BSE(n) = s(block means)/sqrt(M) is computed over a ladder of
+        # block sizes; once a block is longer than the correlation time the
+        # block means decorrelate and BSE stops rising, and that PLATEAU is the
+        # honest standard error of this leg's mean. If no plateau appears the
+        # leg cannot support an error bar, and saying so is the result — that is
+        # the whole point of the method. This REPLACES nothing: the block
+        # DIFFERENCE heuristic stays where it is, but it is a drift diagnostic,
+        # while this is the statistic a reviewer will ask for.
+        block_se = {}
+        for m, counts in contact_per_frame.items():
+            arr = np.asarray(counts, dtype=float)
+            N = len(arr)
+            if N < 20 or arr.std() == 0:
+                block_se[m] = {"plateau_se": None, "reason":
+                               "too few frames or a constant signal"}
+                continue
+            ladder = []
+            nb = 1
+            while nb * 5 <= N:          # need >= 5 blocks for s() to mean anything
+                M = N // nb
+                means = arr[:M * nb].reshape(M, nb).mean(axis=1)
+                ladder.append({"block_frames": nb,
+                               "block_ps": round(nb * step_ps, 1),
+                               "n_blocks": M,
+                               "bse": round(float(means.std(ddof=1) /
+                                                  math.sqrt(M)), 4)})
+                nb *= 2
+            # Plateau = the largest BSE on the ladder. It is an estimate FROM
+            # BELOW: BSE rises toward the true SE, so if it is still climbing at
+            # the last usable block size the value is a lower bound, and that is
+            # flagged rather than hidden.
+            if ladder:
+                best = max(ladder, key=lambda d: d["bse"])
+                still_rising = best is ladder[-1] and len(ladder) > 1
+                block_se[m] = {
+                    "plateau_se": best["bse"],
+                    "plateau_block_ps": best["block_ps"],
+                    "n_blocks_at_plateau": best["n_blocks"],
+                    "still_rising_at_largest_block": bool(still_rising),
+                    "ladder": ladder,
+                }
+        results["block_average_se"] = block_se
+        logger.info("    Block-average SE (F&P plateau): " + ", ".join(
+            f"{m}={v.get('plateau_se')}"
+            + ("[rising]" if v.get("still_rising_at_largest_block") else "")
+            for m, v in block_se.items()))
 
         # 4. RDF-like: fraction of time each monomer type is "close" (< 6Å)
         proximity_frac = {}

@@ -31,6 +31,9 @@ import numpy as np
 
 from .utils_vesicle import (build_fresh_ev, read_gro_box_nm,
                               MEMBRANE_LIPID_RESNAMES,
+                              GLYCAN_RESNAMES_CHARMM,
+                              SOLVENT_RESNAMES,
+                              ION_RESNAMES_CHARMM,
                               STANDARD_AMINO_ACIDS)
 
 logger = logging.getLogger(__name__)
@@ -72,6 +75,64 @@ def _shift_atom(atom_line: str, dx: float = 0.0, dy: float = 0.0,
     coord = f"{x + dx:8.3f}{y + dy:8.3f}{z + dz:8.3f}"
     trailer = atom_line[44:]         # velocities if present
     return f"{prefix}{idx}{coord}{trailer}".rstrip("\n") + "\n"
+
+
+def _strip_solvent_from_gro(in_gro: Path, out_gro: Path) -> dict:
+    """Remove SOL/HOH/TIP3 waters and monatomic ions from a .gro file in-place.
+
+    BUG #15 fix: prepare_independent_fresh_evs returns a solvated NVT-relaxed
+    fresh-EV coordinate file (nvt.gro), so waters wrapped through +Z PBC would
+    otherwise touch the Triton-lysed cavity after the merge. This helper keeps
+    the fresh-EV protein + glycans + lipids only; the composite system is
+    re-solvated after the merge by `gmx solvate`.
+    """
+    with open(in_gro) as fh:
+        lines = fh.readlines()
+    title = lines[0]
+    natoms = int(lines[1].strip())
+    atoms = lines[2:2 + natoms]
+    box = lines[2 + natoms]
+
+    drop_resnames = set(SOLVENT_RESNAMES) | set(ION_RESNAMES_CHARMM) | {
+        "NA", "CL", "K", "POT", "MG", "CA2", "ZN", "ZN2", "WAT"}
+
+    kept = []
+    n_dropped_solv = 0
+    n_dropped_ion = 0
+    ion_set = set(ION_RESNAMES_CHARMM) | {"NA", "CL", "K", "POT", "MG",
+                                            "CA2", "ZN", "ZN2"}
+    for ln in atoms:
+        if len(ln) < 10:
+            kept.append(ln)
+            continue
+        rn = ln[5:10].strip()
+        if rn in drop_resnames:
+            if rn in ion_set:
+                n_dropped_ion += 1
+            else:
+                n_dropped_solv += 1
+            continue
+        kept.append(ln)
+
+    # Renumber atom indices sequentially (cols 15-20) to keep .gro consistent.
+    renumbered = []
+    for i, ln in enumerate(kept, start=1):
+        if len(ln) < 20:
+            renumbered.append(ln)
+            continue
+        renumbered.append(f"{ln[:15]}{i:5d}{ln[20:]}")
+
+    out_gro = Path(out_gro)
+    out_gro.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_gro, "w") as fh:
+        fh.write(title if title.endswith("\n") else title + "\n")
+        fh.write(f"{len(renumbered):>5d}\n")
+        fh.writelines(renumbered)
+        fh.write(box if box.endswith("\n") else box + "\n")
+
+    return {"n_kept": len(renumbered),
+            "n_dropped_solvent": n_dropped_solv,
+            "n_dropped_ion": n_dropped_ion}
 
 
 def _merge_cavity_and_fresh_ev(cavity_gro: Path, fresh_ev_gro: Path,
@@ -118,7 +179,22 @@ def _merge_cavity_and_fresh_ev(cavity_gro: Path, fresh_ev_gro: Path,
     box_parts = cav_box.split()
     if len(box_parts) < 3:
         raise ValueError(f"cavity box line unparseable: {cav_box!r}")
-    box_x, box_y, box_z = float(box_parts[0]), float(box_parts[1]), float(box_parts[2])
+    cav_x, cav_y, box_z = float(box_parts[0]), float(box_parts[1]), float(box_parts[2])
+    # BUG #17 fix: the fresh EV's XY box (after semi-iso NPT shrink) may exceed
+    # the Triton-lysed cavity's XY, so merging into the cavity box would wrap
+    # fresh-EV atoms across ±X / ±Y PBC and clash. Take the max of both XY box
+    # vectors plus a 0.5 nm buffer so the merged box safely contains both.
+    fresh_box_parts = fresh_box.split()
+    if len(fresh_box_parts) >= 2:
+        try:
+            fresh_x = float(fresh_box_parts[0])
+            fresh_y = float(fresh_box_parts[1])
+        except ValueError:
+            fresh_x = fresh_y = 0.0
+    else:
+        fresh_x = fresh_y = 0.0
+    box_x = max(cav_x, fresh_x) + 0.5
+    box_y = max(cav_y, fresh_y) + 0.5
     new_z = box_z + box_z_extend_nm
     extra = " " + " ".join(box_parts[3:]) if len(box_parts) > 3 else ""
     new_box_line = f"{box_x:10.5f}{box_y:11.5f}{new_z:11.5f}{extra}\n"
@@ -216,27 +292,58 @@ def _build_merged_topology(cavity_top: Path, fresh_ev_top: Path,
 
     # ── extract cavity monomer itps (anything under `#include "toppar/…"`
     #    not already present in the fresh EV toppar) ──
+    # The fresh EV loads CHARMM36 as its base force field via its own
+    # forcefield.itp / ions.itp / SPC water. The cavity was built with a
+    # different FF (typically amber99sb-ildn from pdb2gmx, with GAFF2 monomer
+    # itps). We MUST NOT append another FF definition on top of CHARMM36 —
+    # GROMACS would silently load two [ defaults ] / atomtypes blocks and
+    # produce nonsense forces. Drop every FF/water/ions include from the
+    # cavity side; keep only per-monomer itps.
+    #
+    # NOTE (open): monomer itps parameterised under GAFF2 reference atom types
+    # ('c3', 'hc', 'oh', ...) that are not defined by CHARMM36. For a truly
+    # unified system the monomers should be re-parameterised with CGenFF via
+    # CHARMM-GUI Ligand Reader. Until then the merged topology is only sound
+    # if the monomer itps embed a self-contained [ atomtypes ] block.
+    import re as _re
+    _FF_INCLUDE_PATTERNS = (
+        _re.compile(r'\.ff/forcefield\.itp"'),
+        _re.compile(r'\.ff/ions\.itp"'),
+        _re.compile(r'\.ff/spc\w*\.itp"'),
+        _re.compile(r'\.ff/tip\w*\.itp"'),
+    )
     fresh_includes = {
         ln.strip() for ln in fresh_text.splitlines()
         if ln.lstrip().startswith("#include")
     }
     extra_includes = []
+    dropped_ff_includes = []
     cavity_toppar_dir = Path(cavity_top).parent / "toppar"
     for ln in cavity_text.splitlines():
         if not ln.lstrip().startswith("#include"):
             continue
         if ln.strip() in fresh_includes:
             continue
+        if any(pat.search(ln) for pat in _FF_INCLUDE_PATTERNS):
+            dropped_ff_includes.append(ln.strip())
+            continue
         # Non-standard include (usually a monomer itp) — carry it over.
         extra_includes.append(ln.rstrip())
         # Copy the referenced file if it exists next to cavity.top
-        import re as _re
         m = _re.search(r'"([^"]+)"', ln)
         if m and cavity_toppar_dir.is_dir():
             src_itp = cavity_toppar_dir / Path(m.group(1)).name
             dst_itp = out_toppar_dir / Path(m.group(1)).name
             if src_itp.is_file() and not dst_itp.exists():
                 shutil.copy2(src_itp, dst_itp)
+    if dropped_ff_includes:
+        logger.warning(
+            "Dropped %d force-field include(s) from cavity topology to avoid "
+            "double-loading on top of the fresh-EV CHARMM36 base: %s. "
+            "Monomer itps must carry their own [ atomtypes ] block, or the "
+            "monomers must be re-parameterised with CGenFF for the merger to "
+            "be physically consistent.",
+            len(dropped_ff_includes), dropped_ff_includes)
 
     # ── build the merged molecule list from the ATOM ORDER ──
     #   cavity atoms first (their [ molecules ] entries), then fresh EV atoms
@@ -303,7 +410,8 @@ def build_ev_approach_system(cavity_gro: Path, cavity_top: Path,
                                box_z_extend_nm: float | None = None,
                                solvate: bool = True,
                                neutralise: bool = True,
-                               gmx_bin: str | None = None) -> dict:
+                               gmx_bin: str | None = None,
+                               fresh_ev_gro: Path | None = None) -> dict:
     """Assemble a Phase 5 EV-approach system: cavity + fresh EV + solvent.
 
     Parameters
@@ -326,6 +434,15 @@ def build_ev_approach_system(cavity_gro: Path, cavity_top: Path,
         Skip only for dry-run testing.
     gmx_bin : str, optional
         Path to the GROMACS binary. Defaults to config.GMX_BIN.
+    fresh_ev_gro : Path, optional
+        BLOCKER C4 fix. When supplied, this pre-built .gro is used AS-IS for
+        the fresh EV, BYPASSING the internal build_fresh_ev() call. Intended
+        for callers that produced an independent ensemble via
+        utils_vesicle.prepare_independent_fresh_evs — that path gives a real
+        set of independent structural realisations rather than N rotations of
+        the same CHARMM-GUI equilibrated system. When None (the default), the
+        legacy behaviour is preserved: build_fresh_ev(target, seed=seed) is
+        called to produce a rotated copy of the CHARMM-GUI EV.
 
     Returns
     -------
@@ -341,10 +458,35 @@ def build_ev_approach_system(cavity_gro: Path, cavity_top: Path,
                    else getattr(cfg, "PHASE5_BOX_Z_EXTEND_NM", 15.0))
     gmx = gmx_bin or getattr(cfg, "GMX_BIN", "gmx")
 
-    # ── 1. Build fresh EV coordinates ──
-    fresh_ev_gro = md_dir / f"fresh_ev_{target}_seed{seed}.gro"
-    build_fresh_ev(target, seed=seed, out_path=fresh_ev_gro,
-                    drop_solvent=True)
+    # ── 1. Fresh EV coordinates ──
+    # C4 fix: prefer a pre-built independent-ensemble replica when supplied;
+    # otherwise fall back to the legacy rotation-only build for backwards
+    # compatibility.
+    if fresh_ev_gro is not None:
+        fresh_ev_gro = Path(fresh_ev_gro)
+        if not fresh_ev_gro.exists():
+            raise FileNotFoundError(
+                f"build_ev_approach_system: fresh_ev_gro was supplied but "
+                f"does not exist on disk: {fresh_ev_gro}")
+        # BUG #15 fix: prepare_independent_fresh_evs returns a solvated
+        # NVT-relaxed .gro; if we merge it verbatim the fresh-EV waters wrap
+        # through +Z PBC and touch the Triton-lysed cavity. Strip solvent
+        # + ions into a local copy before the merge — the composite system
+        # is re-solvated after the merge by `gmx solvate`.
+        local_fresh = md_dir / f"fresh_ev_{target}_replica_seed{seed}.gro"
+        strip_diag = _strip_solvent_from_gro(fresh_ev_gro, local_fresh)
+        logger.info("EV-approach using pre-built independent fresh EV: %s "
+                    "(bypassing rotation-only build_fresh_ev). "
+                    "Stripped %d solvent + %d ion atoms before merge; kept %d.",
+                    fresh_ev_gro,
+                    strip_diag["n_dropped_solvent"],
+                    strip_diag["n_dropped_ion"],
+                    strip_diag["n_kept"])
+        fresh_ev_gro = local_fresh
+    else:
+        fresh_ev_gro = md_dir / f"fresh_ev_{target}_seed{seed}.gro"
+        build_fresh_ev(target, seed=seed, out_path=fresh_ev_gro,
+                        drop_solvent=True)
 
     # ── 2. Merge cavity + fresh EV, extend box ──
     system_gro = md_dir / "ev_approach_system.gro"
@@ -412,6 +554,46 @@ def build_ev_approach_system(cavity_gro: Path, cavity_top: Path,
     else:
         shutil.copy2(current_gro, ionized_gro)
 
+    # ── 6. Write TC1/TC2 membrane index (BUG #8 fix): the Phase 5 NVT / NPT /
+    # production MDPs must reference two-bath tc-grps (protein+glycan+monomer
+    # vs bilayer+water+ion), otherwise the default single 'Protein Non-Protein'
+    # bath couples lipids and water together and imbalances temperatures.
+    # Derive the monomer resnames from the cavity's atom lines (anything not
+    # protein / lipid / glycan / solvent / ion).
+    try:
+        from .utils_gromacs import _write_membrane_index
+        cav_atoms_for_idx = _read_gro(Path(cavity_gro))[1]
+        _known = (set(STANDARD_AMINO_ACIDS)
+                  | set(MEMBRANE_LIPID_RESNAMES)
+                  | {n[:5] for n in GLYCAN_RESNAMES_CHARMM}
+                  | set(SOLVENT_RESNAMES)
+                  | set(ION_RESNAMES_CHARMM)
+                  | {"NA", "CL", "K", "POT", "MG", "CA2", "ZN", "ZN2", "WAT"})
+        monomer_resnames = set()
+        for _ln in cav_atoms_for_idx:
+            if len(_ln) < 10:
+                continue
+            _rn = _ln[5:10].strip()
+            if _rn and _rn not in _known:
+                monomer_resnames.add(_rn)
+        index_ndx = md_dir / "index.ndx"
+        idx_counts = _write_membrane_index(
+            ionized_gro, index_ndx,
+            lipid_resnames=MEMBRANE_LIPID_RESNAMES,
+            monomer_resnames=monomer_resnames)
+        logger.info("  TC groups: TC1 = %d atoms, TC2 = %d atoms "
+                    "(monomers detected: %s)",
+                    idx_counts.get("TC1", 0), idx_counts.get("TC2", 0),
+                    sorted(monomer_resnames))
+        if idx_counts.get("TC1", 0) == 0 or idx_counts.get("TC2", 0) == 0:
+            logger.warning("EV-approach index has an empty TC group: %s",
+                            idx_counts)
+        index_path_str = str(index_ndx)
+    except Exception as _e:
+        logger.warning("Could not write membrane index for EV-approach: %s", _e)
+        index_path_str = None
+        idx_counts = {}
+
     return {
         "success":         True,
         "md_dir":          str(md_dir),
@@ -419,6 +601,8 @@ def build_ev_approach_system(cavity_gro: Path, cavity_top: Path,
         "ionized_gro":     str(ionized_gro),
         "system_top":      str(system_top),
         "fresh_ev_gro":    str(fresh_ev_gro),
+        "index_ndx":       index_path_str,
+        "index_counts":    idx_counts,
         "placement_diag":  placement,
         "topology_diag":   topol_diag,
     }
@@ -429,13 +613,21 @@ def run_ev_approach_leg(cavity_gro: Path, cavity_top: Path,
                           output_dir: Path,
                           time_ns: int = 20,
                           is_own_target: bool = True,
-                          gmx_bin: str | None = None) -> dict:
+                          gmx_bin: str | None = None,
+                          fresh_ev_gro: Path | None = None) -> dict:
     """Full EV-approach rebinding: build → EM → NVT → NPT → production → analyse.
 
     Mirrors the return shape of `_run_rebinding_md` in phase5_rebinding.py so
     the dispatcher there can call it in-place. When PHASE5 EV-approach mode is
     off, the caller should NOT invoke this — it will still run, but the
     Triton-lysed cavity is a prerequisite.
+
+    fresh_ev_gro : Path, optional
+        BLOCKER C4 fix — see build_ev_approach_system. When supplied, the
+        rotation-only fresh-EV construction is bypassed and this pre-built
+        replica coordinate file is used instead. Intended for callers that
+        prepared an independent ensemble via
+        utils_vesicle.prepare_independent_fresh_evs.
     """
     from . import config as cfg
     from .utils_gromacs import (run_energy_minimization,
@@ -452,7 +644,8 @@ def run_ev_approach_leg(cavity_gro: Path, cavity_top: Path,
     try:
         build = build_ev_approach_system(
             cavity_gro=cavity_gro, cavity_top=cavity_top,
-            target=target, seed=seed, md_dir=md_dir, gmx_bin=gmx_bin)
+            target=target, seed=seed, md_dir=md_dir, gmx_bin=gmx_bin,
+            fresh_ev_gro=fresh_ev_gro)
     except Exception as e:
         logger.error("EV-approach build failed for %s: %s", target, e)
         return {"success": False, "error": f"build_failed: {e}",
@@ -473,15 +666,41 @@ def run_ev_approach_leg(cavity_gro: Path, cavity_top: Path,
                 "protocol": "ev_approach", "build_diag": build}
 
     # ── 3. NVT / NPT / Production ──
+    # BUG #13 fix: run_nvt/npt_equilibration expect `time_ps=`, not `time_ns=`.
+    # BUG #4  fix: bilayer systems require semiisotropic P-coupling with the
+    #              two-value compressibility / ref_p, else LINCS explodes.
+    # BUG #7  fix: keep the membrane restrained during NVT/NPT so it does not
+    #              drift during monomer / fresh-EV insertion (define =
+    #              -DPOSRES_MEMBRANE, deactivated for production).
+    # BUG #8  fix: pass tc_grps='TC1 TC2' together with the .ndx that defines
+    #              those groups; the default 'Protein Non-Protein' couples
+    #              lipids + water in one bath and imbalances T.
+    index_ndx = build.get("index_ndx")
+    index_path = Path(index_ndx) if index_ndx else None
     try:
-        run_nvt_equilibration(md_dir, time_ns=0.1,
-                                temperature=cfg.MD_TEMPERATURE_K)
-        run_npt_equilibration(md_dir, time_ns=0.1,
-                                pressure=cfg.MD_PRESSURE_BAR)
+        run_nvt_equilibration(md_dir, time_ps=100.0,
+                                temperature=cfg.MD_TEMPERATURE_K,
+                                define='-DPOSRES_MEMBRANE',
+                                tc_grps='TC1 TC2',
+                                index=index_path)
+        run_npt_equilibration(md_dir, time_ps=100.0,
+                                pressure=cfg.MD_PRESSURE_BAR,
+                                temperature=cfg.MD_TEMPERATURE_K,
+                                define='-DPOSRES_MEMBRANE',
+                                tc_grps='TC1 TC2',
+                                pcoupltype='semiisotropic',
+                                compressibility='4.5e-5 4.5e-5',
+                                ref_p='1.0 1.0',
+                                index=index_path)
         run_production_md(md_dir, time_ns=time_ns,
                             temperature=cfg.MD_TEMPERATURE_K,
                             pressure=cfg.MD_PRESSURE_BAR,
-                            gpu_id=cfg.MD_GPU_ID)
+                            gpu_id=cfg.MD_GPU_ID,
+                            tc_grps='TC1 TC2',
+                            pcoupltype='semiisotropic',
+                            compressibility='4.5e-5 4.5e-5',
+                            ref_p='1.0 1.0',
+                            index=index_path)
     except Exception as e:
         logger.error("MD failed in EV-approach %s seed=%s: %s", target, seed, e)
         return {"success": False, "error": f"md_failed: {e}",
@@ -495,12 +714,20 @@ def run_ev_approach_leg(cavity_gro: Path, cavity_top: Path,
     contacts_result = None
     if md_tpr.exists() and md_xtc.exists():
         try:
+            # BUG #16 fix: glycosylated residues (Man3GlcNAc2 sugars) are
+            # always in contact with the protein they are covalently bound to,
+            # so leaving them in the binder selection makes them score
+            # freq=1.0 as "persistent" contacts. Exclude the full CHARMM
+            # glycan resname list from the binder side.
+            _glycan_excl = " ".join(GLYCAN_RESNAMES_CHARMM)
+            binder_sel = ("not protein and not resname SOL HOH NA CL TIP3 "
+                          "WAT SOD CLA POPC POPE PSM POPS CHL1 "
+                          f"{_glycan_excl}")
             freq, n_persistent, meta = compute_persistent_contacts_fast(
                 traj_path=md_xtc, top_path=md_tpr,
                 return_meta=True,
                 protein_sel="protein",
-                binder_sel=("not protein and not resname SOL HOH NA CL TIP3 "
-                            "WAT SOD CLA POPC POPE PSM POPS CHL1"))
+                binder_sel=binder_sel)
             contacts_result = {
                 "available":            True,
                 "n_persistent_residues": int(n_persistent),
@@ -528,4 +755,9 @@ def run_ev_approach_leg(cavity_gro: Path, cavity_top: Path,
             "n_persistent_residues", 0),
         "fraction_persistent":   (contacts_result or {}).get(
             "fraction_persistent", 0.0),
+        # C4: record where the fresh-EV coordinates came from so the
+        # replica-level breakdown in verify_phase5 can flag rotation-only
+        # (legacy, statistically N=1) versus a real independent ensemble.
+        "fresh_ev_source":  (str(fresh_ev_gro) if fresh_ev_gro is not None
+                              else "rotation_only(build_fresh_ev)"),
     }

@@ -115,23 +115,85 @@ def run_phase2(phase1_results: dict = None,
                             # computed over the same receptors
     missing_scores = {}     # {target: [monomers with no usable docking]}
 
+    # Glycan-aware receptor selection.  When PHASE1_GLYCAN_MODE == "explicit"
+    # and Phase 1 built a CD63_receptor_glyco.pdbqt alongside the naked one,
+    # Phase 2 docks against the GLYCO receptor for CD63 so the boronate-diol
+    # selectivity mechanism is measured.  CD9/CD81 keep the naked receptor
+    # (they carry no ECL2-internal glycans, and swapping only CD63 preserves
+    # the cross-target contrast).  The glyco path is gated on the CONFIG
+    # value AND on the presence of "receptor_pdbqt_glyco" in phase1_results —
+    # a Phase 1 run without the glyco branch (e.g. resumed from before this
+    # patch) transparently falls back to the naked path.
+    from .config import PHASE1_GLYCAN_MODE as _PH1_GLYCAN_MODE
+    _use_glyco_for = {t for t in target_names
+                      if _PH1_GLYCAN_MODE == "explicit"
+                      and t == "CD63"
+                      and (phase1_results.get(t) or {}).get("receptor_pdbqt_glyco")}
+    if _use_glyco_for:
+        logger.info(f"Phase 2: glycosylated receptor active for "
+                    f"{sorted(_use_glyco_for)} (PHASE1_GLYCAN_MODE="
+                    f"{_PH1_GLYCAN_MODE!r})")
+
     for target in target_names:
         t_result = phase1_results.get(target, {})
         if "error" in t_result:
             logger.warning(f"Skipping {target} (Phase 1 error)")
             continue
 
-        receptor_pdbqt = Path(t_result["receptor_pdbqt"])
-        center = tuple(t_result["grid_center"])
-        npts = tuple(t_result["grid_npts"])
+        # Glyco or naked?  A single decision, recorded on the per-target dict
+        # so downstream reports can tell which receptor scored each row.
+        if target in _use_glyco_for:
+            receptor_pdbqt = Path(t_result["receptor_pdbqt_glyco"])
+            # Glyco grid is task-mandated: mean Asn Cα + max glycan distance
+            # + 5 Å.  Falls back to the naked grid if Phase 1 could not
+            # compute it (e.g. extraction succeeded but Bio.PDB unavailable).
+            center = tuple(t_result.get("grid_center_glyco")
+                            or t_result["grid_center"])
+            npts = tuple(t_result.get("grid_npts_glyco")
+                          or t_result["grid_npts"])
+            logger.info(f"  [{target}] using GLYCOSYLATED receptor "
+                        f"{receptor_pdbqt.name}, grid center={center}, "
+                        f"npts={npts}")
+        else:
+            receptor_pdbqt = Path(t_result["receptor_pdbqt"])
+            center = tuple(t_result["grid_center"])
+            npts = tuple(t_result["grid_npts"])
 
-        # Ensemble docking: collect all receptor PDBQTs (original + MD conformers)
+        # Ensemble docking: collect all receptor PDBQTs (original + MD conformers).
+        # NOTE: MD conformers are naked ECL2 (Phase 1 stability MD does not carry
+        # glycans), so we do NOT add them to the glyco ensemble — mixing glyco +
+        # naked receptors would score the same monomer against two different
+        # chemical environments and merge them by target.
         ensemble_pdbqts = [receptor_pdbqt]
-        if "ensemble_receptor_pdbqts" in t_result:
+        if "ensemble_receptor_pdbqts" in t_result and target not in _use_glyco_for:
             ensemble_pdbqts.extend(
                 Path(p) for p in t_result["ensemble_receptor_pdbqts"]
                 if Path(p).exists()
             )
+
+        # M8 FIX (audit): Boltzmann-average conformer merge
+        #   BE_merged(m,T) = -kT * ln( mean_i(exp(-BE_i(m,T)/kT)) )
+        # has a Jensen bias that skews averaged energies DOWNWARD (more
+        # favourable). The bias scales with the number of conformers
+        # averaged: CD9/CD81 had n=6 MD conformers while CD63 had n=1
+        # (glyco receptor + no glyco MD ensemble), so CD9/CD81 got a
+        # systematic n=6-vs-n=1 Boltzmann "bonus" that artificially
+        # INFLATED their selectivity vs CD63.
+        #
+        # Fix (simplest, task-mandated): in explicit-glyco mode force EVERY
+        # target to n=1 (keep only the crystal conformer). This eliminates
+        # the unequal-N bias entirely and keeps the naked-mode path
+        # (PHASE1_GLYCAN_MODE=="none") byte-identical.
+        if _PH1_GLYCAN_MODE == "explicit" and len(ensemble_pdbqts) > 1:
+            dropped = len(ensemble_pdbqts) - 1
+            ensemble_pdbqts = [ensemble_pdbqts[0]]
+            logger.warning(
+                f"  [{target}] M8: PHASE1_GLYCAN_MODE=='explicit' and "
+                f"CD63 has n=1 glyco receptor. Forcing this target to "
+                f"n=1 as well (dropped {dropped} MD conformer(s)) to "
+                f"eliminate the Boltzmann-merge Jensen bias that would "
+                f"otherwise skew this target's BE more negative than "
+                f"CD63 purely by having more conformers averaged.")
 
         logger.info(f"\n--- SMD for {target} "
                     f"({len(ensemble_pdbqts)} receptor conformer(s)) ---")
@@ -1636,6 +1698,16 @@ def apply_membrane_accessibility_filter(target: str, target_cfg: dict,
             res["occlusion_check"] = "ok"
             continue
 
+        # Defensive: if occluded_fraction could not be computed for ANY pose
+        # (e.g. glyco receptor whose "occluded" set is empty because occl is
+        # keyed to naked-receptor residue coords in a different frame), skip
+        # the filter rather than dropping every monomer as fully occluded —
+        # the drop branch below would then try to f-format None with :.0%.
+        if all(s.get("occluded_fraction") is None for s in scored):
+            res["membrane_accessible"] = None
+            res["occlusion_check"] = "occlusion_undetermined"
+            continue
+
         accessible = [s for s in scored if _ok(s)]
         if accessible:
             new = min(accessible,
@@ -1648,11 +1720,15 @@ def apply_membrane_accessibility_filter(target: str, target_cfg: dict,
             res["be_reselected_from_cluster"] = new["cluster"]
             res["membrane_accessible"] = True
             res["occlusion_check"] = "reselected"
+            best_frac = best.get("occluded_fraction")
+            best_frac_str = f"{best_frac:.0%}" if best_frac is not None else "N/A"
+            new_frac = new.get("occluded_fraction")
+            new_frac_str = f"{new_frac:.0%}" if new_frac is not None else "N/A"
             logger.error(
-                f"  {target}-{name}: best pose sat {best['occluded_fraction']:.0%} "
+                f"  {target}-{name}: best pose sat {best_frac_str} "
                 f"on MEMBRANE-OCCLUDED surface (limit {_MAXOCC:.0%}). Re-scored "
                 f"from cluster {new['cluster']} "
-                f"({new['occluded_fraction']:.0%} occluded): BE "
+                f"({new_frac_str} occluded): BE "
                 f"{res['binding_energy_occluded_pose']} -> {new['binding_energy']} "
                 f"kcal/mol.")
         else:
@@ -1662,9 +1738,11 @@ def apply_membrane_accessibility_filter(target: str, target_cfg: dict,
             res["binding_energy"] = None
             res["membrane_accessible"] = False
             res["occlusion_check"] = "all_poses_occluded"
+            best_frac = best.get("occluded_fraction")
+            best_frac_str = f"{best_frac:.0%}" if best_frac is not None else "N/A"
             logger.error(
                 f"  {target}-{name}: EVERY pose cluster binds predominantly to "
-                f"the membrane-occluded surface (best {best['occluded_fraction']:.0%} "
+                f"the membrane-occluded surface (best {best_frac_str} "
                 f"> {_MAXOCC:.0%}). Recorded as MISSING, not as "
                 f"{res['binding_energy_occluded_pose']} kcal/mol — on an intact "
                 f"vesicle the polymer cannot reach that site.")

@@ -1,0 +1,17 @@
+=== Adopt existing tree + PHASE 4 CD9 START 2026-09-01T01:45:04Z ===
+[config] experiment=CD (default)  output=/home/chan/Research/Monomer_screening_in_Bio/results  unconsumed_keys=4
+[config] experiment=CD (default)  output=/home/chan/Research/Monomer_screening_in_Bio/results  unconsumed_keys=4
+2026-09-01 10:45:04,666 [Pipeline] Targets: ['CD9', 'CD63', 'CD81']
+2026-09-01 10:45:04,666 [Pipeline] Output: /home/chan/Research/Monomer_screening_in_Bio/results
+2026-09-01 10:45:04,668 [Pipeline] Fresh run: phases [4] cleared, downstream [5, 6] also dropped from manifest (they depend on the re-run phases)
+2026-09-01 10:45:04,668 [Pipeline] phase(s) [4] consume Phase 1's results, but they are not usable: produced under a different input fingerprint.
+2026-09-01 10:45:04,668 [Pipeline] Run Phase 1 first (e.g. --phase all), or point --output-dir at the tree that has it.
+---
+=== retry without --fresh, just adopt ===
+[config] experiment=CD (default)  output=/home/chan/Research/Monomer_screening_in_Bio/results  unconsumed_keys=4
+[config] experiment=CD (default)  output=/home/chan/Research/Monomer_screening_in_Bio/results  unconsumed_keys=4
+2026-09-01 10:45:05,007 [Pipeline] Targets: ['CD9']
+2026-09-01 10:45:05,007 [Pipeline] Output: /home/chan/Research/Monomer_screening_in_Bio/results
+2026-09-01 10:45:05,009 [Pipeline] Phase 4: will RUN — phase4/phase4_md_results.json does not exist
+2026-09-01 10:45:05,009 [Pipeline] phase(s) [4] consume Phase 1's results, but they are not usable: produced under a different input fingerprint.
+2026-09-01 10:45:05,009 [Pipeline] Run Phase 1 first (e.g. --phase all), or point --output-dir at the tree that has it.

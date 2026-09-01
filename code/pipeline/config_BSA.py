@@ -741,7 +741,20 @@ BSA_RATIO_SWEEP_MD_NS = 30          # CONSUMED as the per-grid-point time_ns; NO
                                     # MD_MMPBSA_START_NS/END_NS with it — the
                                     # grid now pre-flights that window and says
                                     # so BEFORE the first leg instead of after.
-BSA_MAX_MONOMERS_IN_SHELL = 100     # CONSUMED — run_phase4_ratio_grid REFUSES any
+BSA_MAX_MONOMERS_IN_SHELL = 300     # CONSUMED — run_phase4_ratio_grid REFUSES any
+    # RAISED 100 -> 300 (2026-09) to run the LOADING axis. The rationale note
+    # below already measured the real limit: n = 100, 120, 150, 200 and 300 all
+    # place with ZERO fallbacks against BSA's shell, and the first fallback is
+    # at n = 400. 300 is the largest MEASURED-SAFE value, so the cap now sits at
+    # the evidence rather than below it. Do NOT raise further without re-running
+    # the placer: past the real limit the else-branch puts molecule i at
+    # r_outer + 0.3*i nm and editconf builds a >20 M atom box.
+    # WHY THE LOADING AXIS NEEDS IT: at n_total = 100 the box holds 20 APTES
+    # while the BSA surface alone takes ~25 at saturation, so the x-sweep was
+    # run in an amine-STARVED regime that the bench (222 mM silane, ~7,400 per
+    # BSA) is nowhere near. n_total = 300 puts the box at ~211 mM, i.e. 95% of
+    # the bench concentration, which is what makes the ratio conclusion
+    # transferable at all.
     # grid point above this before building anything, instead of discovering it
     # as a 250 nm box at editconf time.
     # RATIONALE CORRECTED 2026-08: the stated failure mode is real but the
@@ -796,6 +809,40 @@ PHASE4_RANK_MDD_PCT = 30.0           # CONSUMED by _rank_grid_points
     # Basis: single-molecule window CV ~1.8, so a point with n functional copies
     # and R replicas has CV ~ 1.8/sqrt(n*R); at n=12, R=3 that is 30%.
 PHASE4_RANK_CI_LEVEL = 0.95          # CONSUMED by _mean_ci / _rank_grid_points
+
+# PHASE4_CONVERGENCE_GATE — "advisory", not "blocking", for BSA.
+# CONSUMED by _replica_acceptance.
+#
+# The within-leg gate asks "did these two 3.75 ns block means agree to 10%?".
+# MEASURED on this grid's own trajectories: tau of the contact count is
+# 0.45-0.78 ns, so a block holds ~4 independent samples and the block-to-block
+# difference expected from NOISE ALONE is 17-20%. A 10% threshold sits BELOW
+# that noise floor, so it accepted and rejected legs at close to random: of the
+# first two completed legs, one failed at 28% and one passed at 5.7% while the
+# expected noise was 20% and 17% respectively. Filtering on a coin flip and then
+# ranking the survivors biases the grid.
+#
+# There is no published threshold to fall back on. The field's designated
+# best-practices document (Grossfield, Patrone, Roe, Schultz, Siderius &
+# Zuckerman, LiveCoMS 1(1):5067, 2018) deliberately declines to give blanket
+# numeric acceptance criteria, and its checklist requires that any sampling
+# metric used for exclusion be applied uniformly and for "an objective and
+# compelling reason". Metrology says the same thing more bluntly (NIST IR 8526,
+# quoting Mandel 1991): excluding on purely statistical grounds "sharply reduced
+# the field to which the inferences from the study apply".
+#
+# So the leg is no longer judged converged-or-not. Uncertainty is carried where
+# it belongs — the Student-t CI over INDEPENDENT REPLICAS (_mean_ci), which the
+# ranking already consumes, and which is honest that n=1 cannot rank at all.
+# Replicas here re-draw the monomer placement as well as the velocities
+# (_replica_seed feeds both), so that CI measures the variable that actually
+# dominates: where the monomers started, not the restrained protein.
+#
+# NOT PRE-REGISTERED. This was changed AFTER seeing that all six legs failed the
+# old gate. It is a change of statistic, not a selection of legs — the new rule
+# keeps every leg, so it cannot cherry-pick — but the sequence must be stated in
+# any write-up rather than presented as the original plan.
+PHASE4_CONVERGENCE_GATE = "advisory"
 PHASE4_LOADING_SWEEP_REQUIRE_QUALIFIED_WINNER = True   # CONSUMED by run_phase4
 
 # ── §9c  pH REALISM GATE ───────────────────────────────────────────────────

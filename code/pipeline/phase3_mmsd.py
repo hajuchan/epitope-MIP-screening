@@ -34,7 +34,55 @@ logger = logging.getLogger(__name__)
 
 # Bump whenever the meaning of a published Phase 3 field changes. Result
 # entries stamped with anything else are NOT resumed — see run_phase3.
-_PHASE3_SCHEMA = "phase3/v2-blocker05"
+# v3-glyco (audit B2): frame-matched sequential-MMSD receptor + glycan-mode
+# fingerprint. Any pre-glyco phase 3 result carries "v2-blocker05" and is
+# refused on resume even when PHASE1_GLYCAN_MODE toggles.
+_PHASE3_SCHEMA = "phase3/v3-glyco"
+
+
+def _compute_phase3_fingerprint(phase1_results: dict, target_names) -> dict:
+    """Content fingerprint of the Phase-3 inputs that decide chemistry.
+
+    B2 FIX (audit): the schema stamp alone was version-only; a run that
+    toggled PHASE1_GLYCAN_MODE from "none" to "explicit" (or swapped a
+    receptor file) but kept the same code left the old results
+    schema-valid, so the per-target resume block silently reused pre-glyco
+    numbers. The fingerprint here binds each cached Phase-3 result to:
+
+      * PHASE1_GLYCAN_MODE — flipping this must re-run every target,
+        even though the schema string is unchanged.
+      * A short sha256 of every consumed receptor PDBQT — swapping the
+        receptor file on disk (e.g. re-running Phase 1 with different
+        residues) also invalidates the cache.
+
+    Only 16 hex chars per file are kept — enough to detect any real
+    edit, short enough to make the JSON grep-friendly.
+    """
+    from hashlib import sha256
+    from .config import PHASE1_GLYCAN_MODE as _PH1_MODE
+    per_target = {}
+    for t in sorted(target_names):
+        p1t = (phase1_results or {}).get(t) or {}
+        # Match the receptor _pick_receptor would return, INCLUDING glyco.
+        rec_key = ("receptor_pdbqt_glyco"
+                   if (_PH1_MODE == "explicit" and t == "CD63"
+                       and p1t.get("receptor_pdbqt_glyco"))
+                   else "receptor_pdbqt")
+        rec_path = p1t.get(rec_key)
+        if not rec_path:
+            per_target[t] = f"{rec_key}:ABSENT"
+            continue
+        try:
+            data = Path(rec_path).read_bytes()
+            per_target[t] = f"{rec_key}:{sha256(data).hexdigest()[:16]}"
+        except FileNotFoundError:
+            per_target[t] = f"{rec_key}:MISSING:{rec_path}"
+        except Exception as e:
+            per_target[t] = f"{rec_key}:UNHASHABLE:{type(e).__name__}"
+    return {
+        "glycan_mode": _PH1_MODE,
+        "receptors": per_target,
+    }
 
 
 # ════════════════════════════════════════════════════════════════
@@ -234,7 +282,82 @@ def run_phase3(phase1_results: dict = None,
 
     results = {}
 
-    from .config import resolve_path, MMSD_SELECTIVITY_AWARE
+    from .config import resolve_path, MMSD_SELECTIVITY_AWARE, PHASE1_GLYCAN_MODE
+
+    # Glycan-aware receptor selection for Phase 3.
+    #
+    # RULE: the CD63 receptor is ALWAYS glycosylated whether accessed as own
+    # target (CD63 combo vs CD63) or cross target (CD9 combo vs CD63, CD81
+    # combo vs CD63).  A boronate CD9 combo docked against CD63 must face
+    # the glycans if we want cross-docking to reflect real chemistry.
+    # CD9/CD81 receptors stay naked in every direction (no ECL2-internal
+    # glycans).  Gated on PHASE1_GLYCAN_MODE == "explicit" AND on the
+    # presence of receptor_pdbqt_glyco in phase1_results — a Phase 1 that
+    # predates this patch has no glyco path and Phase 3 quietly falls back
+    # to the naked receptor everywhere.
+    def _pick_receptor(t: str, p1t: dict) -> Path:
+        if PHASE1_GLYCAN_MODE == "explicit" and t == "CD63":
+            gly = p1t.get("receptor_pdbqt_glyco")
+            if gly:
+                return resolve_path(gly)
+            # M1 FIX (audit): silently falling back to the naked receptor
+            # here made every subsequent Phase 3 number silently naked-mode.
+            # In explicit-glyco mode this is a RUN-INVALIDATING mismatch —
+            # refuse instead of hiding it. Set PHASE1_GLYCAN_MODE="none" to
+            # deliberately run the pipeline without glycans.
+            raise RuntimeError(
+                f"_pick_receptor({t}): PHASE1_GLYCAN_MODE=='explicit' but "
+                f"phase1_results[{t}] has no 'receptor_pdbqt_glyco'. Phase "
+                f"1 either did not run 6b-glyco, or it failed to build the "
+                f"glyco PDBQT (check phase1_results.json → glyco_extract → "
+                f"error). Refusing to fall back to the naked receptor — "
+                f"the boronate-diol selectivity mechanism would be invisible.")
+        return resolve_path(p1t["receptor_pdbqt"])
+
+    def _pick_epitope_pdb(t: str, p1t: dict) -> Path:
+        """Return the PROTEIN-only PDB in the frame that matches _pick_receptor(t).
+
+        For CD63 in glyco mode the receptor lives in the CHARMM-GUI frame and
+        docked ligand poses are in that same frame. Sequential MMSD merges
+        those poses back into a protein PDB — that PDB must therefore be the
+        CG-frame naked protein, NOT the AF-frame ecl2_pdb. Emitted by Phase
+        1 as `epitope_pdb_glyco`.
+
+        For CD9/CD81 (or any target not on the glyco path) the AF-frame
+        ecl2_pdb is correct.
+
+        B1 FIX (audit): before this helper existed Phase 3 read ecl2_pdb
+        directly for every target — silently mixing CG-frame ligand poses
+        with AF-frame protein for CD63 and corrupting every ΔΔG.
+        """
+        if PHASE1_GLYCAN_MODE == "explicit" and t == "CD63":
+            gly = p1t.get("epitope_pdb_glyco")
+            if gly:
+                return resolve_path(gly)
+            # Same policy as _pick_receptor: refuse rather than silently
+            # produce a frame-mismatched sequential MMSD.
+            raise RuntimeError(
+                f"_pick_epitope_pdb({t}): PHASE1_GLYCAN_MODE=='explicit' "
+                f"but phase1_results[{t}] has no 'epitope_pdb_glyco' (the "
+                f"CG-frame naked-protein PDB emitted by Phase 1 alongside "
+                f"the glyco receptor). Phase 1 must be re-run with the "
+                f"post-audit 6b-glyco branch, or PHASE1_GLYCAN_MODE set to "
+                f"'none'. Refusing to fall back to ecl2_pdb — that PDB is "
+                f"in the AF frame and would place ligand poses tens of "
+                f"angstroms from the protein in sequential MMSD.")
+        return resolve_path(p1t["epitope_pdb"])
+
+    def _pick_grid_center(t: str, p1t: dict):
+        if (PHASE1_GLYCAN_MODE == "explicit" and t == "CD63"
+                and p1t.get("grid_center_glyco")):
+            return tuple(p1t["grid_center_glyco"])
+        return tuple(p1t["grid_center"])
+
+    def _pick_grid_npts(t: str, p1t: dict):
+        if (PHASE1_GLYCAN_MODE == "explicit" and t == "CD63"
+                and p1t.get("grid_npts_glyco")):
+            return tuple(p1t["grid_npts_glyco"])
+        return tuple(p1t["grid_npts"])
 
     # Build per-target receptor metadata (used for cross-docking selectivity)
     target_meta = {}
@@ -243,16 +366,29 @@ def run_phase3(phase1_results: dict = None,
             continue
         p1t = phase1_results[t]
         target_meta[t] = {
-            "receptor": resolve_path(p1t["receptor_pdbqt"]),
-            "epitope": resolve_path(p1t["epitope_pdb"]),
-            "center": tuple(p1t["grid_center"]),
-            "npts": tuple(p1t["grid_npts"]),
+            "receptor": _pick_receptor(t, p1t),
+            # B1: frame-matched — see _pick_epitope_pdb.
+            "epitope": _pick_epitope_pdb(t, p1t),
+            "center": _pick_grid_center(t, p1t),
+            "npts": _pick_grid_npts(t, p1t),
         }
+        if (PHASE1_GLYCAN_MODE == "explicit" and t == "CD63"
+                and p1t.get("receptor_pdbqt_glyco")):
+            logger.info(f"  Phase 3: CD63 receptor is GLYCOSYLATED "
+                        f"({target_meta[t]['receptor'].name}); it will be "
+                        f"used as own target AND as cross-target for CD9/CD81 "
+                        f"combos.")
+
+    # Content fingerprint of the Phase-3 inputs — bound to per-target results
+    # so a toggle of PHASE1_GLYCAN_MODE or a receptor-file swap invalidates
+    # the cache even though _PHASE3_SCHEMA has not moved (B2).
+    current_fp = _compute_phase3_fingerprint(phase1_results, target_names)
 
     # Per-target resume: load partial results if previous run was interrupted.
-    # Only entries stamped with the CURRENT schema may be resumed — a v1 entry
-    # carries smd_sum=0.0, synergy=true and a null-mmsd_result Pareto front
-    # (BLOCKER 05), and resuming it would republish exactly those numbers.
+    # Only entries stamped with the CURRENT schema AND the CURRENT fingerprint
+    # may be resumed — a v1 entry carries smd_sum=0.0, synergy=true and a
+    # null-mmsd_result Pareto front (BLOCKER 05); a stale-fingerprint entry
+    # was produced against a different glycan mode or receptor file (B2).
     partial_json = output_dir / "phase3_mmsd_results.json"
     if fresh and partial_json.exists():
         # --fresh: do not read the partial results at all. Previously the only
@@ -271,8 +407,32 @@ def run_phase3(phase1_results: dict = None,
                 logger.error(
                     f"Resume: DISCARDING pre-{_PHASE3_SCHEMA} Phase 3 result for "
                     f"{t} (schema={results[t].get('schema')!r}). It was produced "
-                    f"before BLOCKER 05 was fixed — smd_sum=0.0, synergy always "
-                    f"true, Pareto front unusable. {t} will be recomputed.")
+                    f"before the current schema — Pareto front unusable. "
+                    f"{t} will be recomputed.")
+                results.pop(t)
+            # B2: drift the per-target fingerprint slice, not just the whole
+            # object — an unchanged CD9 receptor should stay resumable even
+            # when CD63 has been re-extracted.
+            drifted = []
+            for t, v in list(results.items()):
+                if not (isinstance(v, dict) and v.get("top_pcs")):
+                    continue
+                stored_fp = v.get("fingerprint")
+                cur_t = {
+                    "glycan_mode": current_fp["glycan_mode"],
+                    "receptors": {t: current_fp["receptors"].get(t)},
+                }
+                # A pre-B2 entry has no fingerprint at all — treat it as
+                # drift and recompute; safer than trusting a null.
+                if stored_fp != cur_t:
+                    drifted.append((t, stored_fp, cur_t))
+            for t, old, cur in drifted:
+                logger.error(
+                    f"Resume: DISCARDING Phase 3 result for {t} — fingerprint "
+                    f"drift. stored={old!r} now={cur!r}. Most commonly this "
+                    f"means PHASE1_GLYCAN_MODE was toggled between runs or "
+                    f"the receptor PDBQT changed on disk. {t} will be "
+                    f"recomputed to keep glyco/naked chemistry consistent.")
                 results.pop(t)
             done_targets = [t for t, v in results.items()
                             if isinstance(v, dict) and v.get("top_pcs")
@@ -316,10 +476,15 @@ def run_phase3(phase1_results: dict = None,
             continue
 
         p1 = phase1_results[target]
-        receptor_pdbqt = resolve_path(p1["receptor_pdbqt"])
-        epitope_pdb = resolve_path(p1["epitope_pdb"])
-        center = tuple(p1["grid_center"])
-        npts = tuple(p1["grid_npts"])
+        # Glyco-aware pick — same rule as target_meta above.  For CD63 own-
+        # target evaluation this returns the glyco receptor so an FPBA/APBA
+        # combo sees the sugar diols; for CD9/CD81 it returns the naked
+        # receptor.  See _pick_receptor above.
+        receptor_pdbqt = _pick_receptor(target, p1)
+        # B1: frame-matched — see _pick_epitope_pdb.
+        epitope_pdb = _pick_epitope_pdb(target, p1)
+        center = _pick_grid_center(target, p1)
+        npts = _pick_grid_npts(target, p1)
 
         # Available monomers for BO (exclude all crosslinkers)
         from .config import CROSSLINKERS
@@ -527,8 +692,17 @@ def run_phase3(phase1_results: dict = None,
             if active_optimizer == "bayesian"
             else f"Greedy Forward Selection + MMSD{sel_tag}"
         )
+        # B2: per-target slice of the run-wide fingerprint — the resume loop
+        # compares stored vs current on this per-target slice, so untouched
+        # targets stay resumable while a re-extracted CD63 receptor forces
+        # only CD63 to recompute.
+        target_fp = {
+            "glycan_mode": current_fp["glycan_mode"],
+            "receptors": {target: current_fp["receptors"].get(target)},
+        }
         results[target] = {
             "schema": _PHASE3_SCHEMA,
+            "fingerprint": target_fp,
             "method": method_name,
             "n_evaluations": len(all_pc_results),
             "available_monomers": available,
@@ -576,6 +750,13 @@ def run_phase3(phase1_results: dict = None,
             logger.info(f"  Phase 3: {target} complete → saved partial results")
         except Exception as e:
             logger.warning(f"  Failed to save partial Phase 3 results: {e}")
+
+    # B2: the fingerprint is stamped PER TARGET (see the results[target] =
+    # {...} block above). A separate top-level "_fingerprint" was tried and
+    # reverted — downstream (phase4_md_validation, phase6_recipe) infers
+    # target_names from phase3_results.keys() and would then try to build a
+    # recipe for a "_fingerprint" target. Underscore-guarding every consumer
+    # would exceed the audit's "do not modify phase4/phase5" scope.
 
     # Final save
     with open(output_dir / "phase3_mmsd_results.json", "w") as f:
@@ -1484,6 +1665,8 @@ def _plot_mmsd_comparison(results: dict, output_dir: Path):
         import matplotlib.pyplot as plt
 
         for target, data in results.items():
+            if not isinstance(data, dict):
+                continue
             if "error" in data:
                 continue
 

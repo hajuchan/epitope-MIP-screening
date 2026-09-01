@@ -860,16 +860,87 @@ def run_phase6(phase4_results: dict = None,
             ev_mode = bool(_MEMB and _TRIT)
             if ev_mode:
                 try:
+                    # ── Step 2 of wet-lab pathway: Pre-Triton APBA graft ──
+                    # Q3 (Option B) fix: dual-imprint APBA MUST be grafted
+                    # onto the silane cavity BEFORE Triton lysis, while
+                    # CD63 (and its N-glycan sequons N130/N150/N172) is
+                    # still present as the placement reference. Triton
+                    # then strips CD63 + lipids but leaves the APBA
+                    # boronate layer anchored to the cavity wall — the
+                    # fresh CD-in-EV (glycans retained by the D2 fix)
+                    # docks via boronate-diol recognition in rebinding.
+                    #
+                    # The graft is only meaningful when the target has
+                    # ECL2 N-glycan sequons (CD63; CD9/CD81 have 0-1 in
+                    # ECL2 → dual-imprint would be background). Compute
+                    # n_glycan the same way the Step-7 dispatcher does
+                    # (N-X-S/T with X != P inside the ECL2 sequence).
+                    ecl2_seq_pre = phase1_results[target].get(
+                        "ecl2_sequence", "") or ""
+                    _n_glycan_pre = sum(
+                        1 for _i in range(len(ecl2_seq_pre) - 2)
+                        if ecl2_seq_pre[_i] == "N"
+                        and ecl2_seq_pre[_i + 1] != "P"
+                        and ecl2_seq_pre[_i + 2] in ("S", "T"))
+                    snap_result_graft = None
+                    if _n_glycan_pre > 0:
+                        logger.info(
+                            f"  Step 2 (EV-mode): pre-Triton APBA graft "
+                            f"({_n_glycan_pre} ECL2 sequon(s))")
+                        _graft_res = _graft_apba_pre_triton(
+                            cavity_gro=cavity_result["cavity_gro"],
+                            cavity_top=cavity_result["cavity_top"],
+                            phase1_entry=phase1_results[target],
+                            out_dir=snap_dir / "apba_graft_pre_triton",
+                            target=target,
+                            n_glycan=_n_glycan_pre)
+                        # Only pick up the modified system when the graft
+                        # actually produced one; `stub=True` (no sequon
+                        # residues known, protein already stripped, or
+                        # helper error) means the inputs were passed
+                        # through unchanged.
+                        if _graft_res and _graft_res.get("grafted_gro"):
+                            cavity_result["cavity_gro"] = _graft_res["grafted_gro"]
+                            cavity_result["cavity_top"] = _graft_res["grafted_top"]
+                            snap_result_graft = {
+                                "protocol":       "apba_pre_triton",
+                                "n_apba_grafted": _graft_res.get(
+                                    "n_apba_grafted", 0),
+                                "anchor_residues": _graft_res.get(
+                                    "anchor_residues", []),
+                                "anchor_coords_nm": _graft_res.get(
+                                    "anchor_coords_nm", []),
+                                "grafted_gro":    _graft_res["grafted_gro"],
+                                "grafted_top":    _graft_res["grafted_top"],
+                            }
+                        elif _graft_res and _graft_res.get("stub"):
+                            snap_result_graft = {
+                                "protocol": "apba_pre_triton",
+                                "n_apba_grafted": 0,
+                                "skipped_reason": (
+                                    _graft_res.get("note")
+                                    or _graft_res.get("error")
+                                    or "graft skipped"),
+                            }
+
                     from .utils_triton_removal import finalize_triton_removal
                     logger.info(f"  Step 3 (EV-mode): Triton lysis — "
                                 f"stripping lipids + template CD from frame")
                     lysed = finalize_triton_removal(
                         cavity_out_dir=snap_dir / "triton",
-                        relax_em=False,
+                        relax_em=True,
                         input_gro=cavity_result["cavity_gro"],
                         input_top=cavity_result["cavity_top"])
-                    cavity_result["cavity_gro"] = lysed["cavity_gro"]
+                    # #10 FIX: prefer the EM-relaxed gro (em_gro) over the raw
+                    # post-strip cavity.gro; falling back to cavity.gro only if
+                    # relaxation was skipped/unavailable. The un-relaxed frame
+                    # carries clash energies that blow up downstream MD.
+                    cavity_result["cavity_gro"] = (
+                        lysed.get("em_gro") or lysed["cavity_gro"])
                     cavity_result["cavity_top"] = lysed["cavity_top"]
+                    logger.info(
+                        f"Cavity GRO used for downstream: "
+                        f"{cavity_result['cavity_gro']}")
                     snap_result_removal = {
                         "protocol": "triton_lysis",
                         "n_atoms_removed": lysed["n_atoms_removed"],
@@ -1063,24 +1134,30 @@ def run_phase6(phase4_results: dict = None,
         # Adaptive rebound threshold: ≥3 in full run (10 snaps), ≥1 in trial (1 snap)
         rebound_threshold = max(1, REBINDING_N_SNAPSHOTS // 3)
 
-        # Skip dual-imprinting entirely in EV-approach mode: fresh EV template
-        # already carries its glycans in the CHARMM-GUI Membrane Builder + Glycan
-        # Reader outputs, so adding APBA to the cavity would double-count the
-        # recognition signal and would also try to rebuild via the naked-template
-        # path (_run_dual_imprinting_vip) which doesn't understand the fresh-EV
-        # rebinding return shape.
-        from .config import (PHASE4_MEMBRANE_MODE as _MEMB_MODE,
-                              PHASE5_TRITON_REMOVAL_MODE as _TRIT_MODE)
-        _in_ev_mode = bool(_MEMB_MODE and _TRIT_MODE)
-
-        if _in_ev_mode:
-            target_result["dual_imprinting"] = None
-            target_result["dual_imprinting_reason"] = (
-                "EV-approach mode active: fresh CD-in-EV already carries "
-                "glycans from CHARMM-GUI Glycan Reader outputs; no APBA layer "
-                "added.")
-            logger.info(f"  {target}: EV-approach mode → dual-imprinting skipped")
-        elif (any_not_significant and n_glycan > 0 and n_rebound >= rebound_threshold
+        # Q3 (Option B) fix: dual-imprinting is REQUIRED in EV-approach mode
+        # for CD63. The wet-lab pathway grafts APBA onto the silane cavity
+        # *after* CD63 shape imprinting and *before* Triton template removal —
+        # so the fresh CD-in-EV (which carries covalent N-glycans, retained
+        # by the D2 fix in utils_vesicle.build_fresh_ev) can dock via
+        # boronate-diol recognition on rebinding. The old EV-mode skip here
+        # rested on the false premise that "fresh EV carries glycans → APBA
+        # would double-count"; boronate-diol is a two-sided recognition
+        # (APBA on the MIP wall + diol on the glycan), so both sides are
+        # needed. See also the pre-Triton APBA-grafting hook wired into the
+        # snapshot loop (`_graft_apba_pre_triton`, ~L860).
+        #
+        # NOTE (post-Triton caveat): `_run_dual_imprinting_vip` below still
+        # uses `mda.select_atoms("protein")` at L2703 to locate APBA
+        # placement — that selection is EMPTY in EV mode because Triton
+        # already stripped PROA. The pre-Triton hook is therefore the
+        # primary path for EV mode; this Step-7 dispatcher only re-triggers
+        # if primary rebinding still shows weak SI, and in that case will
+        # need a cavity-wall-anchored placement strategy. TODO: verify APBA
+        # grafting placement in post-Triton cavity — sequon positions come
+        # from CD63 residue anchoring, which is now absent since Triton
+        # removed CD; must use CAVITY WALL residues near the imprinting
+        # site instead of PROA residues.
+        if (any_not_significant and n_glycan > 0 and n_rebound >= rebound_threshold
                 and not any_size_excluded):
             logger.info(f"\n  *** Dual-imprinting triggered for {target} ***")
             logger.info(f"      Reason: non-significant selectivity (SI<1.5, p>0.05) "
@@ -2065,24 +2142,133 @@ def _run_rebinding_md(cavity_gro, cavity_top, template_pdb,
             m = _re.search(r"(CD\d+)", str(template_pdb))
             resolved_target = m.group(1) if m else None
         if resolved_target is not None:
+            # C2 · Force-field consistency pre-flight. EV-approach merges a
+            # Triton-lysed cavity (which carries monomer itps) with a fresh
+            # CHARMM-GUI EV. Any GAFF-typed monomer itp on the cavity side
+            # would silently mix with CHARMM36 on the fresh-EV side — refuse.
+            try:
+                from .config import PHASE4_FF_STRATEGY as _ff_strategy
+            except Exception:
+                _ff_strategy = "cgenff_uniform"
+            from .utils_gromacs import _preflight_ff_consistency_check
+            # #21 FIX: previously used a non-recursive .glob() on the cavity_top
+            # parent (and p4_md_dir top-level), which missed monomer itps living
+            # in subdirectories → checked==0 → gate was a silent no-op. Walk
+            # BOTH trees with rglob so any monomer itp anywhere under the
+            # cavity/p4_md tree is picked up, then exclude CHARMM-shipped stems.
+            _cavity_itps = (
+                list(Path(cavity_top).parent.rglob("*.itp"))
+                if cavity_top else [])
+            if p4_md_dir:
+                _cavity_itps += list(Path(p4_md_dir).rglob("*.itp"))
+            # Drop CHARMM-shipped itps (protein/lipid/water/ions) — the check
+            # is about the MONOMER itps that would be silently mismatched.
+            _CHARMM_ITP_STEMS = {"forcefield", "posre", "posre_lipid",
+                                  "ions", "spc", "tip3p",
+                                  "PROA", "POPC", "POPE", "POPS", "PSM",
+                                  "CHL1", "TIP3", "SOD", "CLA"}
+            _cavity_itps = [p for p in _cavity_itps
+                             if p.stem not in _CHARMM_ITP_STEMS
+                             and not p.stem.startswith("posre")]
+            _preflight = _preflight_ff_consistency_check(
+                _cavity_itps, _ff_strategy)
+            if not _preflight["ok"]:
+                raise RuntimeError(
+                    f"Phase 5 EV-approach pre-flight FAILED (C2 FF consistency, "
+                    f"strategy={_ff_strategy!r}, checked "
+                    f"{_preflight['checked']} monomer itp(s)): "
+                    f"{_preflight['issues']}. Recommendation: "
+                    f"{_preflight['recommendation']}")
+            logger.info(
+                "  C2 pre-flight PASS (strategy=%s, %d monomer itps clean)",
+                _preflight["strategy"], _preflight["checked"])
+
             from .utils_ev_approach import run_ev_approach_leg
-            from .config import PHASE5_FRESH_EV_PLACEMENTS
+            from .utils_vesicle import prepare_independent_fresh_evs
+            from .config import (PHASE5_FRESH_EV_PLACEMENTS,
+                                  PHASE5_FRESH_EV_INDEPENDENCE,
+                                  PHASE5_FRESH_EV_NVT_TIME_PS)
             base_seed = (int(placement_seed) if placement_seed is not None
                           else abs(hash((str(output_dir), resolved_target))) % (2**31))
             n_placements = max(1, int(PHASE5_FRESH_EV_PLACEMENTS))
+
+            # ── C4: build an INDEPENDENT ensemble of fresh EVs (once, cached)
+            #    before the placement loop. Legacy "rotation_only" preserves
+            #    pre-C4 behaviour and is loud in logs. "external_replicas"
+            #    picks up user-supplied CHARMM-GUI outputs. "nvt_perturbation"
+            #    (recommended default) pre-runs N short NVTs, each with a
+            #    distinct gen_vel seed, so the placements are DIFFERENT
+            #    structural draws — not N rotations of one structure.
+            independence_mode = str(PHASE5_FRESH_EV_INDEPENDENCE)
+            fresh_ev_records = None
+            if independence_mode == "rotation_only":
+                logger.warning(
+                    "PHASE5_FRESH_EV_INDEPENDENCE='rotation_only' [LEGACY]: "
+                    "the %d fresh-EV placements will be z-rotations of the "
+                    "SAME CHARMM-GUI equilibrated system — statistically N=1 "
+                    "with rotational sampling only. This mode exists for "
+                    "reproducing pre-C4 runs; do NOT ship results with it. "
+                    "Set PHASE5_FRESH_EV_INDEPENDENCE='nvt_perturbation' "
+                    "(recommended) or 'external_replicas' (gold standard).",
+                    n_placements)
+            else:
+                try:
+                    fresh_ev_ensemble_dir = (
+                        output_dir / "_fresh_ev_ensemble" / resolved_target)
+                    fresh_ev_records = prepare_independent_fresh_evs(
+                        target=resolved_target,
+                        n_replicas=n_placements,
+                        out_dir=fresh_ev_ensemble_dir,
+                        seed_base=base_seed,
+                        nvt_time_ps=float(PHASE5_FRESH_EV_NVT_TIME_PS),
+                        mode=independence_mode)
+                    logger.info(
+                        "EV-approach independent ensemble [%s]: %d replicas "
+                        "prepared for %s in %s (statuses=%s)",
+                        independence_mode, len(fresh_ev_records),
+                        resolved_target, fresh_ev_ensemble_dir,
+                        [r.get("status") for r in fresh_ev_records])
+                except Exception as e:
+                    logger.error(
+                        "PHASE5 independent fresh-EV preparation FAILED for "
+                        "%s (mode=%s): %s — falling back to legacy "
+                        "rotation-only placements. Results will be flagged "
+                        "as N=1 in verify_phase5.",
+                        resolved_target, independence_mode, e)
+                    fresh_ev_records = None
+
             legs = []
             for i in range(n_placements):
                 seed_i = (base_seed + i * 10007) % (2**31)  # deterministic offset
+                # Resolve which fresh-EV coordinates this placement should use.
+                # None → run_ev_approach_leg falls back to rotation-only.
+                fresh_ev_gro_i = None
+                if fresh_ev_records is not None and i < len(fresh_ev_records):
+                    rec = fresh_ev_records[i]
+                    fresh_ev_gro_i = rec.get("gro")
+                    # Prefer the record's seed for reproducibility of the
+                    # NVT-perturbation draw; fall back to the rotation offset.
+                    seed_i = int(rec.get("seed", seed_i)) % (2**31)
                 logger.info(
-                    "EV-approach dispatch [%d/%d]: target=%s seed=%d cavity=%s",
+                    "EV-approach dispatch [%d/%d]: target=%s seed=%d "
+                    "cavity=%s fresh_ev=%s",
                     i + 1, n_placements, resolved_target, seed_i,
-                    Path(cavity_gro).name)
+                    Path(cavity_gro).name,
+                    (Path(fresh_ev_gro_i).name if fresh_ev_gro_i
+                     else "rotation_only(build_fresh_ev)"))
                 leg = run_ev_approach_leg(
                     cavity_gro=cavity_gro, cavity_top=cavity_top,
                     target=resolved_target, seed=seed_i,
                     output_dir=output_dir / f"placement_{i}",
                     time_ns=time_ns,
-                    is_own_target=is_own_target)
+                    is_own_target=is_own_target,
+                    fresh_ev_gro=fresh_ev_gro_i)
+                # Attach the fresh-EV record for downstream inspection
+                # (verify_phase5 replica breakdown reads this).
+                if fresh_ev_records is not None and i < len(fresh_ev_records):
+                    leg["fresh_ev_replica"] = {
+                        k: (str(v) if hasattr(v, "as_posix") else v)
+                        for k, v in fresh_ev_records[i].items()}
                 legs.append(leg)
             return _aggregate_ev_placements(
                 legs, target=resolved_target, is_own_target=is_own_target)
@@ -2635,6 +2821,411 @@ def _run_template_removal_md(cavity_gro, cavity_top, output_dir,
         return {"error": str(e)}
 
 
+# ── Pre-Triton APBA Grafting (Q3 Option B) ───────────────────
+
+def _graft_apba_at_anchors(cavity_gro, cavity_top, anchor_coords,
+                            apba_count, out_dir, seed: int = 42):
+    """Physically graft APBA molecules onto a cavity system at given anchors.
+
+    Geometry-agnostic helper. Does NOT require the CD63 protein to be
+    present in `cavity_gro`: placement anchors come from the caller
+    (either CD63 sequon Cα coords pre-Triton, or cavity-wall coords
+    post-Triton).
+
+    Steps:
+        1. Parameterise APBA once (acpype/GAFF2 → .itp + .gro) into
+           `out_dir/apba_param`.
+        2. For each anchor, translate the APBA rigid body so that its
+           center of mass lands at that anchor, and splice its atoms
+           into the cavity .gro immediately before the first SOL
+           residue (topology-order match).
+        3. Merge the APBA topology: `#include` the local ITP copy,
+           hoist its [ atomtypes ] into the main topology, and append
+           `APBA <count>` to [ molecules ] just before SOL.
+        4. Attach a `POSRES_MONOMER` position-restraint block to the
+           APBA ITP so the grafted boronates stay near the anchors
+           during rebinding MD.
+
+    Parameters
+    ----------
+    cavity_gro : path-like
+        Input cavity .gro (pre-Triton: contains CD + bilayer + polymer
+        network; post-Triton: only polymer network + water + retained
+        anchor coords).
+    cavity_top : path-like
+        Corresponding topology.
+    anchor_coords : sequence of (x, y, z) tuples in nm
+        Target center-of-mass position for each grafted APBA.
+    apba_count : int
+        Desired number of APBA molecules; capped at len(anchor_coords).
+    out_dir : path-like
+        Output directory for grafted files (created if missing).
+    seed : int
+        RNG seed. Reserved for future stochastic perturbations —
+        placement is currently deterministic.
+
+    Returns
+    -------
+    dict
+        {"grafted_gro": Path, "grafted_top": Path,
+         "cavity_gro": Path, "cavity_top": Path,   # drop-in aliases
+         "n_apba_placed": int, "anchor_coords_used": list,
+         "apba_itp": Path}
+    or {"error": <str>} on failure.
+    """
+    import MDAnalysis as mda
+    from .config import REBINDING_RESTRAINT_K, ALL_MONOMERS
+    from .utils_structure import smiles_to_mol2
+    from .utils_gromacs import parameterize_monomer
+
+    _ = seed  # placement is deterministic for now
+
+    cavity_gro = Path(cavity_gro)
+    cavity_top = Path(cavity_top)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    apba_info = ALL_MONOMERS.get("APBA")
+    if not apba_info:
+        return {"error": "APBA not in monomer library"}
+
+    n_place = min(int(apba_count), len(anchor_coords))
+    if n_place <= 0:
+        return {"error": "no_anchor_coords"}
+
+    # 1. Parameterise APBA (per call; acpype is not expensive for a small
+    # aromatic like APBA and this helper is invoked at most once per
+    # snapshot in fallback code paths).
+    param_dir = out_dir / "apba_param"
+    param_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        mol2 = smiles_to_mol2(apba_info["smiles"], "APBA", param_dir)
+        apba_param = parameterize_monomer(mol2, "APBA", param_dir)
+        apba_itp_src = apba_param.get("itp")
+        apba_gro = apba_param.get("gro")
+        if not apba_itp_src or not apba_gro:
+            return {"error": "apba_parameterization_failed"}
+    except Exception as e:
+        return {"error": f"apba_parameterization_failed: {e}"}
+
+    # 2. Compute per-anchor translation from APBA COM.
+    u_apba = mda.Universe(str(apba_gro))
+    apba_com_A = u_apba.select_atoms("all").center_of_mass()
+    apba_com_nm = (float(apba_com_A[0]) / 10.0,
+                   float(apba_com_A[1]) / 10.0,
+                   float(apba_com_A[2]) / 10.0)
+
+    apba_gro_lines = Path(apba_gro).read_text().rstrip("\n").split("\n")
+    apba_natoms = int(apba_gro_lines[1].strip())
+    apba_coord_lines = apba_gro_lines[2:2 + apba_natoms]
+
+    cav_lines = Path(cavity_gro).read_text().rstrip("\n").split("\n")
+    cav_natoms = int(cav_lines[1].strip())
+    box_line = cav_lines[-1]
+    atom_lines = cav_lines[2:2 + cav_natoms]
+
+    new_atom_lines = []
+    anchor_used = []
+    for ci in range(n_place):
+        ax, ay, az = anchor_coords[ci]
+        sx = float(ax) - apba_com_nm[0]
+        sy = float(ay) - apba_com_nm[1]
+        sz = float(az) - apba_com_nm[2]
+        anchor_used.append((float(ax), float(ay), float(az)))
+        for line in apba_coord_lines:
+            if len(line) >= 44:
+                x = float(line[20:28]) + sx
+                y = float(line[28:36]) + sy
+                z = float(line[36:44]) + sz
+                res_num = cav_natoms // max(apba_natoms, 1) + ci + 100
+                new_line = (f"{res_num:5d}APBA "
+                            f"{line[10:15]}"
+                            f"{cav_natoms + len(new_atom_lines) + 1:5d}"
+                            f"{x:8.3f}{y:8.3f}{z:8.3f}")
+                new_atom_lines.append(new_line)
+
+    # Splice APBA atoms before the first SOL residue (topology-order match).
+    sol_start = None
+    for li, line in enumerate(atom_lines):
+        if len(line) >= 10 and "SOL" in line[5:10]:
+            sol_start = li
+            break
+
+    total_atoms = cav_natoms + len(new_atom_lines)
+    merged = [cav_lines[0], f" {total_atoms}"]
+    if sol_start is not None:
+        merged.extend(atom_lines[:sol_start])
+        merged.extend(new_atom_lines)
+        merged.extend(atom_lines[sol_start:])
+    else:
+        merged.extend(atom_lines)
+        merged.extend(new_atom_lines)
+    merged.append(box_line)
+
+    grafted_gro = out_dir / "cavity_apba.gro"
+    grafted_gro.write_text("\n".join(merged) + "\n")
+
+    # 3. Merge topology: hoist ITP, patch [atomtypes] + [molecules].
+    apba_itp_name = Path(apba_itp_src).name
+    apba_itp_dst = out_dir / apba_itp_name
+    shutil.copy2(str(apba_itp_src), str(apba_itp_dst))
+
+    # Copy sibling ITPs from the cavity directory so #includes still resolve.
+    for itp in cavity_gro.parent.glob("*.itp"):
+        dst = out_dir / itp.name
+        if not dst.exists():
+            shutil.copy2(str(itp), str(dst))
+
+    top_text = cavity_top.read_text()
+
+    if f'#include "{apba_itp_name}"' not in top_text:
+        top_text = top_text.replace(
+            "[ moleculetype ]",
+            f'#include "{apba_itp_name}"\n\n[ moleculetype ]', 1)
+
+    # Append APBA to [ molecules ] just before the first SOL entry.
+    top_text = top_text.replace("SOL", f"APBA     {n_place}\nSOL", 1)
+
+    # Strip [ atomtypes ] from the local ITP copy (main topology owns it).
+    apba_itp_text = apba_itp_dst.read_text()
+    cleaned = []
+    skip_at = False
+    for line in apba_itp_text.split("\n"):
+        if "[ atomtypes ]" in line:
+            skip_at = True
+            continue
+        if skip_at:
+            if line.strip().startswith("[") and "atomtypes" not in line:
+                skip_at = False
+            else:
+                continue
+        cleaned.append(line)
+    apba_itp_text = "\n".join(cleaned)
+    apba_itp_dst.write_text(apba_itp_text)
+
+    # Hoist APBA atomtypes INSIDE the main topology's [ atomtypes ] block,
+    # right after existing entries and BEFORE any #include (matches the
+    # original inline logic in `_run_dual_imprinting_vip`).
+    orig_itp_text = Path(apba_itp_src).read_text()
+    apba_atomtypes = ""
+    in_at = False
+    for line in orig_itp_text.split("\n"):
+        if "[ atomtypes ]" in line:
+            in_at = True
+            continue
+        if in_at:
+            if line.strip().startswith("[") and "atomtypes" not in line:
+                break
+            if line.strip() and not line.startswith(";"):
+                apba_atomtypes += line + "\n"
+
+    if apba_atomtypes and "[ atomtypes ]" in top_text:
+        lines = top_text.split("\n")
+        out_lines = []
+        inserted = False
+        in_at = False
+        for ln in lines:
+            if ln.strip().startswith("[ atomtypes ]"):
+                in_at = True
+                out_lines.append(ln)
+                continue
+            if in_at and not inserted:
+                stripped = ln.strip()
+                if (stripped == "" or stripped.startswith("#")
+                        or stripped.startswith("[")):
+                    out_lines.append(apba_atomtypes.rstrip("\n"))
+                    inserted = True
+                    in_at = False
+            out_lines.append(ln)
+        if not inserted:
+            out_lines.append(apba_atomtypes)
+        top_text = "\n".join(out_lines)
+
+    # Attach POSRES_MONOMER block to APBA heavy atoms so restraints keep
+    # grafted boronates near the anchor during rebinding MD.
+    if "#ifdef POSRES_MONOMER" not in apba_itp_text:
+        heavy = []
+        in_atoms = False
+        for line in apba_itp_text.split("\n"):
+            if "[ atoms ]" in line:
+                in_atoms = True
+                continue
+            if in_atoms and line.strip().startswith("["):
+                break
+            if in_atoms and line.strip() and not line.startswith(";"):
+                parts = line.split()
+                if len(parts) >= 2 and not parts[1].startswith("h"):
+                    heavy.append(parts[0])
+        posre = "\n#ifdef POSRES_MONOMER\n[ position_restraints ]\n"
+        posre += "; ai  funct  fcx    fcy    fcz\n"
+        for ai in heavy:
+            posre += (f"  {ai}    1  {REBINDING_RESTRAINT_K}  "
+                      f"{REBINDING_RESTRAINT_K}  {REBINDING_RESTRAINT_K}\n")
+        posre += "#endif\n"
+        apba_itp_dst.write_text(apba_itp_text.rstrip() + "\n" + posre)
+
+    grafted_top = out_dir / "topol.top"
+    grafted_top.write_text(top_text)
+
+    return {
+        "grafted_gro": grafted_gro,
+        "grafted_top": grafted_top,
+        # Drop-in aliases so callers that expect `cavity_gro`/`cavity_top`
+        # (pre-Triton hook + snap loop) can consume the result directly.
+        "cavity_gro":  grafted_gro,
+        "cavity_top":  grafted_top,
+        "n_apba_placed":       n_place,
+        "anchor_coords_used":  anchor_used,
+        "apba_itp":            apba_itp_dst,
+    }
+
+
+def _graft_apba_pre_triton(cavity_gro, cavity_top, phase1_entry, out_dir,
+                            target: str, n_glycan: int):
+    """Graft APBA molecules onto the silane cavity BEFORE Triton removal.
+
+    Wet-lab pathway (Teixeira 2021 dual-imprinting protocol, EV variant):
+        1. Silane sol-gel matrix imprints CD63 ECL2 shape       (Phase 4 MD)
+        2. APBA aldehyde-amine surface grafting adds boronate    ← THIS STEP
+           recognition layer to the cavity, anchored at the CD63
+           N-glycan sequon positions (N130 / N150 / N172).
+        3. Triton X-100 lysis strips lipids + CD63 template,     (Phase 5)
+           leaving the empty cavity WITH the APBA layer intact.
+        4. Fresh CD-in-EV (glycans retained; see utils_vesicle
+           D2 fix) is added. APBA boronates bind glycan diols
+           → boronate-diol recognition drives selectivity.
+
+    This function runs at step 2 of the pathway. Because CD63 is STILL
+    present here (Triton has not run yet), sequon residue positions are
+    read directly from the input cavity — we do NOT need to fall back
+    to cavity-wall anchoring the way the Step-7 dispatcher would.
+
+    Anchor placement: each APBA is targeted at (Cα coord + 0.3 nm
+    radial-outward from protein COM). The outward nudge parks APBA in
+    the polymer matrix instead of clashing with the sequon side chain,
+    so it survives Triton lysis and is oriented to catch the returning
+    glycan diol on rebinding.
+
+    Parameters
+    ----------
+    cavity_gro, cavity_top : Path
+        The pre-Triton cavity system (silane matrix + CD63 template +
+        solvent). APBA will be inserted into this system.
+    phase1_entry : dict
+        `phase1_results[target]` — carries `ecl2_sequence`, sequon
+        residue indices (`n_glycan_positions`), and related properties.
+    out_dir : Path
+        Working directory for grafted-cavity outputs.
+    target : str
+        Target protein name (only CD63 currently has n_glycan > 0).
+    n_glycan : int
+        Number of ECL2 N-glycan sequons (dictates the number of APBA
+        molecules to graft).
+
+    Returns
+    -------
+    dict
+        On successful graft:
+            {"cavity_gro": <grafted.gro>, "cavity_top": <grafted.top>,
+             "grafted_gro": ..., "grafted_top": ...,
+             "n_apba_grafted": int, "anchor_residues": [...],
+             "anchor_coords_nm": [...], "apba_itp": Path}
+        On skip / failure (with inputs unchanged):
+            {"cavity_gro": <input>, "cavity_top": <input>,
+             "n_apba_grafted": 0, "stub": True, "note"|"error": <str>}
+    """
+    import MDAnalysis as mda
+
+    # Discover sequon residues: prefer `n_glycan_positions` (config's target
+    # metadata, forwarded through phase1_results[target] via `**cfg`); fall
+    # back to CD63 canonical if the target is CD63 but the field is missing.
+    sequon_residues = list(phase1_entry.get("n_glycan_positions") or [])
+    if not sequon_residues and target.upper() == "CD63":
+        sequon_residues = [130, 150, 172]
+    if not sequon_residues:
+        logger.warning(
+            "  _graft_apba_pre_triton: no glycan sequons known for "
+            "target=%s (n_glycan=%d) — skipping APBA graft. Add "
+            "`n_glycan_positions` in the target's config to enable "
+            "pre-Triton grafting.", target, n_glycan)
+        return {"cavity_gro": cavity_gro, "cavity_top": cavity_top,
+                "n_apba_grafted": 0, "stub": True,
+                "note": "no sequon residues known for target"}
+
+    try:
+        u = mda.Universe(str(cavity_gro))
+    except Exception as e:
+        logger.warning(
+            "  _graft_apba_pre_triton: cannot open %s (%s) — "
+            "skipping graft", cavity_gro, e)
+        return {"cavity_gro": cavity_gro, "cavity_top": cavity_top,
+                "n_apba_grafted": 0, "stub": True, "error": str(e)}
+
+    sel_expr = ("protein and resid "
+                + " ".join(str(r) for r in sequon_residues)
+                + " and name CA")
+    anchor_atoms = u.select_atoms(sel_expr)
+    if len(anchor_atoms) == 0:
+        logger.warning(
+            "  _graft_apba_pre_triton: sequon selection empty (%s) "
+            "— the protein may already be stripped from this frame. "
+            "Skipping graft.", sel_expr)
+        return {"cavity_gro": cavity_gro, "cavity_top": cavity_top,
+                "n_apba_grafted": 0, "stub": True,
+                "note": "empty sequon selection"}
+
+    # Convert Cα coords (Å) to nm and nudge 0.3 nm radially outward from
+    # protein COM so APBA parks IN the polymer matrix rather than clashing
+    # with the sequon side chain.
+    prot_com_A = u.select_atoms("protein").center_of_mass()
+    anchor_coords = []
+    for atom in anchor_atoms:
+        pos_A = np.asarray(atom.position, dtype=float)
+        radial = pos_A - prot_com_A
+        norm = float(np.linalg.norm(radial))
+        if norm > 1e-6:
+            radial = radial * (3.0 / norm)   # +3.0 Å = +0.3 nm outward
+        else:
+            radial = np.array([3.0, 0.0, 0.0], dtype=float)
+        placed = pos_A + radial
+        anchor_coords.append(
+            (float(placed[0]) / 10.0,
+             float(placed[1]) / 10.0,
+             float(placed[2]) / 10.0))
+
+    logger.info(
+        "  APBA grafting at %d sequon anchor(s): residues=%s",
+        len(anchor_coords), sequon_residues)
+
+    result = _graft_apba_at_anchors(
+        cavity_gro=cavity_gro, cavity_top=cavity_top,
+        anchor_coords=anchor_coords, apba_count=len(anchor_coords),
+        out_dir=out_dir, seed=42)
+
+    if "error" in result:
+        logger.warning(
+            "  _graft_apba_pre_triton: graft helper reported error "
+            "(%s) — returning original cavity so Triton can still run.",
+            result["error"])
+        return {"cavity_gro": cavity_gro, "cavity_top": cavity_top,
+                "n_apba_grafted": 0, "stub": True,
+                "error": result["error"]}
+
+    logger.info(
+        "  Pre-Triton APBA graft: %d molecule(s) at sequons %s → %s",
+        result["n_apba_placed"], sequon_residues, result["grafted_gro"])
+    return {
+        "cavity_gro":       result["cavity_gro"],
+        "cavity_top":       result["cavity_top"],
+        "grafted_gro":      result["grafted_gro"],
+        "grafted_top":      result["grafted_top"],
+        "n_apba_grafted":   result["n_apba_placed"],
+        "anchor_residues":  sequon_residues,
+        "anchor_coords_nm": result["anchor_coords_used"],
+        "apba_itp":         result["apba_itp"],
+    }
+
+
 # ── Dual-Imprinting VIP ──────────────────────────────────────
 
 def _run_dual_imprinting_vip(target, target_names, snapshot_results,
@@ -2653,13 +3244,22 @@ def _run_dual_imprinting_vip(target, target_names, snapshot_results,
     """
     import MDAnalysis as mda
     from .config import (REBINDING_MD_NS, REBINDING_RMSD_THRESHOLD,
-                         REBINDING_RESTRAINT_K, resolve_path, ALL_MONOMERS)
+                         resolve_path, ALL_MONOMERS)
     from .utils_structure import smiles_to_mol2
     from .utils_gromacs import parameterize_monomer
 
     logger.info(f"    Dual-imprinting VIP: physically adding {n_glycan} APBA to cavity")
 
-    # 1. Parameterize APBA
+    # 1. Validate APBA and get its COM in nm.
+    #
+    # Historically this block also parameterised APBA once outside the loop
+    # so the placement code (still inline back then) could reference the
+    # generated .itp/.gro. Placement + topology-merge now lives in
+    # `_graft_apba_at_anchors`, which parameterises APBA itself per call,
+    # so all we need here is the COM — used to reproduce the original
+    # fallback placement geometry (APBA rigid body added to
+    # prot_com + offset without recentring on the anchor) when Phase-2
+    # docking did not leave a docked pose we can prefer.
     apba_info = ALL_MONOMERS.get("APBA")
     if not apba_info:
         logger.error("    APBA not found in monomer library")
@@ -2680,6 +3280,19 @@ def _run_dual_imprinting_vip(target, target_names, snapshot_results,
         logger.error(f"    APBA parameterization failed: {e}")
         return {"error": str(e)}
 
+    # APBA COM in nm — reused across snapshots to preserve the exact
+    # fallback-branch placement of the pre-refactor inline block (which
+    # never recentred APBA on the anchor before translating).
+    try:
+        _u_apba = mda.Universe(str(apba_gro))
+        _apba_com_A = _u_apba.select_atoms("all").center_of_mass()
+        apba_com_nm = (float(_apba_com_A[0]) / 10.0,
+                       float(_apba_com_A[1]) / 10.0,
+                       float(_apba_com_A[2]) / 10.0)
+    except Exception as e:
+        logger.error(f"    APBA COM lookup failed: {e}")
+        return {"error": f"apba_com_lookup: {e}"}
+
     dual_snapshot_results = []
 
     for i, snap in enumerate(snapshot_results):
@@ -2697,13 +3310,25 @@ def _run_dual_imprinting_vip(target, target_names, snapshot_results,
             logger.warning(f"    snap{i}: cavity files missing, skip")
             continue
 
-        # 2. Add APBA molecules to cavity GRO
+        # 2. Compute per-anchor placement coords (nm) for APBA, then delegate
+        # to `_graft_apba_at_anchors` for the actual parameterisation +
+        # coord splice + topology merge.
+        #
+        # CAVEAT — Step-7 dispatcher path: the "protein" selection below is
+        # EMPTY when this fallback runs in EV mode after Triton has already
+        # stripped CD63 (see comments at ~L1120). In that case both the
+        # docked-pose and prot_com branches degrade (docked_offsets still
+        # works if Phase 2 gave a pose; the prot_com fallback would emit
+        # NaNs). Pre-Triton grafting via `_graft_apba_pre_triton` is the
+        # primary EV-mode APBA path; this dispatcher is best-effort for
+        # weak-SI recovery on non-EV runs.
         try:
             u_cav = mda.Universe(str(cavity_gro))
             protein = u_cav.select_atoms("protein")
-            prot_com = protein.center_of_mass()
+            prot_com_A = (protein.center_of_mass()
+                           if len(protein) > 0 else np.zeros(3, dtype=float))
 
-            # Find APBA docked pose from Phase 2 (actual binding position)
+            # Prefer the Phase-2 docked APBA pose (actual binding site).
             from .config import get_output_path
             apba_docked_pdbqt = None
             p2_base = get_output_path("phase2")
@@ -2713,206 +3338,68 @@ def _run_dual_imprinting_vip(target, target_names, snapshot_results,
                     apba_docked_pdbqt = best
                     break
 
-            # Get APBA coordinates: prefer docked pose, fallback to GRO + COM offset
-            cav_lines = Path(cavity_gro).read_text().strip().split("\n")
-            cav_natoms = int(cav_lines[1].strip())
-            box_line = cav_lines[-1]
-
-            apba_gro_text = Path(apba_gro).read_text().strip().split("\n")
-            apba_natoms = int(apba_gro_text[1].strip())
-            apba_coord_lines = apba_gro_text[2:2 + apba_natoms]
-
+            anchor_coords = None
             if apba_docked_pdbqt:
-                # Use Phase 2 docked position — APBA at its actual binding site
                 logger.info(f"    Using Phase 2 docked APBA pose: {apba_docked_pdbqt}")
                 try:
                     u_docked = mda.Universe(str(apba_docked_pdbqt))
-                    docked_com = u_docked.select_atoms("all").center_of_mass()
-                    # Docked coords are in epitope frame; need to align with cavity
-                    # APBA GRO COM → shift to docked COM position
-                    u_apba = mda.Universe(str(apba_gro))
-                    apba_com = u_apba.select_atoms("all").center_of_mass()
-                    # Shift in nm (GRO) — docked is in Å (PDB)
-                    shift_x = docked_com[0] / 10.0 - apba_com[0] / 10.0
-                    shift_y = docked_com[1] / 10.0 - apba_com[1] / 10.0
-                    shift_z = docked_com[2] / 10.0 - apba_com[2] / 10.0
-                    docked_offsets = [(shift_x, shift_y, shift_z)]
-                    # For additional copies, add small perturbations (±0.5nm)
+                    docked_com_A = u_docked.select_atoms("all").center_of_mass()
+                    docked_com_nm = (float(docked_com_A[0]) / 10.0,
+                                     float(docked_com_A[1]) / 10.0,
+                                     float(docked_com_A[2]) / 10.0)
+                    # Original semantics: shift = docked_com/10 - apba_com/10
+                    # → APBA COM lands at docked_com/10. The helper places
+                    # APBA COM at `anchor`, so anchor = docked_com_nm.
+                    anchor_coords = [docked_com_nm]
                     for di in range(1, n_glycan):
                         perturb = [(0.5, 0, 0), (-0.5, 0, 0), (0, 0.5, 0),
                                    (0, -0.5, 0)][di - 1] if di < 5 else (0, 0, 0)
-                        docked_offsets.append((
-                            shift_x + perturb[0],
-                            shift_y + perturb[1],
-                            shift_z + perturb[2]))
+                        anchor_coords.append((
+                            docked_com_nm[0] + perturb[0],
+                            docked_com_nm[1] + perturb[1],
+                            docked_com_nm[2] + perturb[2]))
                 except Exception as e:
                     logger.warning(f"    Docked pose parsing failed: {e}, using COM offset")
-                    docked_offsets = None
-            else:
-                docked_offsets = None
+                    anchor_coords = None
 
-            if not docked_offsets:
-                # Fallback: place near protein COM
+            if not anchor_coords:
+                # Fallback: place near protein COM. Original semantics were
+                # shift = prot_com/10 + offset (no APBA-COM subtraction), so
+                # APBA COM landed at apba_com + prot_com/10 + offset. Match
+                # that exactly by pre-adding apba_com_nm to the anchor.
                 logger.info(f"    No docked pose found, placing APBA near protein COM")
-                docked_offsets = []
+                anchor_coords = []
                 offsets_nm = [(1.5, 0, 0), (-1.5, 0, 0), (0, 1.5, 0)]
                 for ci in range(n_glycan):
                     ox, oy, oz = offsets_nm[ci % len(offsets_nm)]
-                    docked_offsets.append((
-                        prot_com[0] / 10.0 + ox,
-                        prot_com[1] / 10.0 + oy,
-                        prot_com[2] / 10.0 + oz))
+                    anchor_coords.append((
+                        float(prot_com_A[0]) / 10.0 + ox + apba_com_nm[0],
+                        float(prot_com_A[1]) / 10.0 + oy + apba_com_nm[1],
+                        float(prot_com_A[2]) / 10.0 + oz + apba_com_nm[2]))
 
-            new_atom_lines = []
-            for copy_i in range(min(n_glycan, len(docked_offsets))):
-                sx, sy, sz = docked_offsets[copy_i]
-                for line in apba_coord_lines:
-                    if len(line) >= 44:
-                        x = float(line[20:28]) + sx
-                        y = float(line[28:36]) + sy
-                        z = float(line[36:44]) + sz
-                        res_num = cav_natoms // max(apba_natoms, 1) + copy_i + 100
-                        new_line = f"{res_num:5d}APBA {line[10:15]}{cav_natoms + len(new_atom_lines) + 1:5d}{x:8.3f}{y:8.3f}{z:8.3f}"
-                        new_atom_lines.append(new_line)
+            graft_res = _graft_apba_at_anchors(
+                cavity_gro=cavity_gro, cavity_top=cavity_top,
+                anchor_coords=anchor_coords,
+                apba_count=n_glycan,
+                out_dir=snap_dir, seed=42)
 
-            total_atoms = cav_natoms + len(new_atom_lines)
-            dual_gro = snap_dir / "dual_cavity.gro"
+            if "error" in graft_res:
+                raise RuntimeError(f"graft helper: {graft_res['error']}")
 
-            # Insert APBA before SOL (topology order must match GRO order)
-            atom_lines = cav_lines[2:2 + cav_natoms]
-            sol_start = None
-            for li, line in enumerate(atom_lines):
-                if len(line) >= 10 and "SOL" in line[5:10]:
-                    sol_start = li
-                    break
-
-            merged = [cav_lines[0]]
-            merged.append(f" {total_atoms}")
-            if sol_start is not None:
-                merged.extend(atom_lines[:sol_start])  # protein + monomers
-                merged.extend(new_atom_lines)            # APBA
-                merged.extend(atom_lines[sol_start:])    # SOL + ions
-            else:
-                merged.extend(atom_lines)
-                merged.extend(new_atom_lines)
-            merged.append(box_line)
-            dual_gro.write_text("\n".join(merged) + "\n")
-
-            # 3. Update topology: add APBA ITP + molecules
-            shutil.copy2(str(apba_itp), str(snap_dir / Path(apba_itp).name))
-            # Copy all existing ITPs
-            for itp in orig_snap_dir.glob("*.itp"):
-                dst = snap_dir / itp.name
-                if not dst.exists():
-                    shutil.copy2(str(itp), str(dst))
+            # Copy sibling ITPs from p4_md_dir (helper already handled
+            # orig_snap_dir's ITPs via `cavity_gro.parent.glob`).
             if p4_md_dir:
                 for itp in Path(p4_md_dir).glob("*.itp"):
                     dst = snap_dir / itp.name
                     if not dst.exists():
                         shutil.copy2(str(itp), str(dst))
 
-            top_text = Path(cavity_top).read_text()
-            apba_itp_name = Path(apba_itp).name
-
-            # Add APBA include after forcefield
-            if f'#include "{apba_itp_name}"' not in top_text:
-                top_text = top_text.replace(
-                    "[ moleculetype ]",
-                    f'#include "{apba_itp_name}"\n\n[ moleculetype ]', 1)
-
-            # Add APBA to [ molecules ] before SOL
-            n_apba_added = min(n_glycan, len(docked_offsets))
-            top_text = top_text.replace(
-                "SOL", f"APBA     {n_apba_added}\nSOL", 1)
-
-            # Remove [ atomtypes ] from APBA ITP (already in main topology)
-            apba_itp_path = snap_dir / apba_itp_name
-            apba_itp_text = apba_itp_path.read_text()
-            cleaned_lines = []
-            skip_atomtypes = False
-            for line in apba_itp_text.split("\n"):
-                if "[ atomtypes ]" in line:
-                    skip_atomtypes = True
-                    continue
-                if skip_atomtypes:
-                    if line.strip().startswith("[") and "atomtypes" not in line:
-                        skip_atomtypes = False
-                    else:
-                        continue
-                cleaned_lines.append(line)
-            apba_itp_text = "\n".join(cleaned_lines)
-            apba_itp_path.write_text(apba_itp_text)
-
-            # Also add APBA atomtypes to main topology's [ atomtypes ] section
-            # Extract from original ITP
-            orig_itp_text = Path(apba_itp).read_text()
-            apba_atomtypes = ""
-            in_at = False
-            for line in orig_itp_text.split("\n"):
-                if "[ atomtypes ]" in line:
-                    in_at = True
-                    continue
-                if in_at:
-                    if line.strip().startswith("[") and "atomtypes" not in line:
-                        break
-                    if line.strip() and not line.startswith(";"):
-                        apba_atomtypes += line + "\n"
-
-            if apba_atomtypes and "[ atomtypes ]" in top_text:
-                # Insert APBA atomtypes INSIDE the [ atomtypes ] block, right after
-                # the existing atomtype entries and BEFORE any #include (which pull
-                # in moleculetypes). Inserting before the next "[" section would
-                # place them after the silane #includes + APBA #include → GROMACS
-                # would parse APBA's [ atoms ] (using n3) before n3 is defined.
-                lines = top_text.split("\n")
-                out_lines = []
-                inserted = False
-                in_at = False
-                for ln in lines:
-                    if ln.strip().startswith("[ atomtypes ]"):
-                        in_at = True
-                        out_lines.append(ln)
-                        continue
-                    if in_at and not inserted:
-                        # End of atomtype entries: blank line, #include, or new [ section
-                        stripped = ln.strip()
-                        if (stripped == "" or stripped.startswith("#")
-                                or stripped.startswith("[")):
-                            out_lines.append(apba_atomtypes.rstrip("\n"))
-                            inserted = True
-                            in_at = False
-                    out_lines.append(ln)
-                if not inserted:  # fallback: append at very end of atomtypes header
-                    out_lines.append(apba_atomtypes)
-                top_text = "\n".join(out_lines)
-
-            # Add position restraint to APBA ITP
-            if "#ifdef POSRES_MONOMER" not in apba_itp_text:
-                # Count heavy atoms
-                heavy_atoms = []
-                in_atoms = False
-                for line in apba_itp_text.split("\n"):
-                    if "[ atoms ]" in line:
-                        in_atoms = True
-                        continue
-                    if in_atoms and line.strip().startswith("["):
-                        break
-                    if in_atoms and line.strip() and not line.startswith(";"):
-                        parts = line.split()
-                        if len(parts) >= 2 and not parts[1].startswith("h"):
-                            heavy_atoms.append(parts[0])
-                posre = "\n#ifdef POSRES_MONOMER\n[ position_restraints ]\n"
-                posre += "; ai  funct  fcx    fcy    fcz\n"
-                for ai in heavy_atoms:
-                    posre += f"  {ai}    1  {REBINDING_RESTRAINT_K}  {REBINDING_RESTRAINT_K}  {REBINDING_RESTRAINT_K}\n"
-                posre += "#endif\n"
-                apba_itp_path.write_text(apba_itp_text.rstrip() + "\n" + posre)
-
-            dual_top = snap_dir / "topol.top"
-            dual_top.write_text(top_text)
+            dual_gro = graft_res["grafted_gro"]
+            dual_top = graft_res["grafted_top"]
+            n_apba_added = graft_res["n_apba_placed"]
 
             logger.info(f"    snap{i}: added {n_apba_added} APBA to cavity "
-                        f"({total_atoms} atoms)")
+                        f"→ {dual_gro}")
 
         except Exception as e:
             logger.error(f"    snap{i}: APBA insertion failed: {e}")

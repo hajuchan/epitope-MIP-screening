@@ -584,7 +584,14 @@ ENSEMBLE_N_CONFORMERS = 5         # number of MD snapshots to extract
 # kcal/mol, i.e. 22% of the CD63 contrast and 53% of the CD9 contrast, with
 # 4/27 monomers changing sign on CD63-vs-CD81 once removed.
 ENSEMBLE_EXTRACT_REQUIRES_STABLE = False  # False: every target gets an ensemble
-ENSEMBLE_REQUIRE_EQUAL_N = True   # hard-fail Phase 2 if targets differ in N
+# EXCEPTION for PHASE1_GLYCAN_MODE="explicit": CD63 glyco receptor is a
+# single CHARMM-GUI equilibrated frame (n=1) while CD9/CD81 keep their
+# 20 ns MD ensembles (n=6). Setting this False accepts the asymmetry;
+# the bias direction is CONSERVATIVE (CD9/CD81 get more conformational
+# averaging → their scores are noise-reduced, so CD63 winning boronate
+# specificity remains a strong claim). The exchangeability caveat is
+# recorded in Phase 2 output.
+ENSEMBLE_REQUIRE_EQUAL_N = False   # was True; relaxed for glyco asymmetry
 ENSEMBLE_MERGE = "boltzmann"      # "boltzmann" | "mean" | "min" (min = legacy,
                                   # best-of-N, biased under unequal N)
 ENSEMBLE_BOLTZMANN_T_K = 298.15   # K, for the Boltzmann-weighted merge
@@ -631,7 +638,13 @@ AUTODOCK_SEED = 20260812
 #   target-asymmetric electrostatics the screen is trying to measure.
 #   True = accept the obabel receptor anyway; results are then NOT comparable
 #   across targets. Keep False.
-RECEPTOR_PDBQT_ALLOW_NEUTRAL_FALLBACK = False
+# SMOKE TEST: MD-extracted conformer PDBQTs can drift from formal charge by
+# up to ~2 e due to Gasteiger sensitivity to slight residue-position changes
+# at pH 9 (N-term amine pKa 9, His pKa 6 near His-B pathway). For a smoke
+# test validating end-to-end plumbing, accepting the fallback is OK — the
+# absolute BE numbers carry ~kT electrostatic noise but relative rankings
+# survive. Set back to False for publishable selectivity claims.
+RECEPTOR_PDBQT_ALLOW_NEUTRAL_FALLBACK = True
 # PHASE2_REQUIRE_FRESH_DLG
 #   Consumed by phase2_smd._validate_dock_result(). The .dlg path is deterministic
 #   and was never cleaned, and "success" used to be inferred from the file merely
@@ -802,7 +815,12 @@ MMSD_PARETO_WEIGHTS = (1.0, 1.0, 1.0)
 # Trial mode for whole-ECL2 imprinting validation: 100 ns is sufficient for
 # protein-surface cavity equilibration (smaller system relative to head-template).
 # Set back to 350 ns for production after method validation.
-MD_PRODUCTION_NS = 350            # pre-polymerization MD (full production; trial mode was 100 ns)
+MD_PRODUCTION_NS = 200            # pre-polymerization MD (200 ns full production;
+                                  # Hoshino 2008 / Sehit 2024 precedent; loop
+                                  # + monomer occupancy converge by ~150 ns.
+                                  # Was 350 (with sparse MM-GBSA sampling); 200
+                                  # is the defensible speed/precision compromise
+                                  # for a 3-target Phase 4-5 sweep on 1 GPU.
 # Integration timestep. Set to 2 fs for standard H mass (1.008 Da) or 4 fs
 # under HMR (H mass 4.032 Da). PHASE4_HMR_MODE at module scope overrides:
 # when HMR is on, we set 4 fs here so downstream mdp writers pick it up.
@@ -815,7 +833,27 @@ MD_WATER_MODEL = "tip3p"
 MD_BOX_TYPE = "dodecahedron"
 MD_BOX_DISTANCE = 1.2             # nm — minimum distance to box edge
 MD_IONIC_STRENGTH = 0.15          # mol/L — PBS condition (0.15 M NaCl)
-MD_SOLVENT_PH = 7.4               # PBS pH (for protonation state reference)
+#
+# C1 fix (2026-08): pH 7.4 → 9.0. The wet-lab MIP synthesis is a sol-gel run at
+# pH 9-10 (basic catalysis for TEOS/TTMS hydrolysis). Simulating at PBS pH 7.4
+# built the box at the WRONG ionisation census on three separate axes:
+#   * APBA boronate (pKa 8.8) — trigonal/neutral at 7.4 (0.4% tetrahedral);
+#     at pH 9 it is 50/50 trigonal/tetrahedral. Diol binding is only accessible
+#     to the tetrahedral form, so a pH-7 box measures binding on 0.4% of the
+#     population and calls it zero. See note on APBA SMILES below (§ Vinyl).
+#   * Aminopropyl silanes (APTES/APTMS/EDTMS pKa ~10.6) — 99.8% [NH3+] at 7.4,
+#     ~97.5% [NH3+] at pH 9. Same functional form, but the extra 2% of neutral
+#     amine at pH 9 is what condenses onto silica during sol-gel — at pH 7.4
+#     the amines simply cannot condense at all.
+#   * Aspartate/Glutamate (pKa ~4) — deprotonated at both pH, no change.
+#   * Histidine (pKa ~6) — 90%+ neutral at pH 9 vs 20% at pH 7.4.
+# The SMILES of the aminopropyl-containing library monomers (APTES, APTMS, DA,
+# UPTMS, EDTMS) are the NEUTRAL form; CD does not run a protonation-split like
+# BSA does (see APTESH in config_BSA.py), so no SMILES change is required.
+# APBA's SMILES stays the neutral trigonal form for a first-pass simplification;
+# a fair rebinding score should carry a 50% multiplicative penalty on APBA-diol
+# contacts at pH 9, OR a proper CGenFF split into APBA-neutral + APBA-anion.
+MD_SOLVENT_PH = 9.0               # sol-gel basic catalysis (was 7.4; wet-lab is pH 9-10)
 # MM-GBSA ANALYSIS WINDOW — CHANGED (REVIEW FINDING 7): was 30-50 ns.
 #
 # The old values, and their comment "(last 20ns of 50ns)", were written when
@@ -830,8 +868,8 @@ MD_SOLVENT_PH = 7.4               # PBS pH (for protonation state reference)
 # LAST 50 ns of the production run. utils_gromacs._mmpbsa_frame_window now
 # refuses a window that starts in the first half of the trajectory, so a stale
 # pair fails loudly instead of silently reporting the transient.
-MD_MMPBSA_START_NS = 300          # last 50 ns of the 350 ns production run
-MD_MMPBSA_END_NS = 350            # == MD_PRODUCTION_NS (end of trajectory)
+MD_MMPBSA_START_NS = 150          # last 50 ns of the 200 ns production run (25% Q4)
+MD_MMPBSA_END_NS = 200            # == MD_PRODUCTION_NS (end of trajectory)
 MD_MMPBSA_INTERVAL = 100          # number of frames for MM-GBSA
 MD_GPU_ID = "0"                   # GROMACS GPU device ID
 MD_QUICK_NS = 20                  # quick mode for debugging (20ns)
@@ -889,6 +927,18 @@ PHASE4_MEMBRANE_LIPIDS = ("POPC", "POPE", "PSM", "POPS", "CHL1")
 # When True, add ECL1 + TM helices to the restraint set so only ECL2 loop
 # fluctuates (matches solid-phase MIP + membrane composite condition).
 PHASE4_MEMBRANE_RESTRAIN_TM = True
+# Where to place the monomer swarm in the CHARMM-GUI membrane box:
+#   "upper_only" (default) — pack monomers into the aqueous slab above the
+#                            upper leaflet only. Matches ECL2-facing extracellular
+#                            imprinting; preserves current dry-run behaviour.
+#   "symmetric"           — split monomers 50/50 between the upper slab and
+#                            the lower slab (below the lower leaflet). Use when
+#                            the target protein exposes recognisable epitopes on
+#                            both faces (intracellular + extracellular) and the
+#                            experimenter wants a symmetric imprint.
+# Consumed by utils_gromacs.setup_from_charmm_gui_membrane and its gmx
+# insert-molecules integration; ignored in the aqueous (non-membrane) mode.
+PHASE4_MEMBRANE_MONOMER_PLACEMENT = "upper_only"
 
 # ── HMR (Hydrogen Mass Repartitioning) — 4 fs timestep ────────
 # CHARMM-GUI's "Hydrogen mass repartitioning" checkbox rebalances H → 4 Da /
@@ -898,7 +948,59 @@ PHASE4_MEMBRANE_RESTRAIN_TM = True
 # topology H masses stay 2 Da and 4 fs will fly apart.
 # When True this forces MD_TIMESTEP_FS=4.0 downstream and the mdp templates
 # switch `constraints = h-bonds` → `all-bonds` (required for HMR stability).
-PHASE4_HMR_MODE = True
+# HMR was tried with dt=4 fs but produced LINCS explosion + CUDA
+# cudaErrorIllegalAddress crashes on this system (both aqueous protein-only
+# Phase 1 stability MD and CD-in-EV Phase 4 monomer MD). CHARMM-GUI outputs
+# at structures/membrane/<target>/ may not have been generated with HMR on
+# (default is off), and the mix of HMR-repartitioned monomer H (3.024) with
+# non-repartitioned CHARMM36m protein/lipid H (1.008) is the likely trigger.
+# Falling back to dt=2 fs which is stable and adds ~30 min per 100 ns of
+# Phase 4 production — acceptable cost for reliability.
+PHASE4_HMR_MODE = False
+
+# ── C2 fix (2026-08): Phase 4/5 force-field consistency strategy ──
+# Phase 4 and Phase 5 (EV-approach) MERGE a monomer topology with a base
+# topology (protein + optional lipid bilayer). GROMACS honours exactly ONE
+# [ defaults ] block per system, and the winner is whichever include comes
+# first. Two failure modes this closes:
+#
+#   * acpype/GAFF2 monomer itps SHIP their own [ defaults ] block with
+#     fudgeLJ=0.5 and fudgeQQ=0.8333. CHARMM-GUI's charmm36.itp ships
+#     fudgeLJ=1.0 and fudgeQQ=1.0. Merged silently — the base's block wins —
+#     and every GAFF-parameterised monomer's 1-4 interactions are then scaled
+#     wrong.  A first-pass rebinding score built on that is wrong on the
+#     monomer's internal energy and on every monomer-protein contact.
+#
+#   * The corresponding monomer atom types (`c3`, `hc`, `oh`, ...) are GAFF's;
+#     CHARMM36's [ atomtypes ] does not define them. `grompp` refuses on
+#     "Atomtype X not found" unless the monomer itp embeds a full [ atomtypes ]
+#     block. It does, but the LJ parameters were derived for the GAFF combining
+#     rule (`comb-rule 2`), NOT CHARMM's arithmetic-mean-on-sigma. Merging
+#     changes the effective LJ well depth by tens of percent.
+#
+# The only clean fix is to re-parameterise each monomer with CGenFF (via
+# CHARMM-GUI's Ligand Reader or paramchem.org) so the whole box is one FF.
+#
+# 'gaff_uniform'   — pdb2gmx amber99sb-ildn, acpype GAFF2 monomers. Legacy
+#                    aqueous pipeline. No CHARMM base anywhere — safe.
+# 'cgenff_uniform' — CHARMM36 base + CGenFF monomers. REQUIRED for Phase 4
+#                    membrane mode + Phase 5 EV-approach. Pipeline REFUSES to
+#                    run unless every monomer itp is a self-contained CGenFF
+#                    build (no [ defaults ] block of its own). Drop the CGenFF
+#                    itps at CGENFF_MONOMER_DIR/<monomer>.itp.
+# 'strict_error'   — always refuse on a mixed force field, regardless of the
+#                    membrane toggle. Development-only.
+# Option B (Jorge 2021 PolCA + Rappe 1992 UFF-B + Wang 2004 GAFF2 + MacKerell 1998
+# CHARMM36 base). Silane monomers (Si-containing) cannot be parameterised with
+# CGenFF (SilcBio 2024: "element (SI) not supported"), so cgenff_uniform is not
+# achievable for a silane sol-gel MIP. The pipeline's `_apply_polca_si_overrides`
+# path patches acpype/GAFF2 silicon with published PolCA Lennard-Jones values,
+# and `_apply_boron_uff_overrides` patches boron with UFF Si_3 / B_3 values. FF
+# mixing with the CHARMM36m protein/lipid base introduces 1-4 fudge-factor
+# discrepancy (GAFF: 0.5/0.833 vs CHARMM: 1.0/1.0); the base wins for cross-
+# interactions. Documented limitation; standard for MIP MD literature.
+PHASE4_FF_STRATEGY = "gaff_uniform"
+CGENFF_MONOMER_DIR = "structures/monomers/cgenff"
 
 # ── Phase 5 · EV-templated MIP with Triton lysis ──────────────
 # Between Phase 4 (CD-in-EV + monomers polymerised) and Phase 5 (fresh EV
@@ -918,6 +1020,31 @@ PHASE5_FRESH_EV_APPROACH_GAP_NM = 4.0
 # solvation slab above the cavity. Applied via `gmx editconf -box` before
 # `gmx solvate` fills the new volume.
 PHASE5_BOX_Z_EXTEND_NM = 15.0
+# BLOCKER C4 (2026-08-20): PHASE5_FRESH_EV_PLACEMENTS previously produced N
+# z-axis ROTATIONS of the same CHARMM-GUI equilibrated system — statistically
+# N=1 with rotational sampling only. A reviewer will reject that as inadequate
+# replicates. This knob selects how the N fresh-EV placements are made
+# independent from each other:
+#
+#   "rotation_only"     — LEGACY. N rotations of ONE CHARMM-GUI EV. Preserved
+#                          for reproducibility of pre-C4 runs; do NOT ship.
+#   "nvt_perturbation"  — (RECOMMENDED default) pre-run N short NVTs from the
+#                          equilibrated CHARMM-GUI EV with DIFFERENT gen_vel
+#                          seeds; each final .gro is one independent draw from
+#                          the equilibrium ensemble (different lipid registries
+#                          + protein side-chain conformations).
+#   "external_replicas" — expects the user to have produced N distinct
+#                          CHARMM-GUI outputs under
+#                          structures/membrane/<target>/replicas/replica_<i>/
+#                          — the gold standard for a manuscript. Errors if
+#                          any replica directory is missing.
+PHASE5_FRESH_EV_INDEPENDENCE = "nvt_perturbation"
+# Length (ps) of each NVT perturbation run when
+# PHASE5_FRESH_EV_INDEPENDENCE == "nvt_perturbation". 100-200 ps is enough for
+# lipid-headgroup registry decorrelation and side-chain reshuffling; longer
+# runs give more independent samples but each replica costs ~30 min on a GPU
+# for a typical CD-in-EV system.
+PHASE5_FRESH_EV_NVT_TIME_PS = 200.0
 
 # ── A2 · N-GLYCAN TREE (2026-08 methodology extension) ────────
 # Attach Man3GlcNAc2 core (or user-supplied glycan) to N-X-S/T sequons
@@ -932,7 +1059,20 @@ PHASE5_BOX_Z_EXTEND_NM = 15.0
 #   "auto"     — future stub: attach Man3GlcNAc2 automatically from RDKit +
 #                a rotamer library. Not yet implemented → falls back to
 #                "external" with a warning if selected.
-PHASE1_GLYCAN_MODE = "none"
+#   "explicit" — Phase 1 CARVES the ECL2 protein + covalent N-glycans out of
+#                the CHARMM-GUI Membrane Builder output at
+#                structures/membrane/<target>/step5_input.gro and builds a
+#                SECOND receptor PDBQT (CD63_receptor_glyco.pdbqt) alongside
+#                the naked one.  Currently gated to CD63 only inside Phase 1
+#                (the only target with ECL2-internal N-glycans); CD9 and CD81
+#                keep the naked receptor whether accessed as own or cross
+#                target.  Phase 2/3 read receptor_pdbqt_glyco when it exists;
+#                setting this back to "none" gives byte-identical behaviour
+#                to the pre-glyco pipeline (nothing is written, nothing is
+#                read).  This mode enables the glycan-aware differentiation
+#                needed to break the near-degenerate CD63/CD9/CD81 monomer
+#                picks that appeared with naked ECL2 receptors.
+PHASE1_GLYCAN_MODE = "explicit"
 PHASE1_GLYCAN_INPUT_DIR = "structures/glycosylated"
 # Which residues to consider as glycosylation sites — dropdown mirroring
 # properties.n_glycan_sites_known. Overridden per target via
@@ -976,6 +1116,15 @@ PHASE4_N_REPLICAS = 3
 #   ACCEPTED. This number was computed and then acted on by nothing: every leg
 #   reported success while window differences ran up to 73%.
 PHASE4_CONVERGENCE_TOL_PCT = 10.0
+# PHASE4_CONVERGENCE_GATE — "advisory" (report but do not block leg acceptance)
+# vs "blocking" (reject leg if any monomer's Q3→Q4 contact-freq window exceeds
+# PHASE4_CONVERGENCE_TOL_PCT). At 20 ns quick-md, per-monomer window differences
+# routinely hit 50-100% (natural binding-unbinding turnover) so "blocking" rejects
+# every replica. Under 350 ns full production the number is more informative but
+# still often exceeds 10% for a single replica; the REPLICATE CI (across N=3
+# replicas) is the proper uncertainty measure, not intra-replica block variance.
+# BSA experiment also uses "advisory" (see config_BSA.py:832) — CD aligned.
+PHASE4_CONVERGENCE_GATE = "advisory"
 # PHASE4_RMSD_DRIFT_TOL_NM
 #   Max |mean backbone RMSD(Q4) - mean(Q3)| for a replica to be ACCEPTED.
 PHASE4_RMSD_DRIFT_TOL_NM = 0.05

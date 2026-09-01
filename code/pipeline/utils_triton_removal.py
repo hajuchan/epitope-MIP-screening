@@ -25,7 +25,12 @@ import subprocess
 from pathlib import Path
 
 from .utils_vesicle import (MEMBRANE_LIPID_RESNAMES, SOLVENT_RESNAMES,
-                              ION_RESNAMES_CHARMM, STANDARD_AMINO_ACIDS)
+                              ION_RESNAMES_CHARMM, STANDARD_AMINO_ACIDS,
+                              GLYCAN_RESNAMES_CHARMM)
+
+# .gro resname column is 5 chars wide, so match glycans by 5-char prefix
+# (e.g. "BGLCNA" in [ molecules ] appears as "BGLCN" in the .gro column).
+_GLYCAN_GRO_KEYS = frozenset(name[:5] for name in GLYCAN_RESNAMES_CHARMM)
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +50,13 @@ def _classify_gro_lines(gro_path: Path):
         if len(ln) < 10:
             keep.append(ln); continue
         resname = ln[5:10].strip()
+        # Glycans are covalently bonded to PROA in the CHARMM-GUI setup —
+        # dropping the protein without also dropping its glycan atoms leaves
+        # them in the .gro while the [ molecules ] block loses PROA, causing
+        # grompp to abort on a coordinate/topology atom-count mismatch.
         if (resname in MEMBRANE_LIPID_RESNAMES
-                or resname in STANDARD_AMINO_ACIDS):
+                or resname in STANDARD_AMINO_ACIDS
+                or resname in _GLYCAN_GRO_KEYS):
             removed.append(ln)
         else:
             # Everything else — monomers (functional + crosslinker), waters,
@@ -68,6 +78,94 @@ def _write_gro(out_path: Path, title: str, atoms: list, box: str):
             coord = ln[20:]         # x/y/z (+velocities if present)
             fh.write(f"{prefix}{i:5d}{coord}")
         fh.write(box)
+
+
+def _count_moleculetype_atoms(itp_path: Path) -> dict:
+    """Parse an .itp/.top and return {moleculetype_name: n_atoms_in_it}.
+
+    Reads sequentially, tracking the last `[ moleculetype ]` name and counting
+    non-comment/non-blank rows inside the following `[ atoms ]` section until
+    the next `[ … ]` directive.
+    """
+    counts: dict[str, int] = {}
+    try:
+        with open(itp_path) as fh:
+            lines = fh.readlines()
+    except OSError:
+        return counts
+    current_name: str | None = None
+    section: str | None = None
+    expect_moltype = False
+    for raw in lines:
+        s = raw.split(";", 1)[0].strip()
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            section = s.strip("[] ").strip().lower()
+            if section == "moleculetype":
+                expect_moltype = True
+            continue
+        if expect_moltype and section == "moleculetype":
+            tok = s.split()
+            if tok:
+                current_name = tok[0]
+                counts.setdefault(current_name, 0)
+                expect_moltype = False
+            continue
+        if section == "atoms" and current_name is not None:
+            # Each atom row starts with an integer atom-index.
+            tok = s.split()
+            if tok and tok[0].isdigit():
+                counts[current_name] += 1
+    return counts
+
+
+def _count_topol_atoms(top_path: Path, src_dir: Path) -> int:
+    """Sum moleculetype_size * count over the [ molecules ] block of `top_path`,
+    resolving moleculetype sizes from the .top itself and every `#include`-d
+    file (searched relative to `top_path.parent` and the original `src_dir`)."""
+    with open(top_path) as fh:
+        lines = fh.readlines()
+
+    search_roots = [top_path.parent]
+    if src_dir is not None:
+        search_roots.append(Path(src_dir))
+
+    # Build moleculetype -> n_atoms map from the top itself + any #includes.
+    mol_sizes: dict[str, int] = dict(_count_moleculetype_atoms(top_path))
+    for ln in lines:
+        s = ln.strip()
+        if not s.startswith("#include"):
+            continue
+        # e.g. #include "toppar/POPC.itp"
+        parts = s.split('"')
+        if len(parts) < 2:
+            continue
+        rel = parts[1]
+        for root in search_roots:
+            cand = root / rel
+            if cand.is_file():
+                for k, v in _count_moleculetype_atoms(cand).items():
+                    mol_sizes.setdefault(k, v)
+                break
+
+    # Sum the [ molecules ] section.
+    total = 0
+    in_molecules = False
+    for ln in lines:
+        s = ln.split(";", 1)[0].strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_molecules = (s.strip("[] ").strip().lower() == "molecules")
+            continue
+        if not in_molecules or not s:
+            continue
+        tok = s.split()
+        if len(tok) < 2 or not tok[-1].isdigit():
+            continue
+        name, count = tok[0], int(tok[-1])
+        size = mol_sizes.get(name, 0)
+        total += size * count
+    return total
 
 
 def _rewrite_topology(top_in: Path, top_out: Path,
@@ -169,10 +267,22 @@ def finalize_triton_removal(phase4_md_dir: Path = None,
     cavity_gro = cavity_out_dir / "cavity.gro"
     _write_gro(cavity_gro, parsed["title"], parsed["keep"], parsed["box"])
 
-    # Rewrite topology
+    # Rewrite topology — drop lipid AND glycan moleculetype entries in
+    # addition to PROA (glycans go with the protein; see _classify_gro_lines).
     cavity_top = cavity_out_dir / "cavity.top"
     _rewrite_topology(src_top, cavity_top,
-                       removed_resnames=set(MEMBRANE_LIPID_RESNAMES))
+                       removed_resnames=(set(MEMBRANE_LIPID_RESNAMES)
+                                          | set(GLYCAN_RESNAMES_CHARMM)))
+
+    # Post-write consistency check: .gro atom count must equal the sum of
+    # moleculetype * count in topol.top's [ molecules ] block, or grompp
+    # will fail with a coordinate/topology atom-count mismatch.
+    with open(cavity_gro) as _fh:
+        _gro_head = [next(_fh) for _ in range(2)]
+    n_atoms_in_gro = int(_gro_head[1].strip())
+    n_atoms_in_topol = _count_topol_atoms(cavity_top, phase4_md_dir)
+    assert n_atoms_in_gro == n_atoms_in_topol, (
+        f"MISMATCH: gro={n_atoms_in_gro} vs topol={n_atoms_in_topol}")
     # Copy toppar so #include paths resolve
     src_toppar = phase4_md_dir / "toppar"
     if src_toppar.is_dir():
@@ -219,12 +329,16 @@ def _run_relaxation(work_dir: Path, cavity_gro: Path, cavity_top: Path,
             [gmx, "mdrun", "-deffnm", str(em_tpr.with_suffix("")),
              "-c", str(em_gro), "-nt", "4"],
             check=True, capture_output=True, cwd=str(work_dir), timeout=600)
-        logger.info("  → cavity_em.gro written (relaxed cavity)")
-        return em_gro
-    except Exception as e:
-        logger.warning("Triton removal: cavity relaxation skipped (%s). "
-                        "Phase 5 will consume the un-relaxed cavity.gro directly.", e)
-        return None
+    except subprocess.CalledProcessError as e:
+        # Do not swallow gmx failures — the caller must decide whether to
+        # abort Phase 5. Attach stderr for post-mortem.
+        stderr_tail = (e.stderr or b"").decode("utf-8", "replace")[-2000:]
+        raise RuntimeError(
+            f"Triton relaxation EM failed (rc={e.returncode}): "
+            f"{' '.join(map(str, e.cmd))}\n{stderr_tail}"
+        ) from e
+    logger.info("  → cavity_em.gro written (relaxed cavity)")
+    return em_gro
 
 
 _MIN_EM_MDP = """; Minimal energy minimisation for Triton-lysed cavity.

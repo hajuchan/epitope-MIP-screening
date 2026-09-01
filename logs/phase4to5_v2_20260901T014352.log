@@ -1,0 +1,12 @@
+=== PHASE 4 CD9 START 2026-09-01T01:43:52Z ===
+[config] experiment=CD (default)  output=/home/chan/Research/Monomer_screening_in_Bio/results  unconsumed_keys=4
+[config] experiment=CD (default)  output=/home/chan/Research/Monomer_screening_in_Bio/results  unconsumed_keys=4
+--fresh: DELETING /home/chan/Research/Monomer_screening_in_Bio/results/phase4
+--fresh: deleted 1 director(ies)
+2026-09-01 10:43:51,861 [Pipeline] Targets: ['CD9']
+2026-09-01 10:43:51,861 [Pipeline] Output: /home/chan/Research/Monomer_screening_in_Bio/results
+2026-09-01 10:43:51,864 [Pipeline] --accept-input-drift: /home/chan/Research/Monomer_screening_in_Bio/results was built from DIFFERENT inputs:
+2026-09-01 10:43:51,864 [Pipeline] --accept-input-drift:     - config: added=['PHASE4_CONVERGENCE_GATE']
+2026-09-01 10:43:51,869 [Pipeline] Fresh run: phases [4] cleared, downstream [5, 6] also dropped from manifest (they depend on the re-run phases)
+2026-09-01 10:43:51,869 [Pipeline] phase(s) [4] consume Phase 1's results, but they are not usable: produced under a different input fingerprint.
+2026-09-01 10:43:51,869 [Pipeline] Run Phase 1 first (e.g. --phase all), or point --output-dir at the tree that has it.

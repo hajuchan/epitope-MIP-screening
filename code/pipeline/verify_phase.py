@@ -1098,6 +1098,88 @@ def verify_phase5(targets=None):
                 return int(np.median(vals)) if _NP_AVAILABLE \
                     else int(round(sum(vals) / len(vals)))
 
+            # ── C4 fix: per-replica breakdown for the reviewer ──
+            # An aggregate median hides the spread across the N genuinely
+            # independent fresh-EV placements. Report the full per-replica
+            # list, IQR, and a bootstrap 95% CI so the reader can see whether
+            # the median is stable or driven by one outlier.
+            def _bootstrap_ci95(values: list[int],
+                                n_boot: int = 2000) -> tuple | None:
+                if len(values) < 2 or not _NP_AVAILABLE:
+                    return None
+                try:
+                    arr = np.asarray(values, dtype=float)
+                    rng = np.random.default_rng(0xC4  ^ len(arr))
+                    idx = rng.integers(0, len(arr), size=(n_boot, len(arr)))
+                    medians = np.median(arr[idx], axis=1)
+                    lo = float(np.percentile(medians, 2.5))
+                    hi = float(np.percentile(medians, 97.5))
+                    return (round(lo, 2), round(hi, 2))
+                except Exception:
+                    return None
+
+            def _leg_breakdown(leg_key: str) -> dict:
+                """Return per-replica values + spread stats for one target's leg.
+
+                Prefers each snapshot's `n_persistent_all` (the raw N-placement
+                list produced by _aggregate_ev_placements). If a snapshot only
+                exposes the aggregated median, that median is used as a
+                single sample.
+                """
+                per_replica: list[int] = []
+                fresh_sources: list = []
+                statuses: list = []
+                for s in _ev_snaps:
+                    leg = s.get(leg_key)
+                    if not isinstance(leg, dict) or not leg.get("success"):
+                        continue
+                    all_vals = leg.get("n_persistent_all")
+                    if isinstance(all_vals, list) and all_vals:
+                        per_replica.extend(int(v) for v in all_vals)
+                    elif "n_persistent_residues" in leg:
+                        per_replica.append(int(leg["n_persistent_residues"]))
+                    # Provenance: which fresh-EV source (independent / legacy)
+                    for pp in (leg.get("per_placement") or []):
+                        if isinstance(pp, dict):
+                            src = pp.get("fresh_ev_source")
+                            if src is not None:
+                                fresh_sources.append(src)
+                            rec = pp.get("fresh_ev_replica")
+                            if isinstance(rec, dict) and rec.get("status"):
+                                statuses.append(rec["status"])
+                if not per_replica:
+                    return {"per_replica": [], "n": 0}
+                out = {
+                    "per_replica": [int(v) for v in per_replica],
+                    "n":           len(per_replica),
+                }
+                if _NP_AVAILABLE:
+                    arr = np.asarray(per_replica, dtype=float)
+                    out["median"] = float(np.median(arr))
+                    out["mean"]   = float(np.mean(arr))
+                    out["min"]    = float(np.min(arr))
+                    out["max"]    = float(np.max(arr))
+                    q25, q75 = np.percentile(arr, [25, 75])
+                    out["iqr"]    = [float(q25), float(q75)]
+                    ci = _bootstrap_ci95(per_replica)
+                    if ci is not None:
+                        out["bootstrap_ci_95"] = list(ci)
+                else:
+                    vals = sorted(per_replica)
+                    out["median"] = float(vals[len(vals) // 2])
+                    out["mean"]   = sum(vals) / len(vals)
+                    out["min"]    = float(vals[0])
+                    out["max"]    = float(vals[-1])
+                if fresh_sources:
+                    # A source of 'rotation_only(build_fresh_ev)' signals the
+                    # LEGACY N=1 path — surface it so the reviewer notices.
+                    out["fresh_ev_sources"] = sorted(set(fresh_sources))
+                    out["rotation_only_legacy"] = any(
+                        "rotation_only" in s for s in fresh_sources)
+                if statuses:
+                    out["fresh_ev_statuses"] = sorted(set(statuses))
+                return out
+
             own_n = _median_leg_np("rebind_own")
             cross_ns = {}
             for other in targets:
@@ -1106,11 +1188,32 @@ def verify_phase5(targets=None):
                 v = _median_leg_np(f"rebind_{other}")
                 if v is not None:
                     cross_ns[other] = v
+
+            # C4: full per-replica breakdown (own + each cross target).
+            own_breakdown = _leg_breakdown("rebind_own")
+            cross_breakdowns = {}
+            for other in targets:
+                if other == t:
+                    continue
+                b = _leg_breakdown(f"rebind_{other}")
+                if b.get("n"):
+                    cross_breakdowns[other] = b
+
             lvl3["protocol"] = "ev_approach"
             lvl3["own_persistent_contacts"] = own_n
             lvl3["cross_persistent_contacts"] = cross_ns
+            lvl3["own_breakdown"] = own_breakdown
+            lvl3["cross_breakdown"] = cross_breakdowns
             lvl3["n_placements_per_leg"] = (
                 _ev_snaps[0].get("rebind_own", {}).get("n_placements", 1))
+            # Loud flag if we detect the legacy rotation-only path so the
+            # reviewer knows N-effective is 1, not N-observed.
+            if own_breakdown.get("rotation_only_legacy"):
+                report["warnings"].append(
+                    f"{t}: EV-approach used LEGACY rotation_only fresh-EV "
+                    f"path — the {own_breakdown.get('n')} placements are "
+                    f"z-rotations of the same equilibrated system, not "
+                    f"independent structural draws. N-effective = 1.")
             if own_n is None or own_n <= 0:
                 report["issues"].append(
                     f"{t}: EV-approach — zero persistent contacts with own "

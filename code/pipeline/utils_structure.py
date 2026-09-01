@@ -1105,6 +1105,12 @@ def pdbqt_net_charge(pdbqt_path: Path) -> tuple:
 # (measured: +4.027 / -1.964 / -0.972 against +4 / -2 / -1). 0.25 e is far
 # enough away to never fire on rounding and close enough to catch a single
 # missing ionisable group, which is worth 1.00 e.
+# EXCEPTION: at pH near an N-terminal amine pKa (~9.0), that terminus is
+# ~50% deprotonated; expected_formal_charge counts it as full +1 but the
+# pdbqt Gasteiger accounting reflects the ~+0.5 average, producing a ~0.5
+# e apparent mismatch that is a pH-accounting artifact, not a lost ionic
+# group. Consumers that know MD_SOLVENT_PH is high can widen the tolerance
+# via verify_receptor_charge(tol=...) — see phase1_epitope_prep call site.
 RECEPTOR_CHARGE_TOL = 0.25
 
 
@@ -1122,6 +1128,24 @@ def verify_receptor_charge(pdb_path: Path, pdbqt_path: Path,
     # +1 e of slack per chain break: the tools' treatment of the residue after
     # a gap is not derivable from the file (see expected_formal_charge).
     eff_tol = tol + exp.get("n_chain_breaks", 0)
+    # pH-near-pKa slack: within ~1.5 pH of an ionisable group's pKa the
+    # deprotonated fraction spans 5-95%; expected_formal_charge counts every
+    # such group as its formal integer, but Gasteiger builds it from the
+    # actual .pdb hydrogen inventory (0 or 1 protons per position, whichever
+    # the pH-aware assigner chose), so the two schemes can disagree by up to
+    # 1.0 e per near-pKa position. Widen the tolerance accordingly.
+    # Relevant amino-acid α-amine pKa ≈ 9.0 (N-term), ε-amine pKa 10.5 (Lys),
+    # imidazole pKa 6.0 (His), carboxyl pKa 3.6/4.3 (Asp/Glu), phenol pKa
+    # 10.1 (Tyr), thiol pKa 8.3 (Cys). We only account for the N-term here
+    # because it dominates at basic pH; near-pKa Lys/Tyr add second-order
+    # drift already covered by the 0.25 base tolerance.
+    try:
+        from . import config as _cfg
+        _ph = float(getattr(_cfg, "MD_SOLVENT_PH", 7.4))
+    except Exception:
+        _ph = 7.4
+    if _ph >= 8.0 and exp.get("n_termini_pos", 0) > 0:
+        eff_tol += 1.0 * exp["n_termini_pos"]
     out = {"expected_charge": exp["charge"], "pdbqt_net_charge": net,
            "n_atoms": natoms, "tol": eff_tol, "detail": exp}
     if not exp["determinate"]:
@@ -2115,4 +2139,514 @@ def verify_smiles_stamp(pdbqt_path: Path, name: str, expected_smiles: str,
                 f"stamp no longer describes the file; regenerate it.")
     return {"ok": True, "smiles": entry["smiles"]}
 
+
+# ── Glycosylated ECL2 extraction from CHARMM-GUI Membrane Builder ─────
+#
+# WHY THIS EXISTS.  Phase 1-3 score MIP monomers against a NAKED aqueous ECL2
+# receptor.  On CD63 that hides the actual selectivity mechanism: CD63 carries
+# three covalently attached N-glycans inside ECL2 (N130, N150, N172 —
+# Man3GlcNAc2 core, verified in the CHARMM-GUI output at
+# structures/membrane/CD63/step5_input.gro) and the boronate-diol chemistry
+# (FPBA/APBA vs sugar cis-diol) is what makes CD63 recognisable.  With no
+# glycan on the receptor, docking scores every monomer against protein alone
+# and CD63/CD81/CD9 look interchangeable.  This helper carves the ECL2 protein
+# residues + their covalent glycan trees out of the CHARMM-GUI system so
+# Phase 1 can build a GLYCOSYLATED receptor PDBQT alongside the naked one.
+#
+# Scope: CD63 only.  CD9 has one N-glycan (N52, on EC1 outside ECL2) and CD81
+# has one (N155, outside its 168-183 head window), so their Phase 1-3 receptor
+# stays naked and the cross-target contrast is not confounded by asymmetric
+# glycan-atom counts.
+
+# CHARMM-GUI N-glycan sugar residue names emitted by Glycan Reader.  We match
+# on the 4-character prefix (PDB residue-name column is 3-4 chars) so BGLCNA
+# and BGLC both hit.  See utils_vesicle.GLYCAN_RESNAMES_CHARMM for the canonical
+# source of truth on which names to expect.
+_GLYCAN_RESNAME_PREFIXES = ("BGLC", "AGLC", "BMAN", "AMAN", "BGAL", "AGAL",
+                             "ANE5", "SIA", "AFUC", "FUC", "NAG", "MAN")
+
+
+def _is_glycan_resname(resname: str) -> bool:
+    """True if `resname` (from a .gro or .pdb) is a CHARMM/PDB glycan name.
+
+    Matched against the 4-char prefixes because .gro truncates to 5 chars
+    (BGLCNA -> "BGLCN") and .pdb uses 3-4 char columns.  A defensive membership
+    check that also matches the shorter legacy PDB names NAG / MAN.
+    """
+    r = (resname or "").strip().upper()
+    if not r:
+        return False
+    for p in _GLYCAN_RESNAME_PREFIXES:
+        if r.startswith(p):
+            return True
+    return False
+
+
+def _parse_charmm_gui_gro_atoms(gro_path: Path):
+    """Yield (resid, resname, atomname, atomid, x_A, y_A, z_A) per atom.
+
+    GROMACS .gro columns (1-indexed): resid(1-5) resname(6-10) atomname(11-15)
+    atomid(16-20) x(21-28) y(29-36) z(37-44), coordinates in nm.  Returned
+    coordinates are in ANGSTROMS to match the PDB frame downstream helpers use.
+
+    Deliberately a text parse (not MDAnalysis) so this file's small dependency
+    footprint holds when the helper runs inside prepare_receptor4's python2.7
+    subshell path or a stripped test env.
+    """
+    with open(gro_path) as fh:
+        lines = fh.readlines()
+    natoms = int(lines[1].strip())
+    for ln in lines[2:2 + natoms]:
+        try:
+            resid   = int(ln[0:5])
+            resname = ln[5:10].strip()
+            atname  = ln[10:15].strip()
+            atid    = int(ln[15:20])
+            x = float(ln[20:28]) * 10.0
+            y = float(ln[28:36]) * 10.0
+            z = float(ln[36:44]) * 10.0
+        except (ValueError, IndexError):
+            continue
+        yield resid, resname, atname, atid, x, y, z
+
+
+# CHARMM-GUI writes amino-acid residues with their standard 3-letter codes
+# (HSD/HSE/HSP for the CHARMM histidine tautomers).  Anything outside this set
+# and outside the glycan set is lipid / solvent / ion and is dropped by the
+# ECL2 extraction.
+_CHARMM_STANDARD_AA = frozenset({
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS",
+    "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP",
+    "TYR", "VAL", "HSD", "HSE", "HSP", "HID", "HIE", "HIP",
+})
+
+
+def extract_glycosylated_ecl2_from_charmm_gui(target: str, ecl2_range: tuple,
+                                                out_pdb: Path,
+                                                glycan_link_cutoff_A: float = 3.5,
+                                                glycan_network_cutoff_A: float = 3.5,
+                                                membrane_dir: Path = None,
+                                                glycan_resid_start: int = 500,
+                                                protein_chain: str = "A",
+                                                glycan_chain: str = "G",
+                                                ) -> dict:
+    """Carve ECL2 protein residues + covalently attached N-glycans out of a
+    CHARMM-GUI Membrane Builder system and write them as a single PDB.
+
+    Steps:
+      1. Parse structures/membrane/<target>/step5_input.gro (single frame,
+         continuous residue numbering — protein residues 1..N_prot, then
+         lipids/solvent/ions, then glycan residues at the end).
+      2. Keep protein atoms whose residue id ∈ ecl2_range (inclusive).
+      3. Find every Asn ND2 atom in that range → sequon anchor N atoms.
+      4. Seed the glycan set with any glycan residue that has ANY atom within
+         `glycan_link_cutoff_A` of an anchor ND2 (the covalent N-glycan bond
+         Asn-ND2 -> BGLCN-C1 is 1.45-1.50 Å; 3.5 Å is comfortable slack for
+         side-chain rotamer drift, still tight enough to reject a nearby but
+         un-linked tree).
+      5. Expand: repeatedly add any glycan residue with an atom within
+         `glycan_network_cutoff_A` of any already-kept glycan residue.  This
+         walks the O-glycosidic-bond network (each linkage ~1.44 Å) without
+         needing bond records.
+      6. Emit a PDB with protein residues at their ORIGINAL numbering (so
+         downstream helpers that key on residue numbers — scored_surface,
+         disulfide_pairs, membrane_occluded — still line up) and glycan
+         residues re-numbered starting at `glycan_resid_start` on a separate
+         chain.  Contiguous glycans within one tree are numbered consecutively.
+
+    Returns
+    -------
+    dict with keys
+        out_pdb            : Path to the written file
+        n_protein_res      : residues kept from ecl2_range
+        n_glycan_res       : glycan residues kept
+        sequon_residues    : sorted list of Asn resids that anchor a glycan
+        glycan_atom_count  : total glycan atoms written
+        protein_atom_count : total protein atoms written
+        anchor_pairs       : [(asn_resid, glycan_orig_resid, distance_A), ...]
+        caveats            : list[str] of assumptions that a later reader
+                             should double-check (empty when everything was
+                             clean; e.g. warns if a sequon Asn had NO glycan
+                             found in range).
+    """
+    if membrane_dir is None:
+        from . import config as _cfg
+        _root = Path(getattr(_cfg, "PROJECT_ROOT", "."))
+        _sub  = getattr(_cfg, "PHASE4_MEMBRANE_INPUT_DIR", "structures/membrane")
+        membrane_dir = _root / _sub / target
+    membrane_dir = Path(membrane_dir)
+    gro_path = membrane_dir / "step5_input.gro"
+    if not gro_path.is_file():
+        raise FileNotFoundError(
+            f"extract_glycosylated_ecl2_from_charmm_gui({target}): "
+            f"{gro_path} is absent. Run CHARMM-GUI Membrane Builder for "
+            f"{target} (with Glycan Reader for CD63's N130/N150/N172) and "
+            f"place step5_input.gro under that directory.")
+
+    lo, hi = int(ecl2_range[0]), int(ecl2_range[1])
+    # Buckets keyed by residue key.  Protein key = ("P", resid); glycan key =
+    # ("G", resid).  We keep atoms in file order per residue so PDB CONECTs
+    # are not needed downstream.
+    protein_atoms: dict = {}      # {resid: [(atname, x, y, z, resname), ...]}
+    glycan_atoms: dict = {}       # {resid: [(atname, x, y, z, resname), ...]}
+    asn_nd2: dict = {}            # {resid: (x, y, z)} for sequon anchor atoms
+
+    for resid, resname, atname, _atid, x, y, z in _parse_charmm_gui_gro_atoms(gro_path):
+        if _is_glycan_resname(resname):
+            glycan_atoms.setdefault(resid, []).append(
+                (atname, x, y, z, resname))
+            continue
+        if resname not in _CHARMM_STANDARD_AA:
+            continue
+        if not (lo <= resid <= hi):
+            continue
+        protein_atoms.setdefault(resid, []).append(
+            (atname, x, y, z, resname))
+        if resname == "ASN" and atname == "ND2":
+            asn_nd2[resid] = (x, y, z)
+
+    if not protein_atoms:
+        raise ValueError(
+            f"extract_glycosylated_ecl2_from_charmm_gui({target}): "
+            f"no protein residues found in ecl2_range={ecl2_range}. Verify "
+            f"that {gro_path} numbers CD63 from Met-1 (CHARMM-GUI convention). "
+            f"If the file starts from a different offset, adjust ecl2_range "
+            f"before calling this helper.")
+
+    # ── seed glycan set: any glycan residue with an atom within cutoff of an
+    #    ECL2 Asn ND2 (this is the Asn-ND2 -> BGLCN-C1 covalent link).
+    kept_glycan_resids: set = set()
+    anchor_pairs: list = []
+    _link2 = float(glycan_link_cutoff_A) ** 2
+    for asn_resid, (ax, ay, az) in asn_nd2.items():
+        best = None
+        for g_resid, atoms in glycan_atoms.items():
+            for _an, x, y, z, _rn in atoms:
+                d2 = (x - ax) ** 2 + (y - ay) ** 2 + (z - az) ** 2
+                if d2 <= _link2 and (best is None or d2 < best[1]):
+                    best = (g_resid, d2)
+        if best is not None:
+            kept_glycan_resids.add(best[0])
+            anchor_pairs.append(
+                (asn_resid, best[0], round(best[1] ** 0.5, 3)))
+
+    # ── expand the tree by geometric adjacency (O-glycosidic bond ~ 1.44 Å,
+    #    within cutoff by construction).  Repeat until fixed point.
+    _net2 = float(glycan_network_cutoff_A) ** 2
+    changed = True
+    while changed:
+        changed = False
+        for cand_resid, cand_atoms in glycan_atoms.items():
+            if cand_resid in kept_glycan_resids:
+                continue
+            for kept_resid in list(kept_glycan_resids):
+                kept_ats = glycan_atoms[kept_resid]
+                hit = False
+                for _an, x1, y1, z1, _rn in cand_atoms:
+                    for _an2, x2, y2, z2, _rn2 in kept_ats:
+                        if ((x1 - x2) ** 2 + (y1 - y2) ** 2
+                                + (z1 - z2) ** 2) <= _net2:
+                            hit = True
+                            break
+                    if hit:
+                        break
+                if hit:
+                    kept_glycan_resids.add(cand_resid)
+                    changed = True
+                    break
+
+    # ── emit PDB ────────────────────────────────────────────────────
+    out_pdb = Path(out_pdb)
+    out_pdb.parent.mkdir(parents=True, exist_ok=True)
+
+    protein_lines: list = []
+    glycan_lines: list = []
+    atom_serial = 1
+
+    def _fmt(atname: str) -> str:
+        """Right-align a 1-2 char element in the 4-char PDB atom-name field."""
+        s = atname.strip()
+        if len(s) < 4 and (s[0:1].isalpha() and (len(s) == 1
+                                                   or not s[0:1].isdigit())):
+            return f" {s:<3s}"
+        return f"{s:<4s}"
+
+    for resid in sorted(protein_atoms):
+        for atname, x, y, z, resname in protein_atoms[resid]:
+            elem = atname.strip()[0]
+            protein_lines.append(
+                f"ATOM  {atom_serial:5d} {_fmt(atname)} {resname:>3s} "
+                f"{protein_chain}{resid:4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           {elem:>1s}\n")
+            atom_serial += 1
+    protein_lines.append(f"TER   {atom_serial:5d}      "
+                          f"{next(iter(protein_atoms.values()))[0][4]:>3s} "
+                          f"{protein_chain}{max(protein_atoms):4d}\n")
+    atom_serial += 1
+
+    # Glycan residues: re-number consecutively starting from glycan_resid_start
+    # so they cannot collide with protein resids.  Ordering is by ORIGINAL
+    # resid, which for CHARMM-GUI's Glycan Reader keeps the same-tree residues
+    # contiguous (the trees are numbered per-anchor in Asn order).
+    sorted_glycans = sorted(kept_glycan_resids)
+    new_id_of = {}
+    for i, g_orig in enumerate(sorted_glycans):
+        new_id_of[g_orig] = glycan_resid_start + i
+        for atname, x, y, z, resname in glycan_atoms[g_orig]:
+            elem = atname.strip()[0]
+            # PDB residue-name field is 3 chars; CHARMM's 5-char BGLCN/BMAN
+            # names must be truncated for prepare_receptor4 to have any chance
+            # of parsing the file.  We use the 3-char aliases that PDB/GLYCAM
+            # accept: NAG (N-acetyl-glucosamine, BGLCN), BMA (β-mannose), MAN
+            # (α-mannose, AMAN), and generic GLY fallbacks by the first letter.
+            rn3 = _GLYCAN_3LETTER.get(resname.strip().upper(),
+                                       resname.strip()[:3].upper())
+            glycan_lines.append(
+                f"HETATM{atom_serial:5d} {_fmt(atname)} {rn3:>3s} "
+                f"{glycan_chain}{new_id_of[g_orig]:4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           {elem:>1s}\n")
+            atom_serial += 1
+    if glycan_lines:
+        glycan_lines.append(f"TER   {atom_serial:5d}\n")
+
+    with open(out_pdb, "w") as fh:
+        fh.write(f"REMARK  Glycosylated ECL2 for {target} extracted from "
+                 f"{gro_path.name}\n")
+        fh.write(f"REMARK  ECL2 residues {lo}-{hi} (chain {protein_chain}), "
+                 f"{len(sorted_glycans)} glycan residue(s) on chain "
+                 f"{glycan_chain} (renumbered from {glycan_resid_start})\n")
+        for asn_r, g_orig, d in anchor_pairs:
+            fh.write(f"REMARK  Sequon N{asn_r}: closest glycan resid "
+                     f"{g_orig} -> {new_id_of.get(g_orig, '?')} "
+                     f"(ND2--closest atom {d:.2f} A)\n")
+        fh.writelines(protein_lines)
+        fh.writelines(glycan_lines)
+        fh.write("END\n")
+
+    # Warnings and caveats a later reader should double-check.
+    caveats: list = []
+    unmatched_asns = sorted(a for a in asn_nd2
+                             if a not in {p[0] for p in anchor_pairs})
+    if unmatched_asns:
+        caveats.append(
+            f"{len(unmatched_asns)} Asn residue(s) in ECL2 have no glycan "
+            f"within {glycan_link_cutoff_A} A of ND2: {unmatched_asns}. Not "
+            f"every Asn is glycosylated (only NXS/T sequons are), so this is "
+            f"expected for non-sequon Asn — flag if a KNOWN sequon appears.")
+    if not sorted_glycans:
+        caveats.append(
+            "ZERO glycan residues were retained. If the CHARMM-GUI output "
+            "was supposed to carry N-glycans, verify Glycan Reader ran and "
+            "that the resnames match _GLYCAN_RESNAME_PREFIXES.")
+
+    return {
+        "out_pdb":            out_pdb,
+        "n_protein_res":      len(protein_atoms),
+        "n_glycan_res":       len(sorted_glycans),
+        "sequon_residues":    sorted({p[0] for p in anchor_pairs}),
+        "glycan_atom_count":  sum(len(glycan_atoms[g]) for g in sorted_glycans),
+        "protein_atom_count": sum(len(atoms)
+                                    for atoms in protein_atoms.values()),
+        "anchor_pairs":       anchor_pairs,
+        "glycan_orig_resids": sorted_glycans,
+        "glycan_new_resids":  [new_id_of[g] for g in sorted_glycans],
+        "glycan_chain":       glycan_chain,
+        "protein_chain":      protein_chain,
+        "caveats":            caveats,
+    }
+
+
+# 5-char CHARMM Glycan Reader names -> 3-char PDB residue codes.  Kept
+# small and explicit; anything not in the table is truncated to its first
+# three characters (BMAN -> BMA, AMAN -> AMA, which is what PDB uses anyway).
+_GLYCAN_3LETTER = {
+    "BGLCNA": "NAG",   # β-N-acetylglucosamine
+    "BGLCN":  "NAG",   # .gro truncation of the same
+    "BGLC":   "BGC",
+    "AGLC":   "AGC",
+    "BMAN":   "BMA",
+    "AMAN":   "MAN",
+    "BGAL":   "GAL",
+    "AGAL":   "GLA",
+    "ANE5":   "SIA",
+    "SIA":    "SIA",
+    "AFUC":   "FUC",
+    "FUC":    "FUC",
+    "NAG":    "NAG",
+    "MAN":    "MAN",
+}
+
+
+def extract_naked_ecl2_from_charmm_gui(target: str, ecl2_range: tuple,
+                                         out_pdb: Path,
+                                         membrane_dir: Path = None,
+                                         protein_chain: str = "A",
+                                         ) -> dict:
+    """Carve the ECL2 PROTEIN residues (NO glycans) out of a CHARMM-GUI
+    Membrane Builder system and write them as a single PDB, IN THE CG FRAME.
+
+    Companion to extract_glycosylated_ecl2_from_charmm_gui: same input file,
+    same residue selection, same numbering — but glycan atoms are stripped.
+
+    This is needed as the *receptor "seed"* for sequential MMSD (BLOCKER B1):
+    the ligand poses collected by Phase 3 sit in the CG frame of the glyco
+    receptor.  Merging those poses back into the AF-frame naked ECL2 (which
+    is what `ecl2_pdb` points at) puts the ligand tens of Å from the
+    protein and the sequential dock is meaningless.  This helper returns
+    the CG-frame naked-protein PDB so downstream `merge_ligand_into_receptor`
+    combines coordinates that share a frame.
+
+    Steps mirror the glyco variant (steps 1-2 only — no anchor search,
+    no glycan expansion).
+
+    Returns
+    -------
+    dict with keys
+        out_pdb            : Path to the written file
+        n_protein_res      : residues kept from ecl2_range
+        protein_atom_count : total protein atoms written
+        protein_chain      : chain id used
+        frame              : always "CHARMM_GUI" — tag for downstream sanity
+    """
+    if membrane_dir is None:
+        from . import config as _cfg
+        _root = Path(getattr(_cfg, "PROJECT_ROOT", "."))
+        _sub  = getattr(_cfg, "PHASE4_MEMBRANE_INPUT_DIR", "structures/membrane")
+        membrane_dir = _root / _sub / target
+    membrane_dir = Path(membrane_dir)
+    gro_path = membrane_dir / "step5_input.gro"
+    if not gro_path.is_file():
+        raise FileNotFoundError(
+            f"extract_naked_ecl2_from_charmm_gui({target}): "
+            f"{gro_path} is absent. Run CHARMM-GUI Membrane Builder for "
+            f"{target} and place step5_input.gro under that directory.")
+
+    lo, hi = int(ecl2_range[0]), int(ecl2_range[1])
+    protein_atoms: dict = {}   # {resid: [(atname, x, y, z, resname), ...]}
+
+    for resid, resname, atname, _atid, x, y, z in _parse_charmm_gui_gro_atoms(gro_path):
+        if _is_glycan_resname(resname):
+            continue                       # strip glycans
+        if resname not in _CHARMM_STANDARD_AA:
+            continue
+        if not (lo <= resid <= hi):
+            continue
+        protein_atoms.setdefault(resid, []).append(
+            (atname, x, y, z, resname))
+
+    if not protein_atoms:
+        raise ValueError(
+            f"extract_naked_ecl2_from_charmm_gui({target}): "
+            f"no protein residues found in ecl2_range={ecl2_range}. Verify "
+            f"that {gro_path} numbers {target} from Met-1 (CHARMM-GUI "
+            f"convention). If the file starts from a different offset, "
+            f"adjust ecl2_range before calling this helper.")
+
+    out_pdb = Path(out_pdb)
+    out_pdb.parent.mkdir(parents=True, exist_ok=True)
+
+    def _fmt(atname: str) -> str:
+        s = atname.strip()
+        if len(s) < 4 and (s[0:1].isalpha() and (len(s) == 1
+                                                   or not s[0:1].isdigit())):
+            return f" {s:<3s}"
+        return f"{s:<4s}"
+
+    protein_lines: list = []
+    atom_serial = 1
+    for resid in sorted(protein_atoms):
+        for atname, x, y, z, resname in protein_atoms[resid]:
+            elem = atname.strip()[0]
+            protein_lines.append(
+                f"ATOM  {atom_serial:5d} {_fmt(atname)} {resname:>3s} "
+                f"{protein_chain}{resid:4d}    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           {elem:>1s}\n")
+            atom_serial += 1
+    protein_lines.append(f"TER   {atom_serial:5d}      "
+                          f"{next(iter(protein_atoms.values()))[0][4]:>3s} "
+                          f"{protein_chain}{max(protein_atoms):4d}\n")
+
+    with open(out_pdb, "w") as fh:
+        fh.write(f"REMARK  Naked ECL2 for {target} extracted from "
+                 f"{gro_path.name} (CG frame, no glycans)\n")
+        fh.write(f"REMARK  ECL2 residues {lo}-{hi} on chain "
+                 f"{protein_chain}; use as sequential-MMSD receptor seed "
+                 f"so ligand poses share the CG frame\n")
+        fh.writelines(protein_lines)
+        fh.write("END\n")
+
+    return {
+        "out_pdb":            out_pdb,
+        "n_protein_res":      len(protein_atoms),
+        "protein_atom_count": sum(len(atoms)
+                                    for atoms in protein_atoms.values()),
+        "protein_chain":      protein_chain,
+        "frame":              "CHARMM_GUI",
+    }
+
+
+def compute_glyco_grid_box(pdb_path: Path,
+                            asn_residues: list,
+                            glycan_chain: str = "G",
+                            buffer_A: float = 5.0,
+                            spacing_A: float = None) -> tuple:
+    """Grid box that covers the Asn sequon centre + all attached glycans.
+
+    Centre = mean CA of the listed Asn residues (or CB fallback), which sits
+    at the base of the tri-mannose fan.  Size = 2 × (max distance from centre
+    to any glycan atom + buffer_A), rounded up to even grid points at the
+    given spacing.  Buffer_A defaults to 5.0 Å so a docked ligand still has
+    slack around the glycan tips.
+
+    Returns (center_xyz_tuple, npts_xyz_tuple).
+    """
+    if spacing_A is None:
+        from .config import AUTODOCK4_SPACING
+        spacing_A = AUTODOCK4_SPACING
+    from Bio.PDB import PDBParser
+    parser = PDBParser(QUIET=True)
+    struct = parser.get_structure("g", str(pdb_path))
+    asn_set = set(int(r) for r in asn_residues)
+    ca_pts = []
+    glycan_pts = []
+    for atom in struct.get_atoms():
+        res = atom.get_parent()
+        chain_id = res.get_parent().id
+        resid = res.get_id()[1]
+        resname = res.get_resname().strip()
+        if chain_id == glycan_chain or _is_glycan_resname(resname):
+            glycan_pts.append(atom.get_coord())
+            continue
+        if resid in asn_set and resname == "ASN":
+            if atom.get_name().strip() in ("CA", "CB"):
+                ca_pts.append(atom.get_coord())
+    if not ca_pts:
+        # M6 FIX (audit): silently returning the naked grid here made every
+        # downstream consumer read `grid_center_glyco` / `grid_npts_glyco`
+        # as the *glyco* grid when in fact they carried the naked centre and
+        # missed the tri-mannose fan entirely. In glyco mode this is a
+        # RUN-INVALIDATING mislabelling — raise instead of hiding it. The
+        # caller is Phase 1's 6b-glyco branch which already logs the failure
+        # and continues with the naked receptor, but the JSON no longer
+        # publishes a "glyco grid" key that never was one.
+        raise RuntimeError(
+            f"compute_glyco_grid_box({pdb_path}): NO Asn Cα/Cβ found among "
+            f"asn_residues={sorted(asn_set)} on chain != {glycan_chain!r}. "
+            f"Either the sequon list is empty (no NXS/T Asn detected in "
+            f"ecl2_range) or the PDB does not contain those residues. "
+            f"Refusing to publish the naked-protein centre as the glyco "
+            f"grid — that would silently give the docking box no glycan "
+            f"coverage.")
+    import numpy as _np
+    center = _np.mean(ca_pts, axis=0)
+    if glycan_pts:
+        d = _np.linalg.norm(_np.array(glycan_pts) - center, axis=1)
+        half_extent = float(d.max()) + float(buffer_A)
+    else:
+        half_extent = 20.0            # safe default
+    npts_axis = int(_np.ceil((2 * half_extent) / spacing_A))
+    if npts_axis % 2 == 1:
+        npts_axis += 1
+    center_t = tuple(round(float(c), 3) for c in center)
+    return center_t, (npts_axis, npts_axis, npts_axis)
 
