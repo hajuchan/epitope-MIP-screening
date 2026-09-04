@@ -1,0 +1,4 @@
+[chain] n=160 종료 2026-09-04T01:03:44+09:00 — n=629 시작
+[chain] n=629 종료 rc=0 2026-09-04T01:03:57+09:00
+  Placed 629 monomers in shell r=5.2-7.0 nm (min_sep=1.0 nm)
+  BSA/BSA_TEOS_APTES#n629@TEOS503_APTES126: NO REPLICA PASSED ACCEPTANCE — phase 4 result for this (target, pc_id) is marked success=False. Reasons: 0 / 1 replicas passed acceptance; rep_0: md_completed, analysis_ok, converged, rmsd_equilibrated

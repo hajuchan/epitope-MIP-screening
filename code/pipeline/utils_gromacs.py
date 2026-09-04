@@ -3940,9 +3940,61 @@ def _include_monomers_in_topology(work_dir: Path, monomer_itps: list,
     if seed is not None:
         logger.info(f"  Monomer placement RNG seeded with {seed}")
     n_monomers = len(monomer_itps)
-    min_dist_nm = 1.0  # minimum distance between monomer centers
     r_inner = prot_radius + 0.3  # start just outside protein surface
-    r_outer = r_inner + 1.0      # thin shell → 9nm box target (Rajpal 2024)
+
+    # SHELL STAYS THIN; min_sep ABSORBS THE COUNT.  # BEHAVIOUR CHANGE 2026-09-04
+    # The shell used to be a fixed 1.0 nm ("thin shell -> 9nm box target,
+    # Rajpal 2024"). A first attempt at high copy counts widened the shell
+    # instead, which does not work here: editconf sizes the box around the whole
+    # solute (protein AND monomers) so that the solute minimum-image separation
+    # clears 2*rvdw, so a wider shell buys a bigger box and the concentration
+    # barely moves. Measured: n=300 in a thin shell gave a 15.0 nm box; n=240 in
+    # the widened shell gave 16.1 nm, i.e. MORE monomers at LOWER concentration.
+    #
+    # Concentration is therefore controlled by min_sep, not by shell thickness.
+    # Shrinking min_sep packs more copies into the SAME thin shell, so the box
+    # stays put and the concentration rises as intended. min_sep is only the
+    # placement separation of an initial condition; energy minimisation relaxes
+    # the resulting contacts, and TEOS/APTES span ~0.6 nm, so the 0.7 nm floor
+    # below still starts them non-overlapping.
+    #
+    # PACK_OK is the packing fraction that placement is known to reach: n=300
+    # needed 0.39 of the thin shell and placed with zero fallbacks. Below it,
+    # min_sep and r_outer are left exactly as the pre-2026-09 code had them, so
+    # every already-run system (n=100/160/300) rebuilds bit-identically. Above
+    # it, min_sep is sized for the roomier PACK_TARGET, because placement near
+    # the random-close-packing limit needs attempts to spare and the loop below
+    # gives up after 500.
+    PACK_OK = 0.40      # demonstrated attainable (n=300 -> 0.39, no fallbacks)
+    PACK_TARGET = 0.34  # what a resized min_sep aims for, with attempts to spare
+    MIN_SEP_FLOOR = 0.7 # nm; below this the initial condition really does clash
+
+    min_dist_nm = 1.0  # minimum distance between monomer centers
+    r_outer = r_inner + 1.0
+    _v_shell = (4.0 / 3.0) * math.pi * (r_outer ** 3 - r_inner ** 3)
+    _v_sphere = (4.0 / 3.0) * math.pi * (min_dist_nm / 2.0) ** 3
+
+    if n_monomers > 0 and n_monomers * _v_sphere > PACK_OK * _v_shell:
+        # Too many for the thin shell at min_sep 1.0 nm: tighten the separation.
+        min_dist_nm = 2.0 * (PACK_TARGET * _v_shell
+                             / (n_monomers * (4.0 / 3.0) * math.pi)) ** (1.0 / 3.0)
+        if min_dist_nm < MIN_SEP_FLOOR:
+            # Even at the floor they do not fit; now the shell has to grow, and
+            # the caller must accept the larger box (and lower concentration).
+            min_dist_nm = MIN_SEP_FLOOR
+            _v_needed = (n_monomers * (4.0 / 3.0) * math.pi
+                         * (min_dist_nm / 2.0) ** 3 / PACK_TARGET)
+            r_outer = (r_inner ** 3 + 3.0 * _v_needed / (4.0 * math.pi)) ** (1.0 / 3.0)
+            logger.warning(
+                f"  {n_monomers} copies exceed the thin shell even at the "
+                f"{MIN_SEP_FLOOR} nm min_sep floor; widening the shell to "
+                f"r_outer={r_outer:.2f} nm. This GROWS the box and so LOWERS "
+                f"the concentration - check the built box before interpreting.")
+        else:
+            logger.info(
+                f"  {n_monomers} copies exceed the thin shell at min_sep 1.0 nm; "
+                f"min_sep reduced to {min_dist_nm:.2f} nm to keep the shell (and "
+                f"thus the box, and thus the concentration) unchanged.")
 
     placed_centers = []
     monomer_positions = []  # pre-computed (x, y, z) for each monomer
@@ -3970,18 +4022,23 @@ def _include_monomers_in_topology(work_dir: Path, monomer_itps: list,
                 monomer_positions.append((x, y, z))
                 break
         else:
-            # Fallback: expand radius and place
-            r = r_outer + mi * 0.3
-            angle1 = rng.uniform(0, 2 * math.pi)
-            angle2 = rng.uniform(-math.pi/2, math.pi/2)
-            x = prot_center[0] + r * math.cos(angle1) * math.cos(angle2)
-            y = prot_center[1] + r * math.sin(angle1) * math.cos(angle2)
-            z = prot_center[2] + r * math.sin(angle2)
-            placed_centers.append((x, y, z))
-            monomer_positions.append((x, y, z))
+            # NO SILENT FALLBACK.  # BEHAVIOUR CHANGE 2026-09
+            # This used to place copy mi at r_outer + 0.3*mi nm. Once the shell
+            # saturates that runs away: at n=629 the last molecules landed 195 nm
+            # from the protein, editconf built a 368 nm box, and `gmx solvate`
+            # aborted trying to realloc 1.8e19 bytes. The run still cost a full
+            # setup before failing, and the cause was invisible in the log.
+            # Refuse here, where the reason is obvious and nothing has been built.
+            raise RuntimeError(
+                f"monomer placement failed: could not place copy {mi + 1} of "
+                f"{n_monomers} in the shell r={r_inner:.2f}-{r_outer:.2f} nm at "
+                f"min_sep={min_dist_nm:.2f} nm after 500 attempts ({len(placed_centers)} "
+                f"placed). The shell is saturated. Either lower the copy count, "
+                f"lower min_sep, or widen the shell — do NOT let the placer push "
+                f"molecules outward, which silently builds an unusably large box.")
 
     logger.info(f"  Placed {len(monomer_positions)} monomers in shell "
-                f"r={r_inner:.1f}-{r_outer:.1f} nm (min_sep={min_dist_nm} nm)")
+                f"r={r_inner:.1f}-{r_outer:.1f} nm (min_sep={min_dist_nm:.2f} nm)")
 
     # Collect monomer coordinates and topology edits
     seen_itps = {}   # itp_name → (mol_name, itp_src)

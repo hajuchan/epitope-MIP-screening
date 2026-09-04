@@ -1,0 +1,65 @@
+[config] experiment=BSA (MIP_EXPERIMENT)  output=/home/chan/Research/Monomer_screening_in_Bio/results_BSA_hydrolyzed  unconsumed_keys=8
+=== LOADING n_total=629  (TEOS 503 / APTES 126, 4:1) ===
+  PROPKA: 252 site-specific pKa values from BSA_ecl2_pH7p87.pka
+  pH 7.87 pre-flight: the box will carry a protein of -18 e. Henderson-Hasselbalch expects -18.04 e (residual -0.04 e).
+  MM-GBSA window 20-30 ns fits inside a 30 ns leg
+
+  RATIO GRID for BSA/BSA_TEOS_APTES#n629: 1 composition(s) x 1 replica(s) x 30 ns = 30 ns of production MD [fingerprint 8e526a5f93dc6c47]
+  n_replicas=1: THIS GRID CANNOT RANK. One trajectory per point has no error bar, so the tie rule cannot separate any two points and every point will be reported as tied. Use it to shake the pipeline out, never to choose a ratio. MEASURED basis: one 350 ns leg re-analysed in 50 non-overlapping 7 ns windows gave 19 distinct rankings of its 4 monomers.
+    [0] TEOS503_APTES126  n_total=629 x_functional=0.2003
+
+  ── GRID POINT 1/1: TEOS503_APTES126 (TEOSx503, APTESx126) ──
+  pH 7.87: 126 APTES split into 6 neutral + 120 APTESH (pKa 9.20 -> 95.5% protonated). The +120 e enters genion's neutralisation — against a negative BSA protein it simply removes that many Na+; only a net-positive box draws Cl-. MD_IONIC_STRENGTH stays 0.0, so DI water is still counter-ions only.
+  System: epitope + 629 monomers (APTESx6, APTESHx120, TEOSx503) — sol-gel, crosslinker 80 mol% (target 80 mol%, source explicit_copies)
+  Parameterizing monomers...
+  APTES: silicon -- acpype/GAFF2 + PolCA Si override
+  APTES: PolCA Si override applied -- atomtype Si→Si3 (sigma=0.493, eps=0.108), 4 Si bonds and 9 Si angles corrected off the parmchk 'same as c3' substitutes
+  APTES: net charge verified qtot=-0.00000 e (formal +0)
+  APTESH: silicon -- acpype/GAFF2 + PolCA Si override
+  APTESH: net formal charge +1 from the library SMILES -- passing it to acpype (-n 1)
+  APTESH: PolCA Si override applied -- atomtype Si→Si3 (sigma=0.493, eps=0.108), 4 Si bonds and 9 Si angles corrected off the parmchk 'same as c3' substitutes
+  APTESH: net charge verified qtot=+1.00000 e (formal +1)
+  TEOS: silicon -- acpype/GAFF2 + PolCA Si override
+  TEOS: PolCA Si override applied -- atomtype Si→Si4 (sigma=0.464, eps=0.108), 4 Si bonds and 10 Si angles corrected off the parmchk 'same as c3' substitutes
+  TEOS: net charge verified qtot=-0.00000 e (formal +0)
+  Total monomer molecules: 629
+Setting up protein topology...
+  PROPKA: 252 site-specific pKa values from BSA_ecl2_pH7p87_fixed.pka
+  pH 7.87 protonation is LIVE: pdb2gmx flags ['-lys', '-his'], 0 CYM rename(s). Model charges -- HH continuum -18.04 e, discrete -18 e, force-field representable -18 e.
+  Built protein net charge: -18.000 e (pH 7.87 model target -18, states_fully_determined=True)
+Including 629 monomer(s) in topology...
+  Protein center: (0.85, 2.16, 10.68) nm, radius: 4.87 nm
+  Monomer placement RNG seeded with 753600843
+  Placed 629 monomers in shell r=5.2-7.0 nm (min_sep=1.0 nm)
+Topology updated: 629 monomers, 16259 total atoms → /home/chan/Research/Monomer_screening_in_Bio/results_BSA_hydrolyzed/phase4/BSA/BSA_TEOS_APTES/loading_axis/n629/TEOS503_APTES126/rep_0/md/complex.gro
+Setting up simulation box...
+  Box: dodecahedron, -d 1.20 nm, solute minimum-image separation 16.13 nm (>= 2.40 nm required for rvdw=1.0 nm)
+gmx solvate -cp boxed.gro -cs spc216.gro -o solvated.gro -p topol.top failed (rc=1):
+  WARNING: Masses and atomic (Van der Waals) radii will be guessed
+           based on residue and atom names, since they could not be
+           definitively assigned from the information in your input
+           files. These guessed numbers might deviate from the mass
+  Fatal error:
+  Not enough memory. Failed to realloc 18446744047127856640 bytes for
+  atoms_->atom, atoms_->atom=(nil)
+  (called from file
+MD pipeline failed: gmx solvate -cp boxed.gro -cs spc216.gro -o solvated.gro -p topol.top failed (rc=1):
+  WARNING: Masses and atomic (Van der Waals) radii will be guessed
+           based on residue and atom names, since they could not be
+           definitively assigned from the information in your input
+           files. These guessed numbers might deviate from the mass
+  Fatal error:
+  Not enough memory. Failed to realloc 18446744047127856640 bytes for
+  atoms_->atom, atoms_->atom=(nil)
+  (called from file
+    Composition verified against topol.top: {'APTES': 6, 'APTESH': 120, 'TEOS': 503}
+  REPLICA 0 REJECTED for BSA/BSA_TEOS_APTES#n629@TEOS503_APTES126 — failed: md_completed, analysis_ok, converged, rmsd_equilibrated. It will NOT be pooled.
+  BSA/BSA_TEOS_APTES#n629@TEOS503_APTES126: NO REPLICA PASSED ACCEPTANCE — phase 4 result for this (target, pc_id) is marked success=False. Reasons: 0 / 1 replicas passed acceptance; rep_0: md_completed, analysis_ok, converged, rmsd_equilibrated
+  Grid point TEOS503_APTES126 → done (saved /home/chan/Research/Monomer_screening_in_Bio/results_BSA_hydrolyzed/phase4/BSA/BSA_TEOS_APTES/loading_axis/n629/TEOS503_APTES126/point_result.json)
+  RATIO GRID: no grid point is both complete and accepted (1/1 complete, 0 accepted, 0 failed) — NO optimum is reported. A grid that does not rank is a result; a grid ranked on rejected legs is not.
+{
+ "n_points": 1,
+ "n_points_complete": 1,
+ "n_points_accepted": 0,
+ "success": false
+}
