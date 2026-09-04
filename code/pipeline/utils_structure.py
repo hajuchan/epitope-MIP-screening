@@ -23,9 +23,30 @@ logger = logging.getLogger(__name__)
 # prepare_receptor4.py is a PYTHON 2 script. It must be run with the python2.7
 # that ships in the GROMACS conda env; running it under the MIPscreen python3
 # is a SyntaxError, which is how it silently lost to obabel before.
-_ADFR_PY27 = Path("~/anaconda3/envs/GROMACS/bin/python2.7").expanduser()
-_ADFR_PREPARE_RECEPTOR = Path(
-    "~/anaconda3/envs/GROMACS/bin/prepare_receptor4.py").expanduser()
+#
+# On machines that use miniconda3 instead of anaconda3 (e.g., SP workstation),
+# the anaconda3 path doesn't exist → ADFR detection failed → pipeline silently
+# fell back to pybel (NO pH MODEL) → autogrid4 rejected the receptor for having
+# no partial charges → Phase 3 cross-docking failed → Phase 4 crashed on None
+# crosslinker. Override the anaconda3 hardcode with env vars.
+import os as _os
+_ADFR_PY27 = Path(_os.environ.get(
+    "ADFR_PY27",
+    "~/anaconda3/envs/GROMACS/bin/python2.7")).expanduser()
+_ADFR_PREPARE_RECEPTOR = Path(_os.environ.get(
+    "ADFR_PREPARE_RECEPTOR",
+    "~/anaconda3/envs/GROMACS/bin/prepare_receptor4.py")).expanduser()
+
+# Auto-discovery: if the anaconda3 default doesn't exist, try miniconda3.
+if not _ADFR_PY27.exists():
+    for _alt_root in ("~/miniconda3/envs/GROMACS/bin",
+                       "~/mambaforge/envs/GROMACS/bin",
+                       "~/miniforge3/envs/GROMACS/bin"):
+        _alt = Path(_alt_root).expanduser()
+        if (_alt / "python2.7").exists() and (_alt / "prepare_receptor4.py").exists():
+            _ADFR_PY27 = _alt / "python2.7"
+            _ADFR_PREPARE_RECEPTOR = _alt / "prepare_receptor4.py"
+            break
 
 
 # ── PDB / AlphaFold Download ───────────────────────────────────
